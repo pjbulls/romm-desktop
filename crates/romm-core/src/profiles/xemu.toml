@@ -1,0 +1,37 @@
+id = "xemu"
+name = "xemu"
+# Original Xbox only. Xbox 360 (`xbox360`) is deliberately not claimed: its emulator
+# (Xenia) is effectively Windows-only.
+platforms = ["xbox"]
+
+[detect]
+linux_bins = ["xemu"]
+windows_exes = [
+  "{programfiles}/xemu/xemu.exe",
+  "{localappdata}/Programs/xemu/xemu.exe",
+]
+flatpak_id = "app.xemu.xemu"
+
+# `-dvd_path <iso>` is xemu's documented CLI argument (https://xemu.app/docs/cli/).
+# Add `-full-screen` via the per-emulator extra args if wanted.
+[launch]
+args = ["-dvd_path", "{rom}"]
+
+# xemu uses SDL_GetPrefPath("xemu", "xemu"), or the folder holding xemu.toml when
+# that file sits next to the executable (portable mode).
+[data]
+linux = ["{xdg_data}/xemu/xemu"]
+flatpak = ["{home}/.var/app/app.xemu.xemu/data/xemu/xemu"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/xemu.toml" },
+  "{appdata}/xemu/xemu",
+]
+
+# Launch-only: there is intentionally no [saves], [states] or [bios] section.
+#
+# * Saves AND xemu's snapshots live inside the virtual hard disk image
+#   (xbox_hdd.qcow2), not as individual files, so neither `diff` nor `stem` mode can
+#   see them. Syncing the whole multi-GB image as one unit would turn any conflict
+#   between two devices into a whole-disk conflict.
+# * xemu takes its BIOS, boot ROM and HDD image from paths configured inside xemu
+#   itself, so there is no BIOS folder to install into.

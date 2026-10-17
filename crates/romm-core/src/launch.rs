@@ -71,6 +71,37 @@ mod tests {
     }
 
     #[test]
+    fn azahar_game_goes_last_so_extra_flags_still_work() {
+        let p = profiles::get("azahar").unwrap();
+        let native = Installed { profile_id: "azahar".into(), kind: InstallKind::Native("/usr/bin/azahar".into()) };
+        let rom = Path::new("/g/Super Mario 3D Land.cci");
+        let c = build_command(&p, &native, rom, None, &[]).unwrap();
+        assert_eq!(c.as_std().get_program(), "/usr/bin/azahar");
+        assert_eq!(args_of(&c), ["/g/Super Mario 3D Land.cci"]);
+        // Azahar only takes the game from the last argument when other flags are present.
+        let c = build_command(&p, &native, rom, None, &["-f".into()]).unwrap();
+        assert_eq!(args_of(&c), ["-f", "/g/Super Mario 3D Land.cci"]);
+
+        let fp = Installed { profile_id: "azahar".into(), kind: InstallKind::Flatpak("org.azahar_emu.Azahar".into()) };
+        let c = build_command(&p, &fp, rom, None, &[]).unwrap();
+        assert_eq!(c.as_std().get_program(), "flatpak");
+        assert_eq!(args_of(&c), ["run", "org.azahar_emu.Azahar", "/g/Super Mario 3D Land.cci"]);
+    }
+
+    #[test]
+    fn xemu_loads_the_disc_with_dvd_path() {
+        let p = profiles::get("xemu").unwrap();
+        let native = Installed { profile_id: "xemu".into(), kind: InstallKind::Native("/usr/bin/xemu".into()) };
+        let rom = Path::new("/g/Halo - Combat Evolved.iso");
+        let c = build_command(&p, &native, rom, None, &["-full-screen".into()]).unwrap();
+        assert_eq!(args_of(&c), ["-full-screen", "-dvd_path", "/g/Halo - Combat Evolved.iso"]);
+
+        let fp = Installed { profile_id: "xemu".into(), kind: InstallKind::Flatpak("app.xemu.xemu".into()) };
+        let c = build_command(&p, &fp, rom, None, &[]).unwrap();
+        assert_eq!(args_of(&c), ["run", "app.xemu.xemu", "-dvd_path", "/g/Halo - Combat Evolved.iso"]);
+    }
+
+    #[test]
     fn duckstation_stops_option_parsing_before_path() {
         let p = profiles::get("duckstation").unwrap();
         let i = Installed { profile_id: "duckstation".into(), kind: InstallKind::Native("/x/duckstation-qt".into()) };

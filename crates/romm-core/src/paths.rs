@@ -180,6 +180,52 @@ mod tests {
     }
 
     #[test]
+    fn azahar_data_roots_per_install_kind() {
+        let t = tempfile::tempdir().unwrap();
+        let p = profiles::get("azahar").unwrap();
+        let mut c = ctx(t.path());
+        c.appdata = Some(t.path().join("AppData"));
+
+        let r = resolve_data_root(&p, false, Os::Linux, &c).unwrap();
+        assert_eq!((r.path, r.exists), (t.path().join("home/.local/share/azahar-emu"), false));
+        let r = resolve_data_root(&p, true, Os::Linux, &c).unwrap();
+        assert!(r.path.ends_with(".var/app/org.azahar_emu.Azahar/data/azahar-emu"), "{r:?}");
+
+        // Windows: %APPDATA%/Azahar, unless a `user` folder sits next to the executable.
+        let exe_dir = t.path().join("portable-az");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        c.exe_dir = Some(exe_dir.clone());
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!(r.path, t.path().join("AppData/Azahar"));
+        std::fs::create_dir_all(exe_dir.join("user")).unwrap();
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!((r.path, r.exists), (exe_dir.join("user"), true));
+    }
+
+    #[test]
+    fn xemu_data_roots_per_install_kind() {
+        let t = tempfile::tempdir().unwrap();
+        let p = profiles::get("xemu").unwrap();
+        let mut c = ctx(t.path());
+        c.appdata = Some(t.path().join("AppData"));
+
+        let r = resolve_data_root(&p, false, Os::Linux, &c).unwrap();
+        assert_eq!(r.path, t.path().join("home/.local/share/xemu/xemu"));
+        let r = resolve_data_root(&p, true, Os::Linux, &c).unwrap();
+        assert!(r.path.ends_with(".var/app/app.xemu.xemu/data/xemu/xemu"), "{r:?}");
+
+        // Windows: %APPDATA%/xemu/xemu, unless xemu.toml sits next to the executable (portable).
+        let exe_dir = t.path().join("portable-xemu");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        c.exe_dir = Some(exe_dir.clone());
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!(r.path, t.path().join("AppData/xemu/xemu"));
+        std::fs::write(exe_dir.join("xemu.toml"), "").unwrap();
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!((r.path, r.exists), (exe_dir, true));
+    }
+
+    #[test]
     fn windows_portable_requires_marker() {
         let t = tempfile::tempdir().unwrap();
         let exe_dir = t.path().join("Dolphin");

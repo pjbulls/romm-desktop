@@ -228,7 +228,9 @@ try:
     sel_after = js("return document.activeElement.value")
     check("left/right changes a dropdown", sel_after != sel_before and sel_after != "", f"{sel_before!r} → {sel_after!r}")
     time.sleep(0.4)
-    check("and the choice is saved", '= "retroarch"' in open(f"{HOME}/rommhome/config/config.toml").read(), open(f"{HOME}/rommhome/config/config.toml").read()[-200:])
+    emu = sel_after.split(":")[0]   # `dolphin`, or `retroarch` for a `retroarch:<core>` pick
+    cfg = open(f"{HOME}/rommhome/config/config.toml").read()
+    check("and the choice is saved", f'= "{emu}"' in cfg, cfg[-200:])
     press("left")
 
     press("select")

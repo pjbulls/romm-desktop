@@ -1,5 +1,5 @@
 //! Data-driven emulator profiles. Adding an emulator means adding a TOML file,
-//! not writing Rust. The five built-ins are embedded in the binary.
+//! not writing Rust. The built-ins are embedded in the binary.
 
 use serde::Deserialize;
 
@@ -131,6 +131,8 @@ const BUILTIN: &[&str] = &[
     include_str!("ppsspp.toml"),
     include_str!("duckstation.toml"),
     include_str!("pcsx2.toml"),
+    include_str!("azahar.toml"),
+    include_str!("xemu.toml"),
 ];
 
 pub fn builtin() -> Vec<Profile> {
@@ -148,15 +150,27 @@ pub fn get(id: &str) -> Option<Profile> {
 mod tests {
     use super::*;
 
+    /// Emulators that can be launched but not synced: xemu keeps saves and snapshots
+    /// inside its virtual hard disk image, which file-level sync cannot handle safely.
+    const LAUNCH_ONLY: &[&str] = &["xemu"];
+
     #[test]
     fn all_builtin_profiles_parse_and_are_complete() {
         let ps = builtin();
         let ids: Vec<_> = ps.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["retroarch", "dolphin", "ppsspp", "duckstation", "pcsx2"]);
+        assert_eq!(ids, ["retroarch", "dolphin", "ppsspp", "duckstation", "pcsx2", "azahar", "xemu"]);
         for p in &ps {
             assert!(p.launch.args.iter().any(|a| a == "{rom}"), "{} launch has no {{rom}}", p.id);
-            assert!(p.saves.is_some(), "{} has no save rule", p.id);
-            assert!(p.states.is_some(), "{} has no state rule", p.id);
+            if LAUNCH_ONLY.contains(&p.id.as_str()) {
+                assert!(
+                    p.saves.is_none() && p.states.is_none() && p.bios.is_none(),
+                    "{} is listed as launch-only but declares save/state/bios rules; remove it from LAUNCH_ONLY",
+                    p.id
+                );
+            } else {
+                assert!(p.saves.is_some(), "{} has no save rule", p.id);
+                assert!(p.states.is_some(), "{} has no state rule", p.id);
+            }
             assert!(!p.data.linux.is_empty() && !p.data.windows.is_empty(), "{} lacks OS data dirs", p.id);
         }
         assert!(get("retroarch").unwrap().launch.args.contains(&"{core}".to_string()));
@@ -164,7 +178,7 @@ mod tests {
 
     #[test]
     fn diff_profiles_declare_roots() {
-        for id in ["dolphin", "ppsspp", "duckstation", "pcsx2"] {
+        for id in ["dolphin", "ppsspp", "duckstation", "pcsx2", "azahar"] {
             let r = get(id).unwrap().saves.unwrap();
             assert_eq!(r.mode, SaveMode::Diff);
             assert!(!r.roots.is_empty(), "{id}");
@@ -178,11 +192,46 @@ mod state_rule_tests {
 
     #[test]
     fn diff_emulators_name_a_state_folder() {
-        for (id, dir) in [("dolphin", "StateSaves"), ("ppsspp", "PPSSPP_STATE"), ("duckstation", "savestates"), ("pcsx2", "sstates")] {
+        for (id, dir) in [
+            ("dolphin", "StateSaves"),
+            ("ppsspp", "PPSSPP_STATE"),
+            ("duckstation", "savestates"),
+            ("pcsx2", "sstates"),
+            ("azahar", "states"),
+        ] {
             let r = get(id).unwrap().states.unwrap();
             assert_eq!(r.mode, SaveMode::Diff);
             assert_eq!(r.dir.as_deref(), Some(dir), "{id}");
         }
         assert_eq!(get("retroarch").unwrap().states.unwrap().mode, SaveMode::Stem);
+    }
+}
+
+#[cfg(test)]
+mod azahar_xemu_tests {
+    use super::*;
+
+    #[test]
+    fn azahar_watches_game_saves_and_extdata_under_the_sd_card() {
+        let p = get("azahar").unwrap();
+        assert_eq!(p.platforms, ["3ds", "new-nintendo-3ds"]);
+        let roots = p.saves.unwrap().roots;
+        assert_eq!(roots.len(), 2);
+        // Literal, traversal-free paths (snapshot() rejects anything else), and narrower
+        // than the whole SD card so installed titles aren't re-hashed every session.
+        for r in &roots {
+            assert!(r.starts_with("sdmc/Nintendo 3DS/"), "{r}");
+            assert!(crate::saves::safe_rel(r).is_some(), "{r}");
+        }
+        assert!(roots.iter().any(|r| r.ends_with("/title/00040000")));
+        assert!(roots.iter().any(|r| r.ends_with("/extdata")));
+    }
+
+    #[test]
+    fn xemu_is_original_xbox_only_and_launch_only() {
+        let p = get("xemu").unwrap();
+        assert_eq!(p.platforms, ["xbox"]);
+        assert_eq!(p.launch.args, ["-dvd_path", "{rom}"]);
+        assert!(p.saves.is_none() && p.states.is_none() && p.bios.is_none());
     }
 }

@@ -16,6 +16,14 @@ export interface LoginArgs {
   deviceName?: string;
 }
 
+/** One thing that can play a platform: a standalone emulator or RetroArch with a core. */
+export interface EmulatorChoice {
+  /** `dolphin` or `retroarch:gambatte`; pass back to `setPlatformChoice` unchanged. */
+  value: string;
+  label: string;
+  installed: boolean;
+}
+
 export interface Platform {
   id: number;
   slug: string;
@@ -25,6 +33,14 @@ export interface Platform {
   emulator: string | null;
   emulatorName: string | null;
   emulatorInstalled: boolean;
+  /** Only emulators/cores that can actually play this platform. Empty = nothing can yet. */
+  choices: EmulatorChoice[];
+  /** The saved choice's `value`, or "" for Automatic. */
+  selected: string;
+  /** What Automatic resolves to; null when nothing can play the platform. */
+  automaticLabel: string | null;
+  /** A saved emulator that can't play this platform and is being ignored. */
+  ignoredOverride: string | null;
 }
 
 export interface Game {

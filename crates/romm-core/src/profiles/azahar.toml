@@ -1,0 +1,50 @@
+id = "azahar"
+name = "Azahar"
+# `new-nintendo-3ds` is a separate RomM platform; Azahar emulates the New 3DS too.
+platforms = ["3ds", "new-nintendo-3ds"]
+
+[detect]
+# The desktop binary is `azahar` (CMake OUTPUT_NAME in src/citra_meta).
+linux_bins = ["azahar"]
+# Install locations are best guesses (Azahar ships a zip, so there is no fixed
+# default); anything else is found on PATH or via the per-emulator path override.
+windows_exes = [
+  "{localappdata}/Programs/Azahar/azahar.exe",
+  "{programfiles}/Azahar/azahar.exe",
+]
+flatpak_id = "org.azahar_emu.Azahar"
+
+# A lone path argument opens the game. When extra flags are present Azahar takes
+# the game from the LAST argument, which is where we put it (extra args come first).
+[launch]
+args = ["{rom}"]
+
+# The data root is Azahar's "user directory", which holds sdmc/, nand/ and states/.
+# Linux/Windows names come from Azahar's file_util.cpp / common_paths.h.
+[data]
+linux = ["{xdg_data}/azahar-emu"]
+flatpak = ["{home}/.var/app/org.azahar_emu.Azahar/data/azahar-emu"]
+windows = [
+  # Portable mode: a `user` folder next to the executable.
+  { path = "{exe_dir}/user", requires = "{exe_dir}/user" },
+  "{appdata}/Azahar",
+]
+
+# Game saves live in the emulated SD card: sdmc/Nintendo 3DS/<id0>/<id1>/title/00040000/<tid>/data/
+# and "extra data" in .../extdata/. Both ids are all zeros unless the user imported a
+# real console's movable.sed; roots are literal paths (no globs), so such a setup would
+# need these edited. Watching only `title/00040000` + `extdata` instead of all of
+# `sdmc/` keeps the before/after hashing cheap: installed (CIA) titles keep large
+# content files under title/, but only for titles installed there, not for cartridge dumps.
+[saves]
+mode = "diff"
+roots = [
+  "sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title/00040000",
+  "sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/extdata",
+]
+
+# Save states are states/<16-hex program id>.<slot>.cst: one file per slot in a flat
+# folder, with nothing else stored alongside.
+[states]
+mode = "diff"
+dir = "states"

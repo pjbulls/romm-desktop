@@ -148,6 +148,42 @@ mod tests {
     }
 
     #[test]
+    fn finds_azahar_and_xemu_on_path_and_as_flatpaks() {
+        let t = tempfile::tempdir().unwrap();
+        touch(&t.path().join("bin/azahar"));
+        touch(&t.path().join("bin/xemu"));
+        let path = std::env::join_paths([t.path().join("bin")]).unwrap();
+        for id in ["azahar", "xemu"] {
+            let p = profiles::get(id).unwrap();
+            let got = detect(&p, None, Os::Linux, &PathCtx::default(), Some(&path)).unwrap();
+            assert_eq!(got.kind, InstallKind::Native(t.path().join("bin").join(id)));
+        }
+        let ctx = PathCtx { xdg_data: Some(t.path().join("share")), ..Default::default() };
+        for (id, flatpak) in [("azahar", "org.azahar_emu.Azahar"), ("xemu", "app.xemu.xemu")] {
+            std::fs::create_dir_all(t.path().join("share/flatpak/app").join(flatpak)).unwrap();
+            let p = profiles::get(id).unwrap();
+            let got = detect(&p, None, Os::Linux, &ctx, None).unwrap();
+            assert_eq!(got.kind, InstallKind::Flatpak(flatpak.into()));
+        }
+    }
+
+    #[test]
+    fn windows_known_locations_for_azahar_and_xemu() {
+        let t = tempfile::tempdir().unwrap();
+        touch(&t.path().join("LA/Programs/Azahar/azahar.exe"));
+        touch(&t.path().join("PF/xemu/xemu.exe"));
+        let ctx = PathCtx {
+            programfiles: Some(t.path().join("PF")),
+            localappdata: Some(t.path().join("LA")),
+            ..Default::default()
+        };
+        let az = detect(&profiles::get("azahar").unwrap(), None, Os::Windows, &ctx, None).unwrap();
+        assert_eq!(az.exe_dir().unwrap(), t.path().join("LA/Programs/Azahar"));
+        let xe = detect(&profiles::get("xemu").unwrap(), None, Os::Windows, &ctx, None).unwrap();
+        assert_eq!(xe.exe_dir().unwrap(), t.path().join("PF/xemu"));
+    }
+
+    #[test]
     fn none_when_absent() {
         let p = profiles::get("duckstation").unwrap();
         assert!(detect(&p, None, Os::Linux, &PathCtx::default(), None).is_none());

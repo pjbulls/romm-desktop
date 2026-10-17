@@ -1,6 +1,6 @@
 id = "retroarch"
 name = "RetroArch"
-# RetroArch is mapped per platform via the core table in platforms.rs.
+# RetroArch is mapped per platform via the core table in retroarch.rs (CORES).
 platforms = []
 
 [detect]

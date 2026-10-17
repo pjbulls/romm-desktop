@@ -87,6 +87,7 @@ legend { padding: 0 6px; font-size: 13px; color: var(--muted); }
 .row-flex { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .row-main { display: flex; flex-direction: column; min-width: 0; } .row-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
 .rows select { width: 230px; flex: none; }
+.rows select.choice-select { width: 280px; }
 .bios-files { list-style: none; margin: 0; padding: 0 0 0 4px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
 .emu-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; } .emu-head h3 { margin: 0; font-size: 16px; }
 .emu-platforms { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }

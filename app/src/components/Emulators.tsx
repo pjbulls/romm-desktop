@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg, pickFile } from "../api";
 import { useStore } from "../store";
-import type { Bios, Emulator, Platform, Settings } from "../types";
+import type { Bios, Emulator, Platform } from "../types";
+import { PlatformChoice } from "./PlatformChoice";
 
 export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onChanged: () => void }) {
   const { push } = useStore();
   const [emus, setEmus] = useState<Emulator[] | null>(null);
-  const [settings, setSettings] = useState<Settings | null>(null);
   const [bios, setBios] = useState<Record<string, { busy: boolean; files?: Bios[]; error?: string }>>({});
 
   const load = useCallback(async () => {
     try {
-      const [e, s] = await Promise.all([api.emulators(), api.settings()]);
-      setEmus(e);
-      setSettings(s);
+      setEmus(await api.emulators());
     } catch (err) {
       push("error", "Couldn't load emulators", [errMsg(err)]);
     }
@@ -21,6 +19,19 @@ export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onC
   useEffect(() => { load(); }, [load]);
 
   const changed = async () => { await load(); onChanged(); };
+
+  // A pick is saved locally at once, but the platform list that carries it is refetched from the
+  // RomM server afterwards. Show the pick meanwhile instead of snapping back to the old choice.
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setPicked((m) => {
+      const done = Object.keys(m).filter((slug) => platforms.find((p) => p.slug === slug)?.selected === m[slug]);
+      if (done.length === 0) return m;
+      const next = { ...m };
+      for (const slug of done) delete next[slug];
+      return next;
+    });
+  }, [platforms]);
 
   async function choose(e: Emulator) {
     const p = await pickFile(`Choose the ${e.name} executable`);
@@ -33,7 +44,11 @@ export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onC
   }
 
   async function mapPlatform(slug: string, value: string) {
-    try { await api.setPlatformEmulator(slug, value || null); await changed(); } catch (err) { push("error", "Couldn't change the emulator", [errMsg(err)]); }
+    setPicked((m) => ({ ...m, [slug]: value }));
+    try { await api.setPlatformChoice(slug, value || null); await changed(); } catch (err) {
+      setPicked((m) => { const { [slug]: _dropped, ...rest } = m; return rest; });
+      push("error", "Couldn't change the emulator", [errMsg(err)]);
+    }
   }
 
   async function installBios(slug: string) {
@@ -46,8 +61,7 @@ export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onC
     }
   }
 
-  if (!emus || !settings) return <div className="loading-row"><span className="spinner sm" /> Loading…</div>;
-  const nameOf = (id: string | null) => emus.find((e) => e.id === id)?.name;
+  if (!emus) return <div className="loading-row"><span className="spinner sm" /> Loading…</div>;
   const withBios = platforms.filter((p) => p.firmwareCount > 0 && p.emulator);
   const mappable = platforms.filter((p) => p.romCount > 0).sort((a, b) => a.name.localeCompare(b.name));
 
@@ -109,15 +123,7 @@ export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onC
         <h2>Which emulator plays what</h2>
         <div className="card">
           <ul className="rows">
-            {mappable.map((p) => (
-              <li key={p.id}>
-                <span className="row-name">{p.name}</span>
-                <select value={settings.platformEmulators[p.slug] ?? ""} onChange={(e) => mapPlatform(p.slug, e.target.value)} aria-label={`Emulator for ${p.name}`}>
-                  <option value="">Automatic{p.emulator && !settings.platformEmulators[p.slug] ? ` (${nameOf(p.emulator)})` : ""}</option>
-                  {emus.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                </select>
-              </li>
-            ))}
+            {mappable.map((p) => <PlatformChoice key={p.id} platform={p.slug in picked ? { ...p, selected: picked[p.slug] } : p} onChange={mapPlatform} />)}
           </ul>
         </div>
       </section>
