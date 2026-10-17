@@ -369,7 +369,7 @@ async fn main() -> Result<()> {
                     println!("    plays: {}", claims.join(", "));
                 }
             }
-            let cores: Vec<_> = retroarch::DEFAULT_CORES.iter().map(|(s, _)| *s).collect();
+            let cores: Vec<_> = retroarch::supported_slugs().collect();
             println!("RetroArch default platforms: {}", cores.join(", "));
         }
 

@@ -724,7 +724,7 @@ async fn emulators(st: TauriState<'_, AppState>) -> CmdResult<Vec<EmulatorDto>> 
                 romm_core::detect::InstallKind::Flatpak(id) => format!("flatpak run {id}"),
             });
             let platforms = if p.id == "retroarch" {
-                retroarch::DEFAULT_CORES.iter().map(|(slug, _)| slug.to_string()).collect()
+                retroarch::supported_slugs().map(String::from).collect()
             } else {
                 p.platforms.clone()
             };
