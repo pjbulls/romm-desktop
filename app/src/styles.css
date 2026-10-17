@@ -174,3 +174,22 @@ input:disabled, select:disabled { opacity: .45; cursor: not-allowed; }
 .osk-key.space { max-width: none; flex: 5 1 0; font-size: 14px; }
 .osk-key.on { background: var(--accent); border-color: var(--accent); }
 .osk-key.done { background: #1f6f55; border-color: #2c9b78; }
+
+/* ---- RetroAchievements ---- */
+.ach-head { margin-bottom: 4px; } .ach-head h3 { margin: 0; }
+.ach-summary { margin: 10px 0 14px; }
+.ach-summary .progress.wide { height: 8px; margin: 8px 0; }
+.ach-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.ach-filters { display: flex; gap: 6px; margin-bottom: 4px; }
+.ach-filters .btn { padding: 5px 12px; border-radius: 999px; }
+.ach-filters .btn[aria-pressed="true"] { background: var(--panel-2); border-color: var(--line); color: var(--text); }
+.ach-list > li.ach { justify-content: flex-start; align-items: flex-start; gap: 12px; content-visibility: auto; contain-intrinsic-size: auto 68px; }
+.ach.locked .ach-title { color: var(--muted); }
+.ach-badge { width: 48px; height: 48px; flex: none; border-radius: 8px; overflow: hidden; background: var(--panel-2); border: 1px solid var(--line); }
+.ach-badge img { width: 100%; height: 100%; display: block; }
+.ach-badge.locked { opacity: .75; }
+.ach-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ach-title { font-weight: 600; }
+.ach-tags { display: flex; gap: 6px; flex-wrap: wrap; } .ach-tags:empty { display: none; }
+.ach-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+.ach-more { margin-top: 6px; }

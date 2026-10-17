@@ -16,6 +16,7 @@ A Windows + Debian/Linux desktop client for [RomM](https://github.com/rommapp/ro
 - **Save states** are synced per file with your own baseline (RomM exposes no hash for states), with a size cap and a clear status per state (*in sync / newer here / newer on server / conflict …*).
 - **Conflicts** never lose data. Default "keep both": your version is archived on the server, the server's is used, and what's replaced locally is copied to a backups folder first.
 - **Emulators**: RetroArch (incl. Nintendo DS via its melonDS core), Dolphin, PPSSPP, DuckStation (PS1), PCSX2 (PS2), Azahar (3DS), xemu (original Xbox, launch only: see below); auto-detected on PATH, standard Windows locations and Flatpak, or point at the executable. BIOS files install into the right folder, MD5-verified. Under **Emulators & BIOS → Which emulator plays what**, each system only offers what can actually play it: standalone emulators that list the system, plus the RetroArch cores that run it (Game Boy offers Gambatte, mGBA, SameBoy, Gearboy, TGB Dual and VBA-M; 3DS offers Azahar; nothing for a system with no emulator yet). Choices whose emulator or core isn't installed are flagged, not hidden. Anything that can't play a system is refused when saved.
+- **RetroAchievements**: each game's achievements with what you've earned, progress and points, read from your RomM server (see below).
 - **Game controller navigation**: browse, install, play and change settings without touching a keyboard or mouse (see below).
 
 ## Game controller
@@ -55,7 +56,7 @@ tests/e2e          drives the real app through WebDriver under Xvfb (mouse/keybo
 
 ## Build
 
-Rust 1.85+, Node 20+.
+Rust 1.90+ (the locked Tauri needs it; the core and CLI crates alone need 1.88), Node 20+.
 
 ```bash
 # Debian / Ubuntu: Tauri's system libraries
@@ -74,6 +75,8 @@ A GitHub Actions workflow (`.github/workflows/build.yml`) builds both installers
 
 In RomM: **Profile → Client API Tokens**, create a token with scopes `me.read platforms.read roms.read firmware.read assets.read assets.write devices.read devices.write`, press **Pair**, and enter the 8-digit code in the app.
 
+Optional: add `me.write` to refresh RetroAchievements progress from inside the app (see [RetroAchievements](#retroachievements)). It is deliberately not in the list above: besides refreshing RetroAchievements, it lets a token edit your RomM profile and manage API tokens.
+
 ## How saves and states sync
 
 | | Saves | Save states |
@@ -89,11 +92,24 @@ Deletions never propagate. A state you delete locally stays deleted unless the s
 
 Emulator profiles are TOML in `crates/romm-core/src/profiles/`: detection, launch flags, per-OS/Flatpak/portable data folders, save and state rules. Adding an emulator is a new file, and its `platforms` list is what decides which systems offer it. RetroArch cores are the exception: they're listed per system in `CORES` in `crates/romm-core/src/retroarch.rs` (first entry is the default that "Automatic" uses).
 
+## RetroAchievements
+
+Open a game and its **Achievements** section shows the set, which ones you've earned (hardcore ones are marked), points, the highest award, and when you last earned one. Badges load as you scroll; long sets show the first few with a *Show all* button. It also works offline, from the copy saved the last time the server answered.
+
+This app only *displays* what RomM knows. It doesn't talk to retroachievements.org and doesn't touch the emulators, so for any of this to show up:
+
+1. RomM needs a RetroAchievements API key and your game scanned and matched to a RetroAchievements game.
+2. Your **RetroAchievements username** must be set in your RomM profile. Without it you still see the achievements, just not which are earned.
+3. **Earning** them happens in the emulator: sign in to RetroAchievements inside RetroArch, DuckStation, PCSX2, PPSSPP or Dolphin. This app doesn't configure that.
+4. RomM must have fetched your progress. It does so on a schedule only if the admin turned that on (daily at 04:00 by default), or when asked. The **Refresh** button asks, and needs the optional `me.write` scope. Without it Refresh explains what to do; refreshing from RomM's own profile page works too.
+
+How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`merged_ra_metadata`) and your progress from `GET /api/users/me` (`ra_progression`, scope `me.read`, which the token already has). RomM records what you've earned under each achievement's *badge name*, not its numeric id, so that's what the two are matched on. A few games reuse one badge for several achievements; then the number earned is right but which of the look-alikes is ticked is a best guess.
+
 ## Tests
 
 ```bash
-cargo test --workspace --lib --tests   # 113 tests: 106 in romm-core (mock RomM server), 7 for the app's command layer
-cd app && npm test                      # 46 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker
+cargo test --workspace --lib --tests   # 121 tests, all in romm-core (against a mock RomM server)
+cd app && npm test                      # 66 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel
 tests/e2e/run.sh                        # 36 checks driving the real app (needs xvfb + webkit2gtk-driver, debug build)
 DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
 DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
@@ -106,11 +122,13 @@ tests/smoke/smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devic
 - Core logic and CLI: unit and integration tests, plus scripted two-device runs of the real binary.
 - UI: the real Linux app (WebKitGTK, software-rendered under Xvfb) driven through login errors, pairing, library paging and search, cover art, install with progress, play → save + state upload, installed list, emulator detection, BIOS install, settings persistence, sync all, disconnect. The screenshots above come from that run.
 - Controller navigation: the real app driven end to end with a **simulated** controller: on-screen keyboard, grid/sidebar/panel navigation, both sticks, paging, infinite-scroll loading, platform switching, install, play, Start-to-play, ignoring input while a game runs, dropdowns and number fields, saving settings, opting out. It surfaced and fixed four real bugs (focus-lift mis-navigation, Down jumping to the menu, focus parking on the search box, and a library "No games" flash).
+- RetroAchievements: matching, offline copy and refresh errors against a fake server shaped like RomM's responses (including its badge-name quirk), and the panel in the real app, with and without the `me.write` scope.
 - Windows path logic is unit-tested, and the core + CLI have been built on Windows.
 
 **Not verified, so please test**
 - Against a **real RomM server**. Everything is written from RomM's docs and source and tested against a fake server I wrote. The device-sync protocol is still changing, so pin a minimum server version. Cover art assumes `/assets/…` accepts the bearer token; if not, the grid shows placeholders.
 - With **real emulators**. Launch flags and save/state folders come from each project's documented behaviour. Likeliest to need tweaks: Wii NAND roots, DuckStation/PCSX2/PPSSPP state folder names, PCSX2 state file naming. The Azahar and xemu profiles were checked against those projects' source code and docs but never run against the real emulators; for Azahar, the Windows install locations are guesses and the save roots assume the default all-zero `sdmc` id folders (a console-imported `movable.sed` changes them). Azahar needs your console's keys in `sysdata/keys.txt` to play encrypted dumps (older Citra guides call it `aes_keys.txt`).
+- **RetroAchievements against a real RomM** with a RetroAchievements key and a linked account. The response shapes come from RomM's source, not a live server. A successful Refresh (a token with `me.write`) is covered by core tests only, not in the real app.
 - The **Windows app** (WebView2) and the **installers**: only the Linux build was run.
 - **A real controller.** The test injects a fake `navigator.getGamepads()` into the real webview, so the app's polling, mapping, focus and keyboard are exercised, but not the OS → WebKit/WebView2 hop (there is no virtual input device in the sandbox). WebKitGTK is confirmed to link libmanette, its gamepad backend. First thing to try: plug in your pad and press a button; a "Controller connected" notice should appear. Controller types are told apart by name, so an unusual pad may show Xbox-style labels.
 - **Native file pickers** (the Browse… buttons) can't be automated, and a controller can't drive the OS file dialog. Use the keyboard for those.

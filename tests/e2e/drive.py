@@ -77,6 +77,27 @@ try:
     check("drawer shows the emulator that will be used", "Plays in Dolphin" in d.text(d.find(".emu-line")), d.text(d.find(".emu-line")))
     check("Install offered, Play not yet", d.find("[data-testid=install]") is not None and d.find("[data-testid=play]") is None)
 
+    print("== Achievements")
+    d.wait(lambda: d.find("[data-testid=ach-summary]"), 10, "achievements summary")
+    summ = d.text(d.find("[data-testid=ach-summary]"))
+    check("progress comes from RomM (1 of 3, 10 of 40 points)", "1 / 3 earned" in summ and "10 / 40 pts" in summ, summ)
+    check("one row per achievement", count("[data-testid=achievement]") == 3, str(count("[data-testid=achievement]")))
+    earned = d.text(d.find("li.ach.earned .ach-title")) if d.find("li.ach.earned .ach-title") else ""
+    check("earned row is matched by badge name, not achievement id", count("li.ach.earned") == 1 and earned == "Green Hill Clear", earned)
+    check("missable and hardcore are flagged", "Missable" in d.text(d.find("[data-testid=ach-list]")) and "Hardcore" in d.text(d.find("li.ach.earned")))
+    d.wait(lambda: d.js("return document.querySelectorAll('.ach-badge img').length") == 3, 15, "badge images")
+    check("badges load through the authenticated asset path", True)
+    check("badges are requested from the server", server_log().count("/retroachievements/badges/") >= 3)
+    d.click(d.find("[data-testid=ach-filter-locked]"))
+    d.wait(lambda: count("[data-testid=achievement]") == 2, 5, "locked filter")
+    check("Locked filter shows only the two unearned", count("li.ach.earned") == 0)
+    d.click(d.find("[data-testid=ach-filter-all]"))
+    time.sleep(0.3); shot("04b-achievements")
+    d.click(d.find("[data-testid=ach-refresh]"))
+    wait_toast("Couldn't refresh RetroAchievements", 15)
+    check("refresh without me.write explains what to do", "me.write" in toast_text(), toast_text())
+    dismiss_toasts(); time.sleep(0.3)
+
     d.click(d.find("[data-testid=install]"))
     try:
         d.wait(lambda: d.find(".progress.wide"), 4, "progress bar"); shot("05-installing")

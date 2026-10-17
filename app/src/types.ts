@@ -176,6 +176,44 @@ export interface Settings {
   platformEmulators: Record<string, string>;
 }
 
+/** Mirrors `romm_core::achievements` (snake_case, passed through as-is like SaveView/StateView). */
+export type RaState = "ready" | "no_set" | "not_linked";
+
+export interface Achievement {
+  id: number;
+  title: string;
+  description: string;
+  points: number;
+  /** `progression`, `win_condition`, `missable`, or "". */
+  kind: string;
+  earned: boolean;
+  /** Earned in hardcore mode. */
+  hardcore: boolean;
+  /** RFC 3339 (UTC). */
+  earned_at: string | null;
+  /** Server path of the badge to show (coloured if earned, greyed if not); load it with `loadCover`. */
+  badge: string | null;
+}
+
+export interface AchievementsView {
+  state: RaState;
+  ra_username: string | null;
+  total: number;
+  earned: number;
+  earned_hardcore: number;
+  points_total: number;
+  points_earned: number;
+  /** `completed`, `mastered`, `beaten-softcore`, `beaten-hardcore`, or null. */
+  award: string | null;
+  last_earned: string | null;
+  /** RomM holds no RetroAchievements progress for this user yet, so "0 earned" may mean "never fetched". */
+  progress_missing: boolean;
+  achievements: Achievement[];
+  /** Served from the saved copy because the server couldn't be reached. */
+  stale: boolean;
+  fetched_at: string | null;
+}
+
 export type View =
   | { kind: "library"; platform: Platform | null }
   | { kind: "installed" }

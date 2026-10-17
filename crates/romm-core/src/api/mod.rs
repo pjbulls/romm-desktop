@@ -357,6 +357,31 @@ impl RommClient {
         Ok(())
     }
 
+    // ------------------------------------------------------ RetroAchievements
+
+    /// The signed-in user (`me.read`). This carries the user's *entire* RetroAchievements
+    /// progression, which is large for heavy RA users, so callers should cache it.
+    pub async fn me(&self) -> Result<Me> {
+        self.get_json(&["users", "me"], &[]).await
+    }
+
+    /// Only the achievement fields of one ROM (the full ROM response is much bigger).
+    pub async fn rom_ra(&self, id: i64) -> Result<RomRa> {
+        self.get_json(&["roms", &id.to_string()], &[]).await
+    }
+
+    /// Ask RomM to re-pull the user's progress from retroachievements.org.
+    ///
+    /// Needs the `me.write` scope, which the app doesn't otherwise request (it also allows editing
+    /// the profile), so a 403 here is expected for most tokens. `incremental` only re-fetches games
+    /// whose award count or last-earned date changed, which is what you want after playing.
+    pub async fn refresh_ra(&self, user_id: i64, incremental: bool) -> Result<()> {
+        let url = self.url(&["users", &user_id.to_string(), "ra", "refresh"])?;
+        let resp = self.authed(self.http.post(url).json(&serde_json::json!({ "incremental": incremental }))).send().await?;
+        Self::check(resp).await?;
+        Ok(())
+    }
+
     pub async fn download_save(&self, save_id: i64, device_id: &str, session_id: i64) -> Result<Vec<u8>> {
         let q = [
             ("device_id", device_id.to_string()),

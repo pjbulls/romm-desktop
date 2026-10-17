@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatDuration, normalizeCode, summarizeSync, timeAgo } from "./format";
-import type { SyncSummary } from "./types";
+import { formatBytes, formatDuration, normalizeCode, summarizeSync, timeAgo, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements } from "./format";
+import type { Achievement, SyncSummary } from "./types";
 
 const empty = (): SyncSummary => ({
   uploaded: [], downloaded: [], archived: [], conflicts: [], failed: [],
@@ -74,5 +74,48 @@ describe("normalizeCode", () => {
   it("strips separators and spaces", () => {
     expect(normalizeCode(" 1234-5678 ")).toBe("12345678");
     expect(normalizeCode("ab cd")).toBe("ABCD");
+  });
+});
+
+describe("achievement helpers", () => {
+  const ach = (id: number, earned: boolean): Achievement => ({
+    id, title: `A${id}`, description: "", points: 1, kind: "", earned, hardcore: false, earned_at: null, badge: null,
+  });
+  const list = [ach(1, true), ach(2, false), ach(3, true), ach(4, false), ach(5, false)];
+
+  it("filters by earned state and keeps order", () => {
+    expect(filterAchievements(list, "all").map((a) => a.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(filterAchievements(list, "earned").map((a) => a.id)).toEqual([1, 3]);
+    expect(filterAchievements(list, "locked").map((a) => a.id)).toEqual([2, 4, 5]);
+  });
+
+  it("counts each filter so the buttons can show them", () => {
+    expect(achievementCounts(list)).toEqual({ all: 5, earned: 2, locked: 3 });
+    expect(achievementCounts([])).toEqual({ all: 0, earned: 0, locked: 0 });
+  });
+
+  it("computes a rounded percentage and never divides by zero", () => {
+    expect(achievementPercent({ earned: 1, total: 3 })).toBe(33);
+    expect(achievementPercent({ earned: 2, total: 3 })).toBe(67);
+    expect(achievementPercent({ earned: 0, total: 0 })).toBe(0);
+  });
+
+  it("previews only long lists until expanded", () => {
+    const long = Array.from({ length: ACH_PREVIEW + 5 }, (_, i) => ach(i, false));
+    expect(previewAchievements(long, false)).toHaveLength(ACH_PREVIEW);
+    expect(previewAchievements(long, true)).toHaveLength(ACH_PREVIEW + 5);
+    expect(previewAchievements(list, false)).toHaveLength(5); // short lists are never cut
+    expect(previewAchievements(list, false, 2)).toHaveLength(2);
+  });
+
+  it("labels every award RomM can report", () => {
+    for (const k of ["mastered", "completed", "beaten-hardcore", "beaten-softcore"]) expect(AWARD[k]?.label).toBeTruthy();
+    expect(AWARD["something-new"]).toBeUndefined(); // callers must tolerate unknown awards
+  });
+
+  it("formats dates for tooltips and tolerates garbage", () => {
+    expect(fullDate("2026-01-02T03:04:05Z")).not.toBe("");
+    expect(fullDate("nonsense")).toBe("");
+    expect(fullDate(null)).toBe("");
   });
 });

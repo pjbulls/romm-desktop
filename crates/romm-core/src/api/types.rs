@@ -245,3 +245,113 @@ pub struct StateInfo {
     #[serde(default)]
     pub missing_from_fs: bool,
 }
+
+// ------------------------------------------------------------- RetroAchievements
+//
+// RomM does not talk to the emulator. It asks retroachievements.org about the user's
+// `ra_username` and stores the result, so everything here is read from RomM:
+//   * the game's achievement list: `GET /api/roms/{id}` -> `merged_ra_metadata`
+//   * what the user has earned:    `GET /api/users/me`  -> `ra_progression`
+// Sources: backend/handler/metadata/ra_handler.py (RAMetadata, RAUserProgression).
+
+/// Earned-achievement ids are the achievement's *badge name* (`id=badge_name` in RomM's
+/// `get_user_progression`), not its numeric id. RomM's type says `str`, but accept a number too
+/// so a server that changes its mind doesn't take the whole panel down.
+fn string_or_number<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    use serde::de::Error as _;
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        other => Err(D::Error::custom(format!("expected a string or number, got {other}"))),
+    }
+}
+
+/// One achievement in a game's set.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaAchievement {
+    #[serde(default)]
+    pub ra_id: Option<i64>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub points: Option<i64>,
+    /// RA's badge name. This is what `RaEarned::id` refers to; not unique (see `achievements.rs`).
+    #[serde(default)]
+    pub badge_id: Option<String>,
+    /// Server-relative (`/assets/romm/resources/...`), already rewritten by RomM.
+    #[serde(default)]
+    pub badge_path: Option<String>,
+    #[serde(default)]
+    pub badge_path_lock: Option<String>,
+    #[serde(default)]
+    pub display_order: Option<i64>,
+    /// `progression`, `win_condition`, `missable`, or empty.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaMetadata {
+    #[serde(default)]
+    pub achievements: Vec<RaAchievement>,
+}
+
+/// The slice of `GET /api/roms/{id}` that matters for achievements.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RomRa {
+    #[serde(default)]
+    pub ra_id: Option<i64>,
+    #[serde(default)]
+    pub merged_ra_metadata: Option<RaMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RaEarned {
+    #[serde(deserialize_with = "string_or_number")]
+    pub id: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub date_hardcore: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaGameProgress {
+    #[serde(default)]
+    pub rom_ra_id: Option<i64>,
+    #[serde(default)]
+    pub max_possible: Option<i64>,
+    #[serde(default)]
+    pub num_awarded: Option<i64>,
+    #[serde(default)]
+    pub num_awarded_hardcore: Option<i64>,
+    #[serde(default)]
+    pub most_recent_awarded_date: Option<String>,
+    /// `completed`, `mastered`, `beaten-softcore`, `beaten-hardcore`, or null.
+    #[serde(default)]
+    pub highest_award_kind: Option<String>,
+    #[serde(default)]
+    pub earned_achievements: Vec<RaEarned>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaProgression {
+    #[serde(default)]
+    pub total: i64,
+    #[serde(default)]
+    pub results: Vec<RaGameProgress>,
+}
+
+/// `GET /api/users/me` (scope `me.read`), trimmed to what we use.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Me {
+    pub id: i64,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub ra_username: Option<String>,
+    #[serde(default)]
+    pub ra_progression: Option<RaProgression>,
+}

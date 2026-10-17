@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use romm_core::api::types::{DeviceRegistration, Platform, Rom};
+use romm_core::achievements::{self, AchievementsView};
+use romm_core::api::types::{DeviceRegistration, Me, Platform, Rom};
 use romm_core::api::{RommClient, CLIENT_SLUG};
 use romm_core::config::{default_device_name, hostname, load_token, store_token, AppDirs, Config};
 use romm_core::library::{self, BiosStatus};
@@ -39,6 +40,9 @@ pub struct AppState {
     db: Arc<Mutex<State>>,
     client: Arc<RwLock<Option<RommClient>>>,
     busy: Arc<StdMutex<HashSet<i64>>>,
+    /// `GET /api/users/me`, kept briefly: it carries the user's whole RetroAchievements progression
+    /// (megabytes for a heavy RA user) and every game panel needs it.
+    ra_me: Arc<Mutex<Option<(Instant, Me)>>>,
 }
 
 /// Marks a game as "something is happening to it" so the UI can't start two jobs at once.
@@ -55,6 +59,10 @@ impl Drop for Busy {
 
 /// Job key for "sync everything".
 const SYNC_ALL: i64 = -1;
+/// Job key for "refresh RetroAchievements" (per user, not per game).
+const RA_REFRESH: i64 = -2;
+/// How long a fetched profile is reused when opening game panels.
+const RA_ME_TTL: Duration = Duration::from_secs(5 * 60);
 
 impl AppState {
     fn busy(&self, id: i64) -> CmdResult<Busy> {
@@ -67,6 +75,27 @@ impl AppState {
 
     async fn client(&self) -> CmdResult<RommClient> {
         self.client.read().await.clone().ok_or_else(|| "not connected to a RomM server".to_string())
+    }
+
+    /// The signed-in user, from the short-lived cache unless `force`.
+    async fn me(&self, client: &RommClient, force: bool) -> CmdResult<Me> {
+        if !force {
+            if let Some((at, me)) = &*self.ra_me.lock().await {
+                if at.elapsed() < RA_ME_TTL {
+                    return Ok(me.clone());
+                }
+            }
+        }
+        let me = client.me().await.map_err(s)?;
+        *self.ra_me.lock().await = Some((Instant::now(), me.clone()));
+        Ok(me)
+    }
+
+    /// Drop everything RetroAchievements-related that belongs to the current account
+    /// (on login and logout, so one user's progress is never shown to the next).
+    async fn forget_ra(&self) {
+        *self.ra_me.lock().await = None;
+        let _ = std::fs::remove_dir_all(self.dirs.data_dir.join("achievements"));
     }
 
     async fn update_cfg(&self, f: impl FnOnce(&mut Config)) -> CmdResult<()> {
@@ -355,6 +384,7 @@ async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<Statu
     })
     .await?;
     *st.client.write().await = Some(client.clone());
+    st.forget_ra().await;
     st.device_id(&client).await?;
 
     let mut warnings = vec![];
@@ -374,6 +404,7 @@ async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<Statu
 async fn logout(st: TauriState<'_, AppState>) -> CmdResult<StatusDto> {
     let _ = std::fs::remove_file(st.dirs.token_file());
     *st.client.write().await = None;
+    st.forget_ra().await;
     st.update_cfg(|c| {
         c.server_url = None;
         c.device_id = None;
@@ -474,6 +505,76 @@ async fn cover(st: TauriState<'_, AppState>, rom_id: i64, path: String) -> CmdRe
         }
         _ => Ok(None),
     }
+}
+
+// ------------------------------------------------------------------ RetroAchievements
+//
+// Badge images need no command of their own: they are ordinary server assets, so the UI loads
+// them through `cover` (authenticated fetch + on-disk cache keyed by path).
+
+fn ra_cache_file(dirs: &AppDirs, rom_id: i64) -> PathBuf {
+    dirs.data_dir.join("achievements").join(format!("{rom_id}.json"))
+}
+
+/// Live data when the server answers; otherwise the copy from the last successful fetch, marked
+/// `stale` (the same promise the Installed view makes: it still works offline).
+async fn fetch_achievements(st: &AppState, rom_id: i64, force: bool) -> CmdResult<AchievementsView> {
+    let live: CmdResult<AchievementsView> = async {
+        let client = st.client().await?;
+        let (rom, me) = tokio::join!(client.rom_ra(rom_id), st.me(&client, force));
+        let mut view = achievements::build(&rom.map_err(s)?, &me?);
+        view.fetched_at = Some(achievements::now_rfc3339());
+        Ok(view)
+    }
+    .await;
+
+    let file = ra_cache_file(&st.dirs, rom_id);
+    match live {
+        Ok(view) => {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(json) = serde_json::to_vec(&view) {
+                let _ = std::fs::write(&file, json);
+            }
+            Ok(view)
+        }
+        Err(e) => match std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<AchievementsView>(&b).ok()) {
+            Some(mut cached) => {
+                cached.stale = true;
+                Ok(cached)
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// A game's achievements merged with what the user has earned.
+#[tauri::command]
+async fn achievements(st: TauriState<'_, AppState>, rom_id: i64, force: Option<bool>) -> CmdResult<AchievementsView> {
+    fetch_achievements(&st, rom_id, force.unwrap_or(false)).await
+}
+
+/// Ask RomM to re-pull the user's progress from retroachievements.org, then reload this game.
+/// RomM only does that on a schedule (daily, and only if the admin enabled it) or on request, so
+/// without this the panel shows whatever RomM last fetched. Needs the `me.write` scope, which
+/// the app deliberately doesn't ask for by default (it also allows editing the profile).
+#[tauri::command]
+async fn refresh_achievements(st: TauriState<'_, AppState>, rom_id: i64) -> CmdResult<AchievementsView> {
+    let _busy = st.busy(RA_REFRESH)?;
+    let client = st.client().await?;
+    let me = st.me(&client, false).await?;
+    client.refresh_ra(me.id, true).await.map_err(|e| match e.status() {
+        Some(403) => "RomM refused: refreshing needs the me.write scope, which this token doesn't have. \
+                      Pair a new token with it (RomM → Profile → Client API Tokens), or refresh from RomM's own profile page."
+            .to_string(),
+        Some(404) if e.to_string().contains("RetroAchievements username") => {
+            "RomM doesn't know your RetroAchievements username. Add it under Profile in RomM, then try again.".to_string()
+        }
+        _ => s(e),
+    })?;
+    *st.ra_me.lock().await = None;
+    fetch_achievements(&st, rom_id, true).await
 }
 
 #[tauri::command]
@@ -863,6 +964,7 @@ pub fn run() {
                 db: Arc::new(Mutex::new(db)),
                 client: Arc::new(RwLock::new(client)),
                 busy: Arc::new(StdMutex::new(HashSet::new())),
+                ra_me: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })
@@ -873,6 +975,8 @@ pub fn run() {
             platforms,
             games,
             cover,
+            achievements,
+            refresh_achievements,
             install_game,
             uninstall_game,
             play_game,

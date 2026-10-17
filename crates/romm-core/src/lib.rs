@@ -1,5 +1,6 @@
 //! romm-core: everything a RomM desktop client needs except the UI.
 
+pub mod achievements;
 pub mod api;
 pub mod config;
 pub mod detect;

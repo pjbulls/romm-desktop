@@ -1,4 +1,4 @@
-import type { ConflictPolicy, SaveStatus, StateStatus, SyncSummary } from "./types";
+import type { Achievement, AchievementsView, ConflictPolicy, SaveStatus, StateStatus, SyncSummary } from "./types";
 
 export function formatBytes(n: number | null | undefined): string {
   if (n == null) return "–";
@@ -79,4 +79,53 @@ export const POLICY_LABEL: Record<ConflictPolicy, { title: string; help: string 
 /** Pairing codes are shown as "1234-5678"; the server wants digits only. */
 export function normalizeCode(input: string): string {
   return input.replace(/[^0-9a-zA-Z]/g, "").toUpperCase();
+}
+
+// ---------------------------------------------------------------------- RetroAchievements
+
+export type AchFilter = "all" | "earned" | "locked";
+
+export const ACH_FILTERS: { value: AchFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "earned", label: "Earned" },
+  { value: "locked", label: "Locked" },
+];
+
+/** How many rows to show before "Show all": a full set can run to hundreds. */
+export const ACH_PREVIEW = 8;
+
+export function filterAchievements(list: Achievement[], f: AchFilter): Achievement[] {
+  return f === "earned" ? list.filter((a) => a.earned) : f === "locked" ? list.filter((a) => !a.earned) : list;
+}
+
+export function achievementCounts(list: Achievement[]): Record<AchFilter, number> {
+  const earned = list.filter((a) => a.earned).length;
+  return { all: list.length, earned, locked: list.length - earned };
+}
+
+export function achievementPercent(v: Pick<AchievementsView, "earned" | "total">): number {
+  return v.total > 0 ? Math.round((v.earned / v.total) * 100) : 0;
+}
+
+export function previewAchievements(list: Achievement[], expanded: boolean, limit = ACH_PREVIEW): Achievement[] {
+  return expanded || list.length <= limit ? list : list.slice(0, limit);
+}
+
+export const AWARD: Record<string, { label: string; tone: "ok" | "warn" | "muted" }> = {
+  mastered: { label: "Mastered", tone: "ok" },
+  completed: { label: "Completed", tone: "ok" },
+  "beaten-hardcore": { label: "Beaten (hardcore)", tone: "ok" },
+  "beaten-softcore": { label: "Beaten", tone: "muted" },
+};
+
+export const ACH_KIND: Record<string, { label: string; tone: "warn" | "muted" }> = {
+  missable: { label: "Missable", tone: "warn" },
+  progression: { label: "Progression", tone: "muted" },
+  win_condition: { label: "Win condition", tone: "muted" },
+};
+
+/** Full local date and time, for tooltips; "" when the timestamp isn't parseable. */
+export function fullDate(iso: string | null | undefined): string {
+  const t = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(t) ? "" : new Date(t).toLocaleString();
 }

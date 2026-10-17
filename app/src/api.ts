@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LoginArgs, Platform, ProgressEvent, Settings, Status,
+  AchievementsView, Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LoginArgs, Platform, ProgressEvent, Settings, Status,
 } from "./types";
 
 /** Tauri rejects with the Rust `String` error; normalise anything else. */
@@ -19,6 +19,10 @@ export const api = {
   platforms: () => invoke<Platform[]>("platforms"),
   games: (args: GamesArgs) => invoke<GamesPage>("games", { args }),
   cover: (romId: number, path: string) => invoke<string | null>("cover", { romId, path }),
+  /** Falls back to a saved copy (`stale`) when the server is unreachable. `force` skips the profile cache. */
+  achievements: (romId: number, force = false) => invoke<AchievementsView>("achievements", { romId, force }),
+  /** Needs the `me.write` scope; rejects with an explanation when the token doesn't have it. */
+  refreshAchievements: (romId: number) => invoke<AchievementsView>("refresh_achievements", { romId }),
   installGame: (romId: number) => invoke<void>("install_game", { romId }),
   uninstallGame: (romId: number) => invoke<void>("uninstall_game", { romId }),
   playGame: (romId: number) => invoke<void>("play_game", { romId }),
@@ -53,7 +57,7 @@ export function onProgress(fn: (e: ProgressEvent) => void): Promise<UnlistenFn> 
   return listen<ProgressEvent>("romm://progress", (e) => fn(e.payload));
 }
 
-// Cover art is fetched through the backend (it needs the auth token) and cached on disk there;
+// Cover art (and RetroAchievements badges, which are ordinary server assets) is fetched through the backend (it needs the auth token) and cached on disk there;
 // this just de-duplicates concurrent requests for the same image.
 const covers = new Map<string, Promise<string | null>>();
 export function loadCover(romId: number, path: string): Promise<string | null> {

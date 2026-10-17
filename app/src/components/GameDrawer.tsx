@@ -3,6 +3,7 @@ import { api, errMsg } from "../api";
 import { formatBytes, SAVE_STATUS, STATE_STATUS, timeAgo } from "../format";
 import { useStore } from "../store";
 import type { Details, Game, Platform } from "../types";
+import { Achievements } from "./Achievements";
 import { Cover } from "./GameCard";
 
 interface Props {
@@ -150,10 +151,12 @@ export function GameDrawer({ game, platform, onClose, onGoEmulators }: Props) {
                 </>
               )}
             </section>
-
-            {details.installPath && <div className="muted small path">Installed at {details.installPath}</div>}
           </>
         )}
+
+        <Achievements game={game} />
+
+        {isInstalled && details?.installPath && <div className="muted small path">Installed at {details.installPath}</div>}
       </aside>
     </div>
   );

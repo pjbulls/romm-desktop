@@ -20,6 +20,25 @@ for n in range(1, 62):
 ROMS += [mkrom(101, "Final Fantasy VII", 2, 'psx'), mkrom(102, "Crash Bandicoot", 2, 'psx'), mkrom(103, "Spyro the Dragon", 2, 'psx'),
          mkrom(201, "Daxter", 3, 'psp'), mkrom(202, "Lumines", 3, 'psp')]
 ROMS.sort(key=lambda r: r['name'].lower())
+
+# RetroAchievements, shaped like RomM's responses. Achievement ids (9001...) deliberately differ from
+# badge names (10001...): RomM reports what a user has earned by *badge name*, so a client that matched
+# on the achievement id would show nothing earned here.
+def _badge(n, lock=False): return f"/assets/romm/resources/roms/1/7/retroachievements/badges/{n}{'_lock' if lock else ''}.png"
+RA_ACHIEVEMENTS = [
+    dict(ra_id=9000 + i, title=t, description=d, points=pts, badge_id=str(10000 + i), badge_path=_badge(10000 + i), badge_path_lock=_badge(10000 + i, True),
+         display_order=i, type=k, num_awarded=100, num_awarded_hardcore=50)
+    for i, (t, d, pts, k) in enumerate([("First Blood", "Win your first match", 5, "progression"),
+                                        ("Green Hill Clear", "Finish Adventure Mode", 10, "win_condition"),
+                                        ("Secret Stage", "Find the hidden stage", 25, "missable")], start=1)]
+for r in ROMS:
+    if r['id'] == 7:
+        r['ra_id'] = 1
+        r['merged_ra_metadata'] = dict(first_release_date=1, genres=[], companies=[], hash_match=True, achievements=RA_ACHIEVEMENTS)
+ME = dict(id=1, username='e2e', email=None, enabled=True, role='admin', oauth_scopes=SCOPES, avatar_path='', ra_username='e2e_ra',
+          ra_progression=dict(total=1, results=[dict(rom_ra_id=1, max_possible=3, num_awarded=1, num_awarded_hardcore=1,
+                                                      most_recent_awarded_date='2026-03-04 05:06:07', highest_award_kind=None,
+                                                      earned_achievements=[dict(id='10002', date='2026-03-04 05:06:07', date_hardcore='2026-03-04 05:06:07')])]))
 PLATS = [
   dict(id=1, slug='ngc', fs_slug='ngc', name='GameCube', rom_count=sum(r['platform_id'] == 1 for r in ROMS), firmware=[]),
   dict(id=2, slug='psx', fs_slug='psx', name='PlayStation', rom_count=3,
@@ -70,6 +89,7 @@ class H(BaseHTTPRequestHandler):
         LOG.write(f"GET {self.path}\n"); LOG.flush()
         if not self.authed(): return
         if p == '/api/platforms': return self.send(200, PLATS)
+        if p == '/api/users/me': return self.send(200, ME)
         if p == '/api/roms':
             items = [r for r in ROMS if ('platform_ids' not in q or str(r['platform_id']) == q['platform_ids'])
                      and (not q.get('search_term') or q['search_term'].lower() in r['name'].lower())]
@@ -82,6 +102,7 @@ class H(BaseHTTPRequestHandler):
             total = 2_000_000; self.send_response(200); self.send_header('Content-Length', str(total)); self.end_headers()
             for _ in range(20): self.wfile.write(b'R' * (total // 20)); self.wfile.flush(); time.sleep(0.05)
             return
+        if p.startswith('/assets/') and '/retroachievements/badges/' in p: return self.send(200, raw=cover_png(7), ctype='image/png')
         if p.startswith('/assets/'):
             rid = int(re.search(r'/(\d+)/cover/', p).group(1)); return self.send(200, raw=cover_png(rid), ctype='image/png')
         if p == '/api/firmware/9/content/scph5501.bin': return self.send(200, raw=BIOS)
@@ -115,6 +136,7 @@ class H(BaseHTTPRequestHandler):
             if json.loads(data)['code'] != '12345678': return self.send(404, {"detail": "Invalid or expired code"})
             return self.send(200, dict(id=1, raw_token=TOKEN, scopes=SCOPES, device_id=None))
         if not self.authed(): return
+        if re.match(r'/api/users/\d+/ra/refresh$', p): return self.send(403, {"detail": "Forbidden"})
         if p == '/api/devices':
             reg = json.loads(data); LOG.write(f"  DEVICE {reg}\n"); LOG.flush()
             return self.send(201, dict(device_id='dev-' + hashlib.md5(reg['name'].encode()).hexdigest()[:6], name=reg['name']))
