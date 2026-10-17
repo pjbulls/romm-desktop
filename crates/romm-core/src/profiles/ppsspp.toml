@@ -1,0 +1,32 @@
+id = "ppsspp"
+name = "PPSSPP"
+platforms = ["psp"]
+
+[detect]
+linux_bins = ["PPSSPPSDL", "ppsspp"]
+windows_exes = [
+  "{programfiles}/PPSSPP/PPSSPPWindows64.exe",
+  "{localappdata}/Programs/PPSSPP/PPSSPPWindows64.exe",
+]
+flatpak_id = "org.ppsspp.PPSSPP"
+
+[launch]
+args = ["{rom}"]
+
+# The data root here is the PSP folder, which holds SAVEDATA/ and PPSSPP_STATE/.
+[data]
+linux = ["{xdg_config}/ppsspp/PSP"]
+flatpak = ["{home}/.var/app/org.ppsspp.PPSSPP/config/ppsspp/PSP"]
+windows = [
+  { path = "{exe_dir}/memstick/PSP", requires = "{exe_dir}/memstick/PSP" },
+  "{documents}/PPSSPP/PSP",
+]
+
+[saves]
+mode = "diff"
+roots = ["SAVEDATA"]
+
+[states]
+mode = "diff"
+dir = "PPSSPP_STATE"
+ignore_extensions = ["jpg", "jpeg", "png"]

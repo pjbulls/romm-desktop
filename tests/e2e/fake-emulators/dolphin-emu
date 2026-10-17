@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fake Dolphin: creates a memory card and save-state slot, as if you'd played and saved.
+DATA="$HOME/.local/share/dolphin-emu"
+mkdir -p "$DATA/GC/USA" "$DATA/StateSaves"
+sleep 1
+printf "card-written-on-%s" "${FAKE_DEVICE:-e2e}" > "$DATA/GC/USA/Card A.raw"
+printf "state-slot-1-%s" "${FAKE_DEVICE:-e2e}" > "$DATA/StateSaves/GALE01.s01"

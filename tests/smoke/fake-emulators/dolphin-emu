@@ -1,0 +1,9 @@
+#!/bin/sh
+# Fake Dolphin: reports the memory card it finds at startup, then "saves" a new one.
+DATA="$HOME/.local/share/dolphin-emu"
+echo "   [fake-dolphin on $FAKE_DEVICE] args: $* | card at launch: $(cat "$DATA/GC/USA/Card A.raw" 2>/dev/null || echo '<none>')"
+ST="$DATA/StateSaves/GALE01.s01"
+echo "   [fake-dolphin on $FAKE_DEVICE] state slot at launch: $(cat "$ST" 2>/dev/null || echo '<none>')"
+mkdir -p "$DATA/GC/USA" "$DATA/StateSaves"
+printf "state-from-$FAKE_DEVICE" > "$ST"
+printf "card-written-on-%s" "$FAKE_DEVICE" > "$DATA/GC/USA/Card A.raw"

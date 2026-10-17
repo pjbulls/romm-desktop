@@ -1,0 +1,34 @@
+id = "pcsx2"
+name = "PCSX2"
+platforms = ["ps2"]
+
+[detect]
+linux_bins = ["pcsx2-qt", "pcsx2", "PCSX2-qt.AppImage"]
+windows_exes = [
+  "{programfiles}/PCSX2/pcsx2-qt.exe",
+  "{localappdata}/Programs/PCSX2/pcsx2-qt.exe",
+]
+flatpak_id = "net.pcsx2.PCSX2"
+
+[launch]
+args = ["-batch", "--", "{rom}"]
+
+[data]
+linux = ["{xdg_config}/PCSX2"]
+flatpak = ["{home}/.var/app/net.pcsx2.PCSX2/config/PCSX2"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/portable.ini" },
+  "{documents}/PCSX2",
+]
+
+[saves]
+mode = "diff"
+roots = ["memcards"]
+
+[states]
+mode = "diff"
+dir = "sstates"
+ignore_extensions = ["png", "jpg"]
+
+[bios]
+dir = "bios"

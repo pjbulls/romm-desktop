@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/romm-core", "crates/romm-cli", "app/src-tauri"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+md-5 = "0.10"
+hex = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+walkdir = "2"
+directories = "5"
+futures-util = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+tracing = "0.1"
+base64 = "0.22"
+tokio-util = { version = "0.7", features = ["io"] }

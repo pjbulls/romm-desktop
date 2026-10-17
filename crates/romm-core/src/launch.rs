@@ -1,0 +1,80 @@
+//! Building the emulator command line.
+
+use std::path::Path;
+
+use tokio::process::Command;
+
+use crate::detect::{InstallKind, Installed};
+use crate::error::{Error, Result};
+use crate::profiles::Profile;
+
+pub fn build_command(
+    profile: &Profile,
+    installed: &Installed,
+    rom: &Path,
+    core: Option<&Path>,
+    extra_args: &[String],
+) -> Result<Command> {
+    let mut args: Vec<String> = extra_args.to_vec();
+    for a in &profile.launch.args {
+        args.push(match a.as_str() {
+            "{rom}" => rom.to_string_lossy().into_owned(),
+            "{core}" => core
+                .ok_or_else(|| Error::msg(format!("{} needs a libretro core for this platform", profile.name)))?
+                .to_string_lossy()
+                .into_owned(),
+            other => other.to_string(),
+        });
+    }
+    let mut cmd = match &installed.kind {
+        InstallKind::Native(exe) => Command::new(exe),
+        InstallKind::Flatpak(id) => {
+            let mut c = Command::new("flatpak");
+            c.arg("run").arg(id);
+            c
+        }
+    };
+    cmd.args(args);
+    Ok(cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles;
+
+    fn args_of(c: &Command) -> Vec<String> {
+        c.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn dolphin_native_and_flatpak() {
+        let p = profiles::get("dolphin").unwrap();
+        let native = Installed { profile_id: "dolphin".into(), kind: InstallKind::Native("/usr/bin/dolphin-emu".into()) };
+        let c = build_command(&p, &native, Path::new("/g/Melee.iso"), None, &[]).unwrap();
+        assert_eq!(c.as_std().get_program(), "/usr/bin/dolphin-emu");
+        assert_eq!(args_of(&c), ["-b", "-e", "/g/Melee.iso"]);
+
+        let fp = Installed { profile_id: "dolphin".into(), kind: InstallKind::Flatpak("org.DolphinEmu.dolphin-emu".into()) };
+        let c = build_command(&p, &fp, Path::new("/g/Melee.iso"), None, &[]).unwrap();
+        assert_eq!(c.as_std().get_program(), "flatpak");
+        assert_eq!(args_of(&c), ["run", "org.DolphinEmu.dolphin-emu", "-b", "-e", "/g/Melee.iso"]);
+    }
+
+    #[test]
+    fn retroarch_needs_core_and_extra_args_come_first() {
+        let p = profiles::get("retroarch").unwrap();
+        let i = Installed { profile_id: "retroarch".into(), kind: InstallKind::Native("/usr/bin/retroarch".into()) };
+        assert!(build_command(&p, &i, Path::new("/g/z.sfc"), None, &[]).is_err());
+        let c = build_command(&p, &i, Path::new("/g/z.sfc"), Some(Path::new("/c/snes9x_libretro.so")), &["-f".into()]).unwrap();
+        assert_eq!(args_of(&c), ["-f", "-L", "/c/snes9x_libretro.so", "/g/z.sfc"]);
+    }
+
+    #[test]
+    fn duckstation_stops_option_parsing_before_path() {
+        let p = profiles::get("duckstation").unwrap();
+        let i = Installed { profile_id: "duckstation".into(), kind: InstallKind::Native("/x/duckstation-qt".into()) };
+        let c = build_command(&p, &i, Path::new("/g/-weird name.cue"), None, &[]).unwrap();
+        assert_eq!(args_of(&c), ["-batch", "--", "/g/-weird name.cue"]);
+    }
+}

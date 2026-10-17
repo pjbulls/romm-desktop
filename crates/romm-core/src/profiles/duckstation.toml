@@ -1,0 +1,35 @@
+id = "duckstation"
+name = "DuckStation"
+platforms = ["psx"]
+
+[detect]
+linux_bins = ["duckstation-qt", "duckstation", "DuckStation-x64.AppImage"]
+windows_exes = [
+  "{programfiles}/DuckStation/duckstation-qt-x64-ReleaseLTCG.exe",
+  "{localappdata}/Programs/DuckStation/duckstation-qt-x64-ReleaseLTCG.exe",
+]
+
+# -batch exits when the game ends; "--" ends option parsing before the path.
+[launch]
+args = ["-batch", "--", "{rom}"]
+
+[data]
+linux = ["{xdg_data}/duckstation"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/portable.txt" },
+  "{documents}/DuckStation",
+]
+
+# Memory cards are per-game or shared depending on user settings; diffing the
+# folder handles both.
+[saves]
+mode = "diff"
+roots = ["memcards"]
+
+[states]
+mode = "diff"
+dir = "savestates"
+ignore_extensions = ["png", "jpg"]
+
+[bios]
+dir = "bios"

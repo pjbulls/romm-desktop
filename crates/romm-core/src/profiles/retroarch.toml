@@ -1,0 +1,38 @@
+id = "retroarch"
+name = "RetroArch"
+# RetroArch is mapped per platform via the core table in platforms.rs.
+platforms = []
+
+[detect]
+linux_bins = ["retroarch"]
+windows_exes = [
+  "{localappdata}/Programs/RetroArch/retroarch.exe",
+  "{programfiles}/RetroArch/retroarch.exe",
+  "{programfiles}/RetroArch-Win64/retroarch.exe",
+  "C:/RetroArch-Win64/retroarch.exe",
+]
+flatpak_id = "org.libretro.RetroArch"
+
+[launch]
+args = ["-L", "{core}", "{rom}"]
+
+# The first candidate that exists wins. On Windows RetroArch is normally portable
+# (retroarch.cfg next to the exe).
+[data]
+linux = ["{xdg_config}/retroarch"]
+flatpak = ["{home}/.var/app/org.libretro.RetroArch/config/retroarch"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/retroarch.cfg" },
+  "{appdata}/RetroArch",
+]
+
+# One <rom stem>.srm per game, found by name inside RetroArch's saves directory.
+[saves]
+mode = "stem"
+extensions = ["srm"]
+
+[states]
+mode = "stem"
+
+[bios]
+dir = "system"

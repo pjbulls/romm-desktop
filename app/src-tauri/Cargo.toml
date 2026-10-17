@@ -1,0 +1,25 @@
+[package]
+name = "romm-desktop"
+description = "Desktop client for RomM: library, saves, save states and emulator launching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "romm_desktop_lib"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+romm-core = { path = "../../crates/romm-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+base64.workspace = true
+
+[features]
+# Set by `tauri build`: serve the embedded frontend instead of the dev server.
+custom-protocol = ["tauri/custom-protocol"]

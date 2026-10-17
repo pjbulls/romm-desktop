@@ -1,0 +1,38 @@
+id = "dolphin"
+name = "Dolphin"
+platforms = ["ngc", "wii"]
+
+[detect]
+linux_bins = ["dolphin-emu"]
+windows_exes = [
+  "{programfiles}/Dolphin-x64/Dolphin.exe",
+  "{programfiles}/Dolphin/Dolphin.exe",
+  "{localappdata}/Programs/Dolphin/Dolphin.exe",
+]
+flatpak_id = "org.DolphinEmu.dolphin-emu"
+
+# -b = batch mode (no game list, exits when the game closes), -e = run this file.
+[launch]
+args = ["-b", "-e", "{rom}"]
+
+[data]
+# ~/.dolphin-emu is the legacy location and wins if it exists; new installs use XDG.
+linux = ["{home}/.dolphin-emu", { path = "{xdg_data}/dolphin-emu", fallback = true }]
+flatpak = ["{home}/.var/app/org.DolphinEmu.dolphin-emu/data/dolphin-emu"]
+windows = [
+  { path = "{exe_dir}/User", requires = "{exe_dir}/portable.txt" },
+  "{appdata}/Dolphin Emulator",
+  "{documents}/Dolphin Emulator",
+]
+
+# GameCube memory cards (raw card or per-game GCI folders) and Wii NAND save data
+# live in shared folders, so saves are attributed to a game by diffing these
+# folders around a play session.
+[saves]
+mode = "diff"
+roots = ["GC", "Wii/title/00010000", "Wii/title/00010001", "Wii/title/00010004"]
+
+# Save states are one file per slot in a flat folder, synced individually.
+[states]
+mode = "diff"
+dir = "StateSaves"
