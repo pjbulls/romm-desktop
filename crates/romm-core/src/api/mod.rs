@@ -155,6 +155,50 @@ impl RommClient {
         self.get_json(&["roms"], &q).await
     }
 
+    /// The whole library, one entry per *game*: RomM's `group_by_meta_id` collapses the regional
+    /// and revision copies of a title into the one it considers primary (the account's
+    /// "default" copy, else the best by the server's region priority; see `versions`), and
+    /// lists the rest in that entry's `sibling_roms`.
+    ///
+    /// Everything is fetched, page by page, so the caller can filter, search and page locally
+    /// (this is what Argosy does too). `progress(loaded, total)` is called after every page;
+    /// `total` is known from the first page on. Files are left out: only an install needs
+    /// them, and it fetches the ROM itself.
+    pub async fn library(&self, progress: &mut (dyn FnMut(usize, Option<i64>) + Send)) -> Result<Vec<Rom>> {
+        const PAGE: i64 = 500;
+        let mut out: Vec<Rom> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let (mut fetched, mut total): (i64, Option<i64>) = (0, None);
+        loop {
+            let mut q: Vec<(&str, String)> = vec![
+                ("limit", PAGE.to_string()),
+                ("offset", fetched.to_string()),
+                // Name order with RomM's id tiebreak: stable, so paging can't skip or repeat rows.
+                ("order_by", "name".into()),
+                ("group_by_meta_id", "true".into()),
+                ("with_files", "false".into()),
+                ("with_char_index", "false".into()),
+                ("with_filter_values", "false".into()),
+                ("with_rom_id_index", "false".into()),
+            ];
+            // The count is its own scan; once is enough.
+            if fetched > 0 {
+                q.push(("with_total", "false".into()));
+            }
+            let page: Page<Rom> = self.get_json(&["roms"], &q).await?;
+            total = total.or(page.total);
+            let got = page.items.len() as i64;
+            fetched += got;
+            // A library edited mid-fetch can shift rows between pages; never list a game twice.
+            out.extend(page.items.into_iter().filter(|r| seen.insert(r.id)));
+            progress(out.len(), total);
+            if got < PAGE || total.is_some_and(|t| fetched >= t) {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Pages through the whole result set.
     pub async fn all_roms(&self, platform_id: Option<i64>, search: Option<&str>) -> Result<Vec<Rom>> {
         const PAGE: i64 = 500;

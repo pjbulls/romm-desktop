@@ -106,6 +106,92 @@ async fn search_term_is_sent() {
 }
 
 #[tokio::test]
+async fn library_fetches_every_page_grouped_without_files_and_without_duplicates() {
+    let server = MockServer::start().await;
+    let first: Vec<Value> = (1..=500).map(rom_json).collect();
+    // Page two repeats id 500 (the library changed between requests) and adds two more.
+    let second: Vec<Value> = vec![rom_json(500), rom_json(501), rom_json(502)];
+    Mock::given(method("GET"))
+        .and(path("/api/roms"))
+        .and(query_param("offset", "0"))
+        .and(query_param("group_by_meta_id", "true"))
+        .and(query_param("with_files", "false"))
+        .and(query_param("order_by", "name"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": first, "total": 503, "limit": 500, "offset": 0})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/roms"))
+        .and(query_param("offset", "500"))
+        .and(query_param("group_by_meta_id", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": second, "total": null, "limit": 500, "offset": 500})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    let mut seen = Vec::new();
+    let all = c.library(&mut |loaded, total| seen.push((loaded, total))).await.unwrap();
+
+    assert_eq!(all.len(), 502, "the repeated row is dropped");
+    assert_eq!(all.iter().filter(|r| r.id == 500).count(), 1);
+    assert_eq!(seen, [(500, Some(503)), (502, Some(503))], "progress after each page, total known from the first");
+
+    let reqs = server.received_requests().await.unwrap();
+    let has_total_param = |i: usize| reqs[i].url.query_pairs().any(|(k, _)| k == "with_total");
+    assert!(!has_total_param(0), "the first page asks for the count");
+    assert!(reqs[1].url.query_pairs().any(|(k, v)| k == "with_total" && v == "false"), "later pages don't");
+    assert!(reqs.iter().all(|r| !r.url.query_pairs().any(|(k, _)| k == "platform_ids" || k == "search_term")), "the whole library, filtered locally");
+}
+
+#[tokio::test]
+async fn library_of_a_single_short_page_is_one_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/roms"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [rom_json(1), rom_json(2)], "total": 2, "limit": 500, "offset": 0})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    assert_eq!(c.library(&mut |_, _| {}).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_empty_library_is_not_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/roms"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [], "total": 0, "limit": 500, "offset": 0})))
+        .mount(&server)
+        .await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    assert!(c.library(&mut |_, _| {}).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sibling_roms_are_read_and_absent_ones_default_to_none() {
+    let server = MockServer::start().await;
+    let mut with = rom_json(1);
+    with["sibling_roms"] = json!([
+        {"id": 2, "name": "Game 1", "fs_name_no_tags": "game1", "fs_name_no_ext": "game1 (Japan)", "is_main_sibling": false, "sort_comparator": "game 1"},
+        {"id": 3, "name": "Game 1", "fs_name_no_tags": "game1", "fs_name_no_ext": "game1 (Europe)", "is_main_sibling": true}
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/api/roms"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [with, rom_json(9)], "total": 2, "limit": 500, "offset": 0})))
+        .mount(&server)
+        .await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    let all = c.library(&mut |_, _| {}).await.unwrap();
+    let ids: Vec<i64> = all[0].sibling_roms.iter().map(|s| s.id).collect();
+    assert_eq!(ids, [2, 3]);
+    assert!(all[0].sibling_roms[1].is_main_sibling);
+    assert_eq!(all[0].sibling_roms[0].fs_name_no_ext, "game1 (Japan)");
+    assert!(all[1].sibling_roms.is_empty(), "an older server that sends none still parses");
+}
+
+#[tokio::test]
 async fn download_streams_to_file_and_leaves_no_part_file_on_failure() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

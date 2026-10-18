@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errMsg } from "../api";
+import { api, errMsg, onLibrary } from "../api";
 import { useStore } from "../store";
 import type { Game, Platform } from "../types";
+import { isGameInstalled } from "../versions";
 import { GameCard } from "./GameCard";
 import { GameDrawer } from "./GameDrawer";
 
@@ -18,8 +19,16 @@ function useDebounced<T>(value: T, ms: number): T {
   return v;
 }
 
-export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platforms: Platform[]; onGoEmulators: () => void }) {
-  const { remember, installed } = useStore();
+interface Props {
+  mode: Mode;
+  platforms: Platform[];
+  onGoEmulators: () => void;
+  /** The library was reloaded from the server: the sidebar's game counts are out of date. */
+  onLibraryChanged: () => void;
+}
+
+export function Library({ mode, platforms, onGoEmulators, onLibraryChanged }: Props) {
+  const { remember, installed, push } = useStore();
   const [search, setSearch] = useState("");
   const q = useDebounced(search.trim(), 250);
   const [items, setItems] = useState<Game[]>([]);
@@ -29,6 +38,9 @@ export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platfo
   const [loading, setLoading] = useState(true);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The whole library is fetched before the first list can be shown; say how far along that is.
+  const [fetching, setFetching] = useState<{ loaded: number; total: number | null } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [open, setOpen] = useState<Game | null>(null);
   const opener = useRef<HTMLElement | null>(null);
   const openGame = useCallback((g: Game) => {
@@ -73,7 +85,7 @@ export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platfo
     [platformId, q, mode.kind, remember],
   );
 
-  useEffect(() => {
+  const restart = useCallback(() => {
     gen.current += 1;
     count.current = 0;
     setItems([]);
@@ -82,6 +94,27 @@ export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platfo
     setError(null);
     fetchPage(0, gen.current);
   }, [fetchPage]);
+
+  useEffect(restart, [restart]);
+
+  useEffect(() => {
+    const un = onLibrary((e) => setFetching(e.phase === "loading" ? { loaded: e.loaded, total: e.total } : null));
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+
+  // Fetches the whole library again (new ROMs, a changed default version) and starts the list over.
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await api.loadLibrary(true);
+    } catch (e) {
+      push("error", "Couldn't refresh the library", [errMsg(e), "Showing what was loaded before."]);
+    } finally {
+      setRefreshing(false);
+    }
+    onLibraryChanged();
+    restart();
+  }, [push, onLibraryChanged, restart]);
 
   useEffect(() => {
     const el = sentinel.current;
@@ -106,7 +139,7 @@ export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platfo
   }, []);
 
   const title = mode.kind === "installed" ? "Installed" : mode.platform?.name ?? "All games";
-  const shown = mode.kind === "installed" ? items.filter((g) => installed[g.id] !== false) : items;
+  const shown = mode.kind === "installed" ? items.filter((g) => isGameInstalled(g, installed)) : items;
 
   return (
     <>
@@ -115,7 +148,14 @@ export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platfo
           <h1>{title}</h1>
           <div className="muted small">{total != null ? `${total} game${total === 1 ? "" : "s"}` : "\u00a0"}</div>
         </div>
-        <input ref={searchBox} className="search" type="search" placeholder="Search games  ( / )" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search games" data-testid="search" />
+        <div className="topbar-tools">
+          {mode.kind === "library" && (
+            <button className="btn btn-ghost" onClick={refresh} disabled={refreshing || loading} title="Reload the library from the server" aria-label="Refresh library" data-testid="refresh-library">
+              {refreshing ? <span className="spinner sm" /> : "↻"}
+            </button>
+          )}
+          <input ref={searchBox} className="search" type="search" placeholder="Search games  ( / )" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search games" data-testid="search" />
+        </div>
       </header>
 
       {mode.kind === "library" && mode.platform && !mode.platform.emulatorInstalled && (
@@ -132,7 +172,12 @@ export function Library({ mode, platforms, onGoEmulators }: { mode: Mode; platfo
       {!loading && !error && shown.length === 0 && (
         <div className="empty">{mode.kind === "installed" ? "Nothing installed yet. Pick a game and choose Install." : q ? `No games match “${q}”.` : "No games here."}</div>
       )}
-      {loading && <div className="loading-row"><span className="spinner sm" /> Loading…</div>}
+      {loading && (
+        <div className="loading-row" data-testid="loading">
+          <span className="spinner sm" />{" "}
+          {fetching ? `Loading your library… ${fetching.loaded.toLocaleString()}${fetching.total ? ` of ${fetching.total.toLocaleString()}` : ""}` : "Loading…"}
+        </div>
+      )}
       <div ref={sentinel} style={{ height: 1 }} />
 
       {open && <GameDrawer game={open} platform={platforms.find((p) => p.slug === open.platformSlug)} onClose={closeGame} onGoEmulators={() => { setOpen(null); onGoEmulators(); }} />}

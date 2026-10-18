@@ -55,6 +55,22 @@ pub struct RomFile {
     pub is_top_level: bool,
 }
 
+/// One entry of a ROM's `sibling_roms`: another file of the same game on the same platform
+/// (a different region, revision, translation...). RomM sends only these five fields, so
+/// anything more (regions, revision) has to be read from the file name; see `versions`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SiblingRom {
+    pub id: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub fs_name_no_tags: String,
+    #[serde(default)]
+    pub fs_name_no_ext: String,
+    #[serde(default)]
+    pub is_main_sibling: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rom {
     pub id: i64,
@@ -74,6 +90,10 @@ pub struct Rom {
     pub files: Vec<RomFile>,
     #[serde(default)]
     pub path_cover_small: Option<String>,
+    /// The other versions of this game. When the list was requested with `group_by_meta_id`,
+    /// this ROM is the one RomM picked to represent the group (see `versions`).
+    #[serde(default)]
+    pub sibling_roms: Vec<SiblingRom>,
 }
 
 impl Rom {

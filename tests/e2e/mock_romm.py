@@ -9,17 +9,26 @@ TOKEN = 'rmm_e2etoken'
 SCOPES = ["me.read","platforms.read","roms.read","firmware.read","assets.read","assets.write","devices.read","devices.write"]
 BIOS = b"FAKE-PS1-BIOS-IMAGE"
 
-def mkrom(i, name, plat, slug):
-    fs = name.replace(':', '') + {'ngc': '.iso', 'psx': '.cue', 'psp': '.iso'}[slug]
+def mkrom(i, name, plat, slug, fs_stem=None):
+    fs = (fs_stem or name.replace(':', '')) + {'ngc': '.iso', 'psx': '.cue', 'psp': '.iso'}[slug]
     return dict(id=i, name=name, fs_name=fs, fs_name_no_ext=fs.rsplit('.', 1)[0], fs_size_bytes=2_000_000, platform_id=plat,
                 platform_slug=slug, platform_fs_slug=slug, has_multiple_files=False, files=[],
                 path_cover_small=f"/assets/romm/resources/roms/{plat}/{i}/cover/small.png?ts=1")
 ROMS = [mkrom(7, "Super Smash Bros. Melee", 1, 'ngc')]
 for n in range(1, 62):
     ROMS.append(mkrom(1000 + n, f"GameCube Title {n:02d}", 1, 'ngc'))
-ROMS += [mkrom(101, "Final Fantasy VII", 2, 'psx'), mkrom(102, "Crash Bandicoot", 2, 'psx'), mkrom(103, "Spyro the Dragon", 2, 'psx'),
+# Spyro exists as three files: USA (103), Europe (113) and Japan (123), one game. As in RomM, each is its own ROM,
+# they list each other in sibling_roms (id, name, fs_name_no_tags, fs_name_no_ext, is_main_sibling only), and a
+# request with group_by_meta_id=true returns only the one RomM picked to represent them: here 103, the USA copy.
+SPYRO = {103: "Spyro the Dragon (USA)", 113: "Spyro the Dragon (Europe) (En,Fr,De)", 123: "Spyro the Dragon (Japan)"}
+SPYRO_PRIMARY = 103
+ROMS += [mkrom(101, "Final Fantasy VII", 2, 'psx'), mkrom(102, "Crash Bandicoot", 2, 'psx'),
+         *[mkrom(i, "Spyro the Dragon", 2, 'psx', fs_stem=stem) for i, stem in SPYRO.items()],
          mkrom(201, "Daxter", 3, 'psp'), mkrom(202, "Lumines", 3, 'psp')]
-ROMS.sort(key=lambda r: r['name'].lower())
+ROMS.sort(key=lambda r: (r['name'].lower(), r['id']))
+for r in ROMS:
+    r['sibling_roms'] = [dict(id=i, name=r['name'], fs_name_no_tags="Spyro the Dragon", fs_name_no_ext=stem, is_main_sibling=(i == SPYRO_PRIMARY))
+                         for i, stem in SPYRO.items() if r['id'] in SPYRO and i != r['id']]
 
 # RetroAchievements, shaped like RomM's responses. Achievement ids (9001...) deliberately differ from
 # badge names (10001...): RomM reports what a user has earned by *badge name*, so a client that matched
@@ -41,7 +50,7 @@ ME = dict(id=1, username='e2e', email=None, enabled=True, role='admin', oauth_sc
                                                       earned_achievements=[dict(id='10002', date='2026-03-04 05:06:07', date_hardcore='2026-03-04 05:06:07')])]))
 PLATS = [
   dict(id=1, slug='ngc', fs_slug='ngc', name='GameCube', rom_count=sum(r['platform_id'] == 1 for r in ROMS), firmware=[]),
-  dict(id=2, slug='psx', fs_slug='psx', name='PlayStation', rom_count=3,
+  dict(id=2, slug='psx', fs_slug='psx', name='PlayStation', rom_count=5,
        firmware=[dict(id=9, platform_id=2, file_name='scph5501.bin', file_size_bytes=len(BIOS), md5_hash=hashlib.md5(BIOS).hexdigest(), is_verified=True, missing_from_fs=False)]),
   dict(id=3, slug='psp', fs_slug='psp', name='PlayStation Portable', rom_count=2, firmware=[]),
 ]
@@ -91,8 +100,10 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/platforms': return self.send(200, PLATS)
         if p == '/api/users/me': return self.send(200, ME)
         if p == '/api/roms':
+            grouped = q.get('group_by_meta_id') == 'true'
             items = [r for r in ROMS if ('platform_ids' not in q or str(r['platform_id']) == q['platform_ids'])
-                     and (not q.get('search_term') or q['search_term'].lower() in r['name'].lower())]
+                     and (not q.get('search_term') or q['search_term'].lower() in r['name'].lower())
+                     and not (grouped and r['id'] in SPYRO and r['id'] != SPYRO_PRIMARY)]
             off, lim = int(q.get('offset', 0)), int(q.get('limit', 50))
             return self.send(200, dict(items=items[off:off + lim], total=len(items), limit=lim, offset=off))
         m = re.match(r'/api/roms/(\d+)$', p)

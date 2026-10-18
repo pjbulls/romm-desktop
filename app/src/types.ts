@@ -43,15 +43,32 @@ export interface Platform {
   ignoredOverride: string | null;
 }
 
+/** One copy of a game (a region, a revision...). Each is its own ROM: install, play and sync it by `id`. */
+export interface Version {
+  id: number;
+  /** Read from the file name, e.g. `Europe · En,Fr,De`. */
+  label: string;
+  /** The copy the server chose to represent the game; the one the library shows. */
+  isDefault: boolean;
+  installed: boolean;
+}
+
 export interface Game {
+  /** The primary copy's ROM id (the server's choice). */
   id: number;
   name: string;
   platformId: number;
   platformSlug: string;
+  /** Any copy installed. */
   installed: boolean;
+  /** The primary copy's size. */
   sizeBytes: number;
   multiFile: boolean;
   coverPath: string | null;
+  /** Every copy, the primary first, when there is more than one; empty = nothing to choose. */
+  versions: Version[];
+  /** Installed list only: tells apart two installed copies of the same game. */
+  versionLabel: string | null;
 }
 
 export interface GamesPage {
@@ -65,6 +82,14 @@ export interface GamesArgs {
   offset: number;
   limit: number;
   installedOnly?: boolean;
+}
+
+/** Progress of loading the whole library from the server (`romm://library`). */
+export interface LibraryEvent {
+  phase: "loading" | "finished" | "failed";
+  loaded: number;
+  total: number | null;
+  error: string | null;
 }
 
 export interface SyncSummary {

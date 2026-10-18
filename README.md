@@ -10,7 +10,7 @@ A Windows + Debian/Linux desktop client for [RomM](https://github.com/rommapp/ro
 
 ## What it does
 
-- **Library**: platforms, search, infinite-scroll grid with cover art, an *Installed* view that works offline.
+- **Library**: platforms, search, a scrolling grid with cover art, an *Installed* view that works offline. The whole library is loaded once and browsed in memory, one card per game (see [Games with several versions](#games-with-several-versions)).
 - **Install / uninstall** with a progress bar. Multi-disc games are extracted and pointed at their `.m3u`.
 - **Play** = pull saves and states → launch the emulator → work out which files changed → push saves, states and playtime. If you're offline it still launches, and changes upload next time.
 - **Save states** are synced per file with your own baseline (RomM exposes no hash for states), with a size cap and a clear status per state (*in sync / newer here / newer on server / conflict …*).
@@ -77,6 +77,18 @@ In RomM: **Profile → Client API Tokens**, create a token with scopes `me.read 
 
 Optional: add `me.write` to refresh RetroAchievements progress from inside the app (see [RetroAchievements](#retroachievements)). It is deliberately not in the list above: besides refreshing RetroAchievements, it lets a token edit your RomM profile and manage API tokens.
 
+## Games with several versions
+
+A game that exists as several files on your server (USA / Europe / Japan, revisions, a translation) is **one card**, not one per file. This follows what RomM's web UI and [Argosy](https://github.com/rommapp/argosy-launcher) do.
+
+- **Which one is shown is the server's choice.** The library is requested with RomM's `group_by_meta_id`, so RomM picks the representative: the copy you marked as default in RomM (*Set default*), else a full release over a pre-release, else the best by the server's region priority, else by file name. The app doesn't second-guess it and has no setting of its own for this; change it in RomM and press ↻.
+- **Cards say when there's more.** A card with other versions carries an "N versions" badge, and counts everywhere (sidebar, header) are games, not files.
+- **The panel has a Version dropdown** (also usable with a controller: left/right steps through it). It opens on the version you have installed, otherwise on the server's pick, which is marked *default*. Install, Play, Sync, saves, save states and achievements all act on the selected version.
+- **Each version is its own ROM**, as in RomM and Argosy: its own install, its own saves and states. Installing Japan next to USA doesn't mix their saves. A game counts as installed when any version is. In the *Installed* list, two installed versions of one game show their tags (`USA`, `Japan · Rev 1`) to tell them apart.
+- **Labels** come from the file name, the trailing `(USA) (Rev 1)` groups, because RomM sends nothing more about a sibling. Real releases are listed before pre-releases (`Beta`, `Proto`, `Demo`...), translations and hacks.
+
+**Why the whole library is fetched.** Like Argosy, which syncs everything and browses locally, the app loads the grouped library (500 per page, no file lists, progress shown) and filters, searches and pages in memory. That makes the counts exact, platform switching and search instant, and a search finds a game through any of its versions (as RomM's does). The copy is reused for 10 minutes when you open a list from the top, never while you scroll, and **↻** next to the search box reloads it. If a reload fails, the previous copy stays in use.
+
 ## How saves and states sync
 
 | | Saves | Save states |
@@ -108,17 +120,19 @@ How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`me
 ## Tests
 
 ```bash
-cargo test --workspace --lib --tests   # 121 tests, all in romm-core (against a mock RomM server)
-cd app && npm test                      # 66 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel
+cargo test --workspace --lib --tests   # 148 tests, all in romm-core (against a mock RomM server)
+cd app && npm test                      # 96 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions
 tests/e2e/run.sh                        # 36 checks driving the real app (needs xvfb + webkit2gtk-driver, debug build)
 DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
 DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
+DRIVER=drive_versions.py tests/e2e/run.sh # 30 checks on games with several versions (written, not yet run: see below)
 tests/smoke/smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devices
 ```
 
 ## What has and hasn't been verified
 
 **Verified**
+- Games with several versions: the version, search, count and grouping logic (unit tests), the paged fetch against a mock server (grouped, no files, one count request, duplicates dropped), the card badge and the dropdown's contents and preselection (rendered components), and the real fetch-and-label code against the e2e fake server. The e2e journey `drive_versions.py` is written but **has not been run**; the app isn't built in the environment this was written in. The Tauri crate type-checks.
 - Core logic and CLI: unit and integration tests, plus scripted two-device runs of the real binary.
 - UI: the real Linux app (WebKitGTK, software-rendered under Xvfb) driven through login errors, pairing, library paging and search, cover art, install with progress, play → save + state upload, installed list, emulator detection, BIOS install, settings persistence, sync all, disconnect. The screenshots above come from that run.
 - Controller navigation: the real app driven end to end with a **simulated** controller: on-screen keyboard, grid/sidebar/panel navigation, both sticks, paging, infinite-scroll loading, platform switching, install, play, Start-to-play, ignoring input while a game runs, dropdowns and number fields, saving settings, opting out. It surfaced and fixed four real bugs (focus-lift mis-navigation, Down jumping to the menu, focus parking on the search box, and a library "No games" flash).
@@ -135,6 +149,7 @@ tests/smoke/smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devic
 - Flatpak launches: the sandbox needs access to your ROM folder.
 
 **Known limits**
+- Versions: the whole library is held in memory, so a very large library takes a moment to load the first time (progress is shown) and changes made on the server show up after ↻ or 10 minutes. The Installed list works offline and therefore shows only what is installed, with no dropdown for versions you haven't. `romm games` (CLI) lists every file, not one per game. RomM links "siblings" by any shared provider id, so now and then it chains in an unrelated game (Argosy documents HeartGold/SoulSilver); such a game appears in the dropdown, with its full file name when its label would clash. The version labels are read from file names; a file with no tags is labelled by its whole name. The search is local, over names and file names, and doesn't use RomM's alternative titles.
 - Keyboard shortcuts are minimal (`/` focuses search, `Esc` closes the panel).
 - Nintendo pads are labelled as printed (their A/B are swapped relative to Xbox) but "accept" is always the bottom button; there is no swap option yet.
 - Shared-folder saves are this app's own zip format, so they don't interoperate with Argosy's. RetroArch states only interoperate when both devices use the same core and version.

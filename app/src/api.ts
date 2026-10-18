@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  AchievementsView, Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LoginArgs, Platform, ProgressEvent, Settings, Status,
+  AchievementsView, Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LibraryEvent, LoginArgs, Platform, ProgressEvent, Settings, Status,
 } from "./types";
 
 /** Tauri rejects with the Rust `String` error; normalise anything else. */
@@ -18,6 +18,8 @@ export const api = {
   logout: () => invoke<Status>("logout"),
   platforms: () => invoke<Platform[]>("platforms"),
   games: (args: GamesArgs) => invoke<GamesPage>("games", { args }),
+  /** Loads the whole library if it isn't loaded (or `force`: reloads it). Rejects when a forced reload fails; the old copy stays in use. Resolves to the number of games. */
+  loadLibrary: (force = false) => invoke<number>("load_library", { force }),
   cover: (romId: number, path: string) => invoke<string | null>("cover", { romId, path }),
   /** Falls back to a saved copy (`stale`) when the server is unreachable. `force` skips the profile cache. */
   achievements: (romId: number, force = false) => invoke<AchievementsView>("achievements", { romId, force }),
@@ -51,6 +53,10 @@ export type Topic = "install" | "play" | "sync" | "sync-all";
 
 export function onJob<T = unknown>(topic: Topic, fn: (e: JobEvent<T>) => void): Promise<UnlistenFn> {
   return listen<JobEvent<T>>(`romm://${topic}`, (e) => fn(e.payload));
+}
+
+export function onLibrary(fn: (e: LibraryEvent) => void): Promise<UnlistenFn> {
+  return listen<LibraryEvent>("romm://library", (e) => fn(e.payload));
 }
 
 export function onProgress(fn: (e: ProgressEvent) => void): Promise<UnlistenFn> {

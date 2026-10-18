@@ -2,6 +2,7 @@
 
 pub mod achievements;
 pub mod api;
+pub mod browse;
 pub mod config;
 pub mod detect;
 pub mod error;
@@ -17,5 +18,6 @@ pub mod session;
 pub mod state;
 pub mod states;
 pub mod sync;
+pub mod versions;
 
 pub use error::{Error, Result};

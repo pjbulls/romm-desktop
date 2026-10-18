@@ -16,7 +16,7 @@ use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
 use romm_core::states::{self, StateOptions, StateReport, StateView};
 use romm_core::sync::{saves_overview, ConflictPolicy, SaveView, SyncReport, Syncer};
-use romm_core::{platforms as plat, profiles, retroarch, session};
+use romm_core::{browse, platforms as plat, profiles, retroarch, session, versions};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State as TauriState};
 use tokio::sync::{Mutex, RwLock};
@@ -43,6 +43,22 @@ pub struct AppState {
     /// `GET /api/users/me`, kept briefly: it carries the user's whole RetroAchievements progression
     /// (megabytes for a heavy RA user) and every game panel needs it.
     ra_me: Arc<Mutex<Option<(Instant, Me)>>>,
+    /// The whole library, one entry per game, fetched once (see `AppState::library`). The lock is
+    /// held while it loads, so everyone who needs the library waits for that one fetch.
+    library: Arc<Mutex<Option<LibraryCache>>>,
+}
+
+struct LibraryCache {
+    at: Instant,
+    roms: Arc<Vec<Rom>>,
+}
+
+/// What `AppState::library` hands back.
+struct Loaded {
+    roms: Arc<Vec<Rom>>,
+    /// Set when a refresh failed and `roms` is the previous copy: better than nothing, but the
+    /// caller may want to say so.
+    refresh_error: Option<String>,
 }
 
 /// Marks a game as "something is happening to it" so the UI can't start two jobs at once.
@@ -63,6 +79,9 @@ const SYNC_ALL: i64 = -1;
 const RA_REFRESH: i64 = -2;
 /// How long a fetched profile is reused when opening game panels.
 const RA_ME_TTL: Duration = Duration::from_secs(5 * 60);
+/// How old the library may be when a list is opened from the top (switching platform, searching,
+/// going back to it). Scrolling further down a list never refetches: the order must not move.
+const LIBRARY_TTL: Duration = Duration::from_secs(10 * 60);
 
 impl AppState {
     fn busy(&self, id: i64) -> CmdResult<Busy> {
@@ -96,6 +115,48 @@ impl AppState {
     async fn forget_ra(&self) {
         *self.ra_me.lock().await = None;
         let _ = std::fs::remove_dir_all(self.dirs.data_dir.join("achievements"));
+    }
+
+    /// Forget the library (on login and logout: it belongs to one account's server).
+    async fn forget_library(&self) {
+        *self.library.lock().await = None;
+    }
+
+    /// The whole library, grouped one entry per game, fetched on first use and then reused for
+    /// `max_age` (always, when None; never, when zero, which is how a manual refresh forces it).
+    /// Concurrent callers share one fetch. Progress goes out as `romm://library` events.
+    ///
+    /// If a refresh fails while an older copy exists, the older copy is returned with the error.
+    async fn library(&self, app: &AppHandle, max_age: Option<Duration>) -> CmdResult<Loaded> {
+        let mut slot = self.library.lock().await;
+        if let Some(c) = &*slot {
+            if max_age.is_none_or(|m| c.at.elapsed() < m) {
+                return Ok(Loaded { roms: c.roms.clone(), refresh_error: None });
+            }
+        }
+        let client = self.client().await?;
+        let a = app.clone();
+        let mut progress = move |loaded: usize, total: Option<i64>| {
+            let _ = a.emit("romm://library", LibraryEvent { phase: "loading", loaded, total, error: None });
+        };
+        let _ = app.emit("romm://library", LibraryEvent { phase: "loading", loaded: 0, total: None, error: None });
+        match client.library(&mut progress).await {
+            Ok(roms) => {
+                let n = roms.len();
+                let roms = Arc::new(roms);
+                *slot = Some(LibraryCache { at: Instant::now(), roms: roms.clone() });
+                let _ = app.emit("romm://library", LibraryEvent { phase: "finished", loaded: n, total: Some(n as i64), error: None });
+                Ok(Loaded { roms, refresh_error: None })
+            }
+            Err(e) => {
+                let e = s(e);
+                let _ = app.emit("romm://library", LibraryEvent { phase: "failed", loaded: 0, total: None, error: Some(e.clone()) });
+                match &*slot {
+                    Some(c) => Ok(Loaded { roms: c.roms.clone(), refresh_error: Some(e) }),
+                    None => Err(e),
+                }
+            }
+        }
     }
 
     async fn update_cfg(&self, f: impl FnOnce(&mut Config)) -> CmdResult<()> {
@@ -209,6 +270,33 @@ struct GameDto {
     size_bytes: u64,
     multi_file: bool,
     cover_path: Option<String>,
+    /// Every copy of this game (regions, revisions...) when there is more than one, the primary
+    /// one first. `id` above is the primary. Empty when there is nothing to choose.
+    versions: Vec<VersionDto>,
+    /// Set on the Installed list when two installed entries are the same game, to tell them apart.
+    version_label: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionDto {
+    /// The ROM id of this copy: install, play and sync it like any other game.
+    id: i64,
+    label: String,
+    /// The copy RomM chose to represent the game.
+    is_default: bool,
+    installed: bool,
+}
+
+/// Progress of loading the whole library (`romm://library`).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LibraryEvent {
+    /// "loading" | "finished" | "failed"
+    phase: &'static str,
+    loaded: usize,
+    total: Option<i64>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -229,7 +317,13 @@ struct GamesArgs {
     installed_only: bool,
 }
 
-fn game_dto(r: &Rom, installed: bool) -> GameDto {
+fn game_dto(r: &Rom, db: &State) -> GameDto {
+    let versions: Vec<VersionDto> = versions::versions(r)
+        .into_iter()
+        .map(|v| VersionDto { installed: db.roms.contains_key(&v.id), id: v.id, label: v.label, is_default: v.is_default })
+        .collect();
+    // A game counts as installed when any of its copies is.
+    let installed = if versions.is_empty() { db.roms.contains_key(&r.id) } else { versions.iter().any(|v| v.installed) };
     GameDto {
         id: r.id,
         name: r.title().to_string(),
@@ -239,6 +333,8 @@ fn game_dto(r: &Rom, installed: bool) -> GameDto {
         size_bytes: r.fs_size_bytes,
         multi_file: r.has_multiple_files,
         cover_path: r.path_cover_small.clone(),
+        versions,
+        version_label: None,
     }
 }
 
@@ -401,6 +497,7 @@ async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<Statu
     .await?;
     *st.client.write().await = Some(client.clone());
     st.forget_ra().await;
+    st.forget_library().await;
     st.device_id(&client).await?;
 
     let mut warnings = vec![];
@@ -421,6 +518,7 @@ async fn logout(st: TauriState<'_, AppState>) -> CmdResult<StatusDto> {
     let _ = std::fs::remove_file(st.dirs.token_file());
     *st.client.write().await = None;
     st.forget_ra().await;
+    st.forget_library().await;
     st.update_cfg(|c| {
         c.server_url = None;
         c.device_id = None;
@@ -444,6 +542,10 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
         Some(core) => retro.as_ref().is_some_and(|l| retroarch::find_core(l, core, resolver.os).is_some()),
         None => installed.get(&c.emulator).copied().unwrap_or(false),
     };
+    // The server counts files; the list shows games (copies of one game are a single entry), so
+    // once the library is in memory its counts are used. `try_lock`: while it is still loading,
+    // the sidebar shouldn't wait for it, and the server's counts will do until it's done.
+    let games_per_platform = st.library.try_lock().ok().and_then(|g| g.as_ref().map(|c| browse::count_by_platform(&c.roms)));
     Ok(list
         .into_iter()
         .map(|p| {
@@ -454,7 +556,7 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
             PlatformDto {
                 id: p.id,
                 name: p.title().to_string(),
-                rom_count: p.rom_count,
+                rom_count: games_per_platform.as_ref().map_or(p.rom_count, |m| m.get(&p.id).copied().unwrap_or(0)),
                 firmware_count: p.firmware.len(),
                 emulator_installed: profile.as_ref().is_some_and(|pr| resolver.installed(pr).is_some()),
                 emulator_name: profile.map(|pr| pr.name),
@@ -473,16 +575,20 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
 }
 
 #[tauri::command]
-async fn games(st: TauriState<'_, AppState>, args: GamesArgs) -> CmdResult<GamesPage> {
+async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) -> CmdResult<GamesPage> {
     if args.installed_only {
         // Served from the local database so it works offline and needs no paging.
         let db = st.db.lock().await;
         let needle = args.search.clone().unwrap_or_default().to_lowercase();
-        let items: Vec<GameDto> = db
-            .roms
-            .values()
-            .filter(|r| needle.is_empty() || r.name.to_lowercase().contains(&needle))
-            .map(|r| GameDto {
+        let roms: Vec<&LocalRom> = db.roms.values().filter(|r| needle.is_empty() || r.name.to_lowercase().contains(&needle)).collect();
+        // Two installed copies of one game (USA and Japan) would otherwise be identical cards.
+        let file_names: Vec<String> = roms.iter().map(|r| r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+        let entries: Vec<(&str, &str, &str)> = roms.iter().zip(&file_names).map(|(r, f)| (r.platform_slug.as_str(), r.name.as_str(), f.as_str())).collect();
+        let labels = versions::installed_labels(&entries);
+        let items: Vec<GameDto> = roms
+            .iter()
+            .zip(labels)
+            .map(|(r, version_label)| GameDto {
                 id: r.rom_id,
                 name: r.name.clone(),
                 platform_id: 0,
@@ -491,15 +597,34 @@ async fn games(st: TauriState<'_, AppState>, args: GamesArgs) -> CmdResult<Games
                 size_bytes: 0,
                 multi_file: false,
                 cover_path: r.cover_path.clone(),
+                versions: vec![],
+                version_label,
             })
             .collect();
         let total = Some(items.len() as i64);
         return Ok(GamesPage { items, total });
     }
-    let client = st.client().await?;
-    let page = client.roms(args.platform_id, args.search.as_deref(), args.limit, args.offset).await.map_err(s)?;
+    // The whole library is held in memory and sliced here. A list opened from the top may refresh
+    // it if it has gone stale; a request for further down must see the same list as the first.
+    let loaded = st.library(&app, (args.offset == 0).then_some(LIBRARY_TTL)).await?;
+    let hits = browse::filter(&loaded.roms, args.platform_id, args.search.as_deref().unwrap_or(""));
+    let total = Some(hits.len() as i64);
     let db = st.db.lock().await;
-    Ok(GamesPage { items: page.items.iter().map(|r| game_dto(r, db.roms.contains_key(&r.id))).collect(), total: page.total })
+    let items = hits.into_iter().skip(args.offset.max(0) as usize).take(args.limit.max(0) as usize).map(|r| game_dto(r, &db)).collect();
+    Ok(GamesPage { items, total })
+}
+
+/// Loads the library (if it isn't already) so the first list opens instantly, and so the
+/// sidebar can count games rather than files. `force` refetches; a failed refresh is reported
+/// and leaves the previous copy in use. Returns the number of games.
+#[tauri::command]
+async fn load_library(app: AppHandle, st: TauriState<'_, AppState>, force: Option<bool>) -> CmdResult<usize> {
+    let max_age = if force.unwrap_or(false) { Duration::ZERO } else { LIBRARY_TTL };
+    let loaded = st.library(&app, Some(max_age)).await?;
+    match loaded.refresh_error {
+        Some(e) if force.unwrap_or(false) => Err(e),
+        _ => Ok(loaded.roms.len()),
+    }
 }
 
 fn mime_for(ext: &str) -> &'static str {
@@ -995,6 +1120,7 @@ pub fn run() {
                 client: Arc::new(RwLock::new(client)),
                 busy: Arc::new(StdMutex::new(HashSet::new())),
                 ra_me: Arc::new(Mutex::new(None)),
+                library: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })
@@ -1004,6 +1130,7 @@ pub fn run() {
             logout,
             platforms,
             games,
+            load_library,
             cover,
             achievements,
             refresh_achievements,

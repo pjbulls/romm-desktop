@@ -61,7 +61,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [dismiss],
   );
   const bump = useCallback((id: number) => setRevision((r) => ({ ...r, [id]: (r[id] ?? 0) + 1 })), []);
-  const remember = useCallback((games: Game[]) => games.forEach((g) => names.current.set(g.id, g.name)), []);
+  // Every copy of a game is its own ROM and reports on its own id; a toast about one of several should say which.
+  const remember = useCallback(
+    (games: Game[]) =>
+      games.forEach((g) => {
+        names.current.set(g.id, g.name);
+        if (g.versions.length > 1) g.versions.forEach((v) => names.current.set(v.id, `${g.name} (${v.label})`));
+      }),
+    [],
+  );
   const setInstalled = useCallback((id: number, v: boolean) => setInstalledMap((m) => ({ ...m, [id]: v })), []);
 
   useEffect(() => {

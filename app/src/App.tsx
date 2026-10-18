@@ -26,7 +26,11 @@ export default function App() {
   }, [push]);
 
   useEffect(() => {
-    if (status?.loggedIn) loadPlatforms();
+    if (!status?.loggedIn) return;
+    loadPlatforms();
+    // Load the whole library now, so the first list is ready, and count games in the sidebar once
+    // it is (until then the server's count of files is shown). A failure surfaces in the list.
+    api.loadLibrary().then(loadPlatforms).catch(() => {});
   }, [status?.loggedIn, loadPlatforms]);
 
   if (fatal) return <div className="center-screen"><div className="card"><h1>Something went wrong</h1><p className="error-text">{fatal}</p></div></div>;
@@ -52,8 +56,8 @@ export default function App() {
       />
       <main className="main">
         <ErrorBoundary key={view.kind}>
-        {view.kind === "library" && <Library key={view.platform?.id ?? "all"} mode={{ kind: "library", platform: view.platform }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} />}
-        {view.kind === "installed" && <Library key="installed" mode={{ kind: "installed" }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} />}
+        {view.kind === "library" && <Library key={view.platform?.id ?? "all"} mode={{ kind: "library", platform: view.platform }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} onLibraryChanged={loadPlatforms} />}
+        {view.kind === "installed" && <Library key="installed" mode={{ kind: "installed" }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} onLibraryChanged={loadPlatforms} />}
         {view.kind === "emulators" && <Emulators platforms={platforms} onChanged={loadPlatforms} />}
         {view.kind === "settings" && <Settings status={status} onDisconnected={(s) => { setStatus(s); setPlatforms([]); }} />}
         </ErrorBoundary>
