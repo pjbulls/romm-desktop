@@ -3,11 +3,13 @@
 pub mod types;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use reqwest::{multipart, Response, Url};
 use serde::de::DeserializeOwned;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 use types::*;
@@ -30,6 +32,8 @@ pub struct RommClient {
     http: reqwest::Client,
     base: String,
     token: Option<String>,
+    /// Shared by every clone: API calls take turns until their response headers arrive. See `send`.
+    gate: Arc<Mutex<()>>,
 }
 
 impl RommClient {
@@ -38,7 +42,7 @@ impl RommClient {
             .user_agent(format!("{CLIENT_SLUG}/{}", env!("CARGO_PKG_VERSION")))
             .danger_accept_invalid_certs(accept_invalid_certs)
             .build()?;
-        Ok(Self { http, base: normalize_base_url(base_url)?, token })
+        Ok(Self { http, base: normalize_base_url(base_url)?, token, gate: Arc::new(Mutex::new(())) })
     }
 
     pub fn base_url(&self) -> &str {
@@ -67,6 +71,22 @@ impl RommClient {
         }
     }
 
+    /// Sends one `/api` request and returns once the response *headers* are in.
+    ///
+    /// For every request made with a client token, RomM's auth middleware updates the token's,
+    /// the device's and the user's "last seen" rows (the token and device ones at most every
+    /// 5 minutes). When two requests arrive together while those are due, they race to update
+    /// the same rows, and on MariaDB with snapshot isolation the loser gets an HTTP 500 (error
+    /// 1020, "Record has changed since last read in table 'client_tokens'"). The app issues
+    /// several calls at once (library page + platforms, background sync, details panel), so
+    /// they take turns here: the auth step of one finishes before the next one starts.
+    /// Bodies and downloads stream after the lock is released, so only the wait for headers is
+    /// serialised. Not used for `/assets` (served by nginx, never reaches RomM's auth).
+    async fn send(&self, rb: reqwest::RequestBuilder) -> Result<Response> {
+        let _turn = self.gate.lock().await;
+        Ok(rb.send().await?)
+    }
+
     async fn check(resp: Response) -> Result<Response> {
         if resp.status().is_success() {
             return Ok(resp);
@@ -79,7 +99,7 @@ impl RommClient {
     }
 
     async fn get_json<T: DeserializeOwned>(&self, segments: &[&str], query: &[(&str, String)]) -> Result<T> {
-        let resp = self.authed(self.http.get(self.url(segments)?).query(query)).send().await?;
+        let resp = self.send(self.authed(self.http.get(self.url(segments)?).query(query))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
@@ -184,7 +204,7 @@ impl RommClient {
     /// Download to `<dest>.part`, then rename, so an interrupted download never
     /// leaves a truncated file under the real name.
     async fn download_url(&self, url: Url, dest: &Path, progress: &mut (dyn FnMut(u64, Option<u64>) + Send)) -> Result<()> {
-        let resp = Self::check(self.authed(self.http.get(url)).send().await?).await?;
+        let resp = Self::check(self.send(self.authed(self.http.get(url))).await?).await?;
         let total = resp.content_length();
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -224,18 +244,18 @@ impl RommClient {
 
     /// Idempotent: RomM returns the existing device when `hostname`+`platform` match.
     pub async fn register_device(&self, reg: &DeviceRegistration) -> Result<Device> {
-        let resp = self.authed(self.http.post(self.url(&["devices"])?).json(reg)).send().await?;
+        let resp = self.send(self.authed(self.http.post(self.url(&["devices"])?).json(reg))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
     pub async fn negotiate(&self, req: &NegotiateRequest) -> Result<NegotiateResponse> {
-        let resp = self.authed(self.http.post(self.url(&["sync", "negotiate"])?).json(req)).send().await?;
+        let resp = self.send(self.authed(self.http.post(self.url(&["sync", "negotiate"])?).json(req))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
     pub async fn complete_session(&self, session_id: i64, req: &CompleteRequest) -> Result<()> {
         let url = self.url(&["sync", "sessions", &session_id.to_string(), "complete"])?;
-        let resp = self.authed(self.http.post(url).json(req)).send().await?;
+        let resp = self.send(self.authed(self.http.post(url).json(req))).await?;
         Self::check(resp).await?;
         Ok(())
     }
@@ -271,8 +291,7 @@ impl RommClient {
         let part = multipart::Part::bytes(bytes).file_name(p.file_name.clone());
         let form = multipart::Form::new().part("saveFile", part);
         let resp = self
-            .authed(self.http.post(self.url(&["saves"])?).query(&q).multipart(form))
-            .send()
+            .send(self.authed(self.http.post(self.url(&["saves"])?).query(&q).multipart(form)))
             .await?;
         Ok(Self::check(resp).await?.json().await?)
     }
@@ -283,8 +302,7 @@ impl RommClient {
         let part = multipart::Part::bytes(bytes).file_name(p.file_name.clone());
         let form = multipart::Form::new().part("saveFile", part);
         let resp = self
-            .authed(self.http.put(self.url(&["saves", &save_id.to_string()])?).query(&q).multipart(form))
-            .send()
+            .send(self.authed(self.http.put(self.url(&["saves", &save_id.to_string()])?).query(&q).multipart(form)))
             .await?;
         Ok(Self::check(resp).await?.json().await?)
     }
@@ -334,7 +352,7 @@ impl RommClient {
                 .post(self.url(&["states"])?)
                 .query(&[("rom_id", rom_id.to_string()), ("emulator", emulator.to_string())]),
         };
-        let resp = self.authed(rb.multipart(form)).send().await?;
+        let resp = self.send(self.authed(rb.multipart(form))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
@@ -350,8 +368,7 @@ impl RommClient {
 
     pub async fn delete_states(&self, ids: &[i64]) -> Result<()> {
         let resp = self
-            .authed(self.http.post(self.url(&["states", "delete"])?).json(&serde_json::json!({ "states": ids })))
-            .send()
+            .send(self.authed(self.http.post(self.url(&["states", "delete"])?).json(&serde_json::json!({ "states": ids }))))
             .await?;
         Self::check(resp).await?;
         Ok(())
@@ -389,7 +406,7 @@ impl RommClient {
             ("optimistic", "true".to_string()),
         ];
         let url = self.url(&["saves", &save_id.to_string(), "content"])?;
-        let resp = self.authed(self.http.get(url).query(&q)).send().await?;
+        let resp = self.send(self.authed(self.http.get(url).query(&q))).await?;
         Ok(Self::check(resp).await?.bytes().await?.to_vec())
     }
 }

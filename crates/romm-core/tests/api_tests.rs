@@ -181,3 +181,40 @@ async fn device_registration_is_sent_as_documented() {
     assert_eq!(body["sync_mode"], "api");
     assert_eq!(body["client"], "romm-desktop");
 }
+
+// RomM's auth updates the token's "last seen" rows on every request; two requests arriving
+// together race on MariaDB with snapshot isolation and one gets a 500. API calls must therefore
+// take turns, including across clones of the client (the app hands a clone to every command).
+// Each response is delayed 300 ms, so serial calls take >= 600 ms and parallel ones ~300 ms.
+async fn slow_empty_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/platforms"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])).set_delay(std::time::Duration::from_millis(300)))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn api_calls_take_turns() {
+    let server = slow_empty_server().await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(c.platforms(), c.platforms());
+    a.unwrap();
+    b.unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_millis(580), "requests overlapped: {:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn clones_share_the_same_turn_order() {
+    let server = slow_empty_server().await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    let other = c.clone();
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(c.platforms(), other.platforms());
+    a.unwrap();
+    b.unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_millis(580), "clones overlapped: {:?}", started.elapsed());
+}
