@@ -16,7 +16,7 @@ use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
 use romm_core::states::{self, StateOptions, StateReport, StateView};
 use romm_core::sync::{saves_overview, ConflictPolicy, SaveView, SyncReport, Syncer};
-use romm_core::{profiles, retroarch, session};
+use romm_core::{platforms as plat, profiles, retroarch, session};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State as TauriState};
 use tokio::sync::{Mutex, RwLock};
@@ -180,6 +180,22 @@ struct PlatformDto {
     emulator: Option<String>,
     emulator_name: Option<String>,
     emulator_installed: bool,
+    /// Everything that can play this platform (standalone emulators, RetroArch cores).
+    choices: Vec<EmulatorChoiceDto>,
+    /// The saved choice's `value`, or "" for Automatic.
+    selected: String,
+    /// What Automatic resolves to; None when nothing can play the platform.
+    automatic_label: Option<String>,
+    /// A saved emulator that can't play this platform and is being ignored.
+    ignored_override: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmulatorChoiceDto {
+    value: String,
+    label: String,
+    installed: bool,
 }
 
 #[derive(Serialize)]
@@ -419,11 +435,22 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
     let list: Vec<Platform> = client.platforms().await.map_err(s)?;
     let cfg = st.cfg.read().await.clone();
     let resolver = Resolver::new(&cfg);
+    // Detect each emulator once, not once per platform.
+    let installed: std::collections::HashMap<String, bool> =
+        profiles::builtin().into_iter().map(|p| { let ok = resolver.installed(&p).is_some(); (p.id, ok) }).collect();
+    // RetroArch cores count as installed only if the core file is actually present.
+    let retro = resolver.emu_env("retroarch").ok().and_then(|(env, _)| env.retroarch);
+    let choice_installed = |c: &plat::Choice| match &c.core {
+        Some(core) => retro.as_ref().is_some_and(|l| retroarch::find_core(l, core, resolver.os).is_some()),
+        None => installed.get(&c.emulator).copied().unwrap_or(false),
+    };
     Ok(list
         .into_iter()
         .map(|p| {
             let emu = resolver.emulator_for(&p.slug).ok();
             let profile = emu.as_deref().and_then(profiles::get);
+            let offered = plat::choices_for(&p.slug);
+            let saved = plat::saved(&p.slug, &cfg.platform_emulators, &cfg.retroarch_cores);
             PlatformDto {
                 id: p.id,
                 name: p.title().to_string(),
@@ -432,6 +459,13 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
                 emulator_installed: profile.as_ref().is_some_and(|pr| resolver.installed(pr).is_some()),
                 emulator_name: profile.map(|pr| pr.name),
                 emulator: emu,
+                automatic_label: offered.first().map(plat::Choice::label),
+                choices: offered
+                    .iter()
+                    .map(|c| EmulatorChoiceDto { value: c.value(), label: c.label(), installed: choice_installed(c) })
+                    .collect(),
+                selected: saved.choice.map(|c| c.value()).unwrap_or_default(),
+                ignored_override: saved.ignored.map(|id| profiles::get(&id).map(|pr| pr.name).unwrap_or(id)),
                 slug: p.slug,
             }
         })
@@ -865,17 +899,13 @@ async fn set_emulator_path(st: TauriState<'_, AppState>, id: String, path: Optio
     .await
 }
 
+/// `choice` is a `Choice::value()`: `dolphin`, `retroarch:gambatte`, or None/"" for Automatic.
 #[tauri::command]
-async fn set_platform_emulator(st: TauriState<'_, AppState>, slug: String, emulator: Option<String>) -> CmdResult<()> {
-    st.update_cfg(|c| match emulator {
-        Some(e) => {
-            c.platform_emulators.insert(slug, e);
-        }
-        None => {
-            c.platform_emulators.remove(&slug);
-        }
-    })
-    .await
+async fn set_platform_choice(st: TauriState<'_, AppState>, slug: String, choice: Option<String>) -> CmdResult<()> {
+    let mut guard = st.cfg.write().await;
+    let cfg = &mut *guard;
+    plat::set_choice(&mut cfg.platform_emulators, &mut cfg.retroarch_cores, &slug, choice.as_deref())?;
+    cfg.save(&st.dirs).map_err(s)
 }
 
 #[tauri::command]
@@ -985,7 +1015,7 @@ pub fn run() {
             game_details,
             emulators,
             set_emulator_path,
-            set_platform_emulator,
+            set_platform_choice,
             install_bios,
             settings,
             save_settings

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "./api";
 import { Emulators } from "./components/Emulators";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Library } from "./components/Library";
 import { Login } from "./components/Login";
 import { Settings } from "./components/Settings";
@@ -50,10 +51,12 @@ export default function App() {
         onDisconnected={(s) => { setStatus(s); setPlatforms([]); }}
       />
       <main className="main">
+        <ErrorBoundary key={view.kind}>
         {view.kind === "library" && <Library key={view.platform?.id ?? "all"} mode={{ kind: "library", platform: view.platform }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} />}
         {view.kind === "installed" && <Library key="installed" mode={{ kind: "installed" }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} />}
         {view.kind === "emulators" && <Emulators platforms={platforms} onChanged={loadPlatforms} />}
         {view.kind === "settings" && <Settings status={status} onDisconnected={(s) => { setStatus(s); setPlatforms([]); }} />}
+        </ErrorBoundary>
       </main>
       <Toasts />
     </div>
