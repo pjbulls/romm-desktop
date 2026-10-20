@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../api";
 import { formatBytes, SAVE_STATUS, STATE_STATUS, timeAgo } from "../format";
 import { useStore } from "../store";
-import type { Details, Game, Platform } from "../types";
+import type { Details, Game, Platform, VersionSize } from "../types";
 import { Achievements } from "./Achievements";
 import { Cover } from "./GameCard";
-import { initialCopy, isCopyInstalled, versionOptionText } from "../versions";
+import { copyInfo, initialCopy, isCopyInstalled, otherCopyIds, versionOptionText } from "../versions";
 
 interface Props {
   game: Game;
@@ -27,7 +27,19 @@ export function GameDrawer({ game, platform, onClose, onGoEmulators }: Props) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const panel = useRef<HTMLElement | null>(null);
   const isInstalled = isCopyInstalled(game, id, installed);
-  const onPrimary = id === game.id;
+  // The list knows the primary version's size; the others' are fetched when the panel opens.
+  const [sizes, setSizes] = useState<Record<number, VersionSize>>({});
+  const info = copyInfo(game, id, sizes);
+
+  useEffect(() => {
+    const others = otherCopyIds(game);
+    if (others.length === 0) return;
+    let alive = true;
+    api.versionSizes(others)
+      .then((got) => alive && setSizes(Object.fromEntries(got.map((v) => [v.id, v]))))
+      .catch(() => {}); // a size is a nicety: without it the panel is just as before
+    return () => { alive = false; };
+  }, [game]);
 
   const refresh = useCallback(() => {
     api.gameDetails(id, game.platformSlug).then((d) => { setDetails(d); setLoadErr(null); }).catch((e) => setLoadErr(errMsg(e)));
@@ -81,7 +93,7 @@ export function GameDrawer({ game, platform, onClose, onGoEmulators }: Props) {
           <Cover game={game} className="cover-lg" />
           <div className="drawer-title">
             <h2>{game.name}</h2>
-            <div className="muted">{platform?.name ?? game.platformSlug}{onPrimary && game.sizeBytes ? ` · ${formatBytes(game.sizeBytes)}` : ""}{onPrimary && game.multiFile ? " · multi-file" : ""}</div>
+            <div className="muted">{platform?.name ?? game.platformSlug}{info?.sizeBytes ? ` · ${formatBytes(info.sizeBytes)}` : ""}{info?.multiFile ? " · multi-file" : ""}</div>
             {emu ? (
               emu.installed
                 ? <div className="emu-line ok"><span className="dot dot-ok" /> Plays in {emu.name}</div>
@@ -96,7 +108,7 @@ export function GameDrawer({ game, platform, onClose, onGoEmulators }: Props) {
             <select id="version-select" className="choice-select" data-testid="version-select" value={id} onChange={(e) => pickVersion(Number(e.target.value))}>
               {game.versions.map((v) => <option key={v.id} value={v.id}>{versionOptionText(v, isCopyInstalled(game, v.id, installed))}</option>)}
             </select>
-            <div className="muted small">{game.versions.length} versions of this game. The default is the server&apos;s pick; each version has its own install and saves.</div>
+            <div className="muted small">{game.versions.length} versions of this game.</div>
           </div>
         )}
 
@@ -136,7 +148,7 @@ export function GameDrawer({ game, platform, onClose, onGoEmulators }: Props) {
             <section>
               <h3>Saves</h3>
               {details.saves.length === 0 ? (
-                <p className="muted">No save file yet. One appears after you save in the game.</p>
+                <p className="muted">No save file yet.</p>
               ) : (
                 <ul className="rows" data-testid="saves">
                   {details.saves.map((s) => (
@@ -152,12 +164,12 @@ export function GameDrawer({ game, platform, onClose, onGoEmulators }: Props) {
             <section>
               <h3>Save states</h3>
               {!details.statesEnabled ? (
-                <p className="muted">Save-state syncing is turned off in Settings.</p>
+                <p className="muted">Save-state syncing is turned off.</p>
               ) : (
                 <>
-                  {details.statesError && <div className="banner banner-warn">Couldn't reach the server, so this shows files on this PC only. ({details.statesError})</div>}
+                  {details.statesError && <div className="banner banner-warn">Couldn't reach the server: ({details.statesError})</div>}
                   {details.states.length === 0 ? (
-                    <p className="muted">No save states yet. Create one in the emulator and it will sync after you quit.</p>
+                    <p className="muted">No save states yet.</p>
                   ) : (
                     <ul className="rows" data-testid="states">
                       {details.states.map((s) => (

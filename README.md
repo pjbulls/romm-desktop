@@ -1,23 +1,20 @@
 # RomM Desktop
 
-A Windows + Debian/Linux desktop client for [RomM](https://github.com/rommapp/romm), modelled on [Argosy](https://github.com/rommapp/argosy-launcher) for Android: browse your library, download games and BIOS files, launch them in your emulators, and keep **saves and save states** in sync with your server.
+A Windows + Linux desktop client for [RomM](https://github.com/rommapp/romm), modelled on [Argosy](https://github.com/rommapp/argosy-launcher) for Android. All vibes ⭐🎉🚀
 
-![Library](docs/screenshots/library.png)
-
-| After a play session | Emulators | Settings |
+| Library | After a play session | Settings |
 |---|---|---|
-| ![](docs/screenshots/after-play.png) | ![](docs/screenshots/emulators.png) | ![](docs/screenshots/settings.png) |
+| ![](docs/screenshots/library.png) | ![](docs/screenshots/after-play.png) | ![](docs/screenshots/settings.png) |
 
 ## What it does
 
-- **Library**: platforms, search, a scrolling grid with cover art, an *Installed* view that works offline. The whole library is loaded once and browsed in memory, one card per game (see [Games with several versions](#games-with-several-versions)).
-- **Install / uninstall** with a progress bar. Multi-disc games are extracted and pointed at their `.m3u`.
-- **Play** = pull saves and states → launch the emulator → work out which files changed → push saves, states and playtime. If you're offline it still launches, and changes upload next time.
-- **Save states** are synced per file with your own baseline (RomM exposes no hash for states), with a size cap and a clear status per state (*in sync / newer here / newer on server / conflict …*).
-- **Conflicts** never lose data. Default "keep both": your version is archived on the server, the server's is used, and what's replaced locally is copied to a backups folder first.
-- **Emulators**: RetroArch (incl. Nintendo DS via its melonDS core), Dolphin, PPSSPP, DuckStation (PS1), PCSX2 (PS2), Azahar (3DS), xemu (original Xbox, launch only: see below); auto-detected on PATH, standard Windows locations and Flatpak, or point at the executable. BIOS files install into the right folder, MD5-verified. Under **Emulators & BIOS → Which emulator plays what**, each system only offers what can actually play it: standalone emulators that list the system, plus the RetroArch cores that run it (Game Boy offers Gambatte, mGBA, SameBoy, Gearboy, TGB Dual and VBA-M; 3DS offers Azahar; nothing for a system with no emulator yet). Choices whose emulator or core isn't installed are flagged, not hidden. Anything that can't play a system is refused when saved.
-- **RetroAchievements**: each game's achievements with what you've earned, progress and points, read from your RomM server (see below).
-- **Game controller navigation**: browse, install, play and change settings without touching a keyboard or mouse (see below).
+- **Library**: platforms, search, a scrolling grid with cover art, an *Installed* view that works offline.
+- **Install / uninstall** ROMs locally.
+- **Play**: pull saves and states → launch the emulator → work out which files changed → push saves, states and playtime.
+- **Conflicts**: never lose data. Default "keep both": your version is archived on the server, the server's is used, and what's replaced locally is copied to a backups folder first.
+- **Emulators**: RetroArch, DuckStation (PS1), Dolphin, PPSSPP, PCSX2 (PS2), Azahar (3DS), xemu (original Xbox, see below). Auto-detected via PATH, standard Windows locations and Flatpak, or manually locate the executable. BIOS files install into known folders.
+- **RetroAchievements**: each game's achievements with what you've earned, progress and points, read from your RomM server.
+- **Controller support**: browse, install, play and change settings without touching a keyboard or mouse.
 
 ## Game controller
 
@@ -89,6 +86,17 @@ A game that exists as several files on your server (USA / Europe / Japan, revisi
 
 **Why the whole library is fetched.** Like Argosy, which syncs everything and browses locally, the app loads the grouped library (500 per page, no file lists, progress shown) and filters, searches and pages in memory. That makes the counts exact, platform switching and search instant, and a search finds a game through any of its versions (as RomM's does). The copy is reused for 10 minutes when you open a list from the top, never while you scroll, and **↻** next to the search box reloads it. If a reload fails, the previous copy stays in use.
 
+## If the window goes dark
+
+A web view that dies or stops painting leaves nothing on screen and nothing in any console, so the app keeps a small log of its own: `diagnostics/ui.log` (and `ui.log.1`, the one before it) in the app's data folder (`%APPDATA%\romm\romm-desktop\data` on Windows, `~/.local/share/romm-desktop` on Linux, `~/Library/Application Support/app.romm.romm-desktop` on macOS, or under `ROMM_DESKTOP_HOME`). It holds counts and timings only, never names or addresses, and is capped at about 512 KB.
+
+- `app` lines come from the backend: startup (version, OS, **web view version**), the library loading, and a `WATCHDOG` line if the page stops reporting for 10 seconds while it is on screen, and another when it starts again.
+- `page` lines come from the UI. `hb` is a report every two seconds: `heap` (JS memory), `nodes` (size of the page), `cards`, `imgs` (loaded/total), `scroll` (position), `lag` (how late its timer fired: a busy or hung page runs late), `vis`/`focus`, `pads` (controllers seen) and `hints` (controller hint bar shown). `error`, `rejection`, `csp blocked`, `longtask` and `visibility` lines say what it sounds like.
+
+Reading it after a black screen: if the `hb` lines **keep coming** after the screen went dark, the page is alive and it is the painting (GPU, compositor) that failed. If they **stop** (look for `WATCHDOG`), the page hung or its process died, and the last `hb` shows what it was doing: `heap` or `nodes` climbing, `lag` growing, or nothing unusual.
+
+On Windows the page runs in WebView2 (Chromium). To test whether the GPU path is involved, start the app from a terminal with `set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--disable-gpu` (cmd) or `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--disable-gpu"` (PowerShell) first.
+
 ## How saves and states sync
 
 | | Saves | Save states |
@@ -106,7 +114,7 @@ Emulator profiles are TOML in `crates/romm-core/src/profiles/`: detection, launc
 
 ## RetroAchievements
 
-Open a game and its **Achievements** section shows the set, which ones you've earned (hardcore ones are marked), points, the highest award, and when you last earned one. Badges load as you scroll; long sets show the first few with a *Show all* button. It also works offline, from the copy saved the last time the server answered.
+Open a game and its **Achievements** section shows the set, which ones you've earned (hardcore ones are marked), points, the highest award, and when you last earned one. Badges load as you scroll; long sets show the first few with a *Show all* button. A **search box** finds achievements by name or description (every word must match; accents and case are ignored), and a **Missable** toggle narrows the list to the ones RetroAchievements marks as missable, meaning they can be lost for good. It combines with *Earned / Locked*, so *Missable* + *Locked* is what you can still miss. The number on each button is how many you'd see if you chose it. *Missable* is greyed out for games where RetroAchievements marks none, and the search and the toggle also work before you've linked a username (to see what to watch out for before you play). Esc clears the search before it closes the panel. It also works offline, from the copy saved the last time the server answered.
 
 This app only *displays* what RomM knows. It doesn't talk to retroachievements.org and doesn't touch the emulators, so for any of this to show up:
 
@@ -120,8 +128,8 @@ How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`me
 ## Tests
 
 ```bash
-cargo test --workspace --lib --tests   # 148 tests, all in romm-core (against a mock RomM server)
-cd app && npm test                      # 96 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions
+cargo test --workspace --lib --tests   # 156 tests, all in romm-core (against a mock RomM server)
+cd app && npm test                      # 160 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions, the whole app mounted against a fake backend (startup, loading, crashes), diagnostics reporting, achievement search and filtering
 tests/e2e/run.sh                        # 36 checks driving the real app (needs xvfb + webkit2gtk-driver, debug build)
 DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
 DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
@@ -157,4 +165,4 @@ tests/smoke/smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devic
 - The token lives in a 0600 file, not the OS keychain.
 - RetroArch saves are `.srm` only (no `.rtc`).
 
-Licence: GPL-3.0-or-later (add the LICENSE text before publishing).
+License: GPL-3.0-or-later

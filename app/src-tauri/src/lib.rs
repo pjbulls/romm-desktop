@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use romm_core::achievements::{self, AchievementsView};
 use romm_core::api::types::{DeviceRegistration, Me, Platform, Rom};
 use romm_core::api::{RommClient, CLIENT_SLUG};
 use romm_core::config::{default_device_name, hostname, load_token, store_token, AppDirs, Config};
+use romm_core::diagnostics::{self, LogFile, Watchdog};
 use romm_core::library::{self, BiosStatus};
 use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
@@ -46,6 +48,44 @@ pub struct AppState {
     /// The whole library, one entry per game, fetched once (see `AppState::library`). The lock is
     /// held while it loads, so everyone who needs the library waits for that one fetch.
     library: Arc<Mutex<Option<LibraryCache>>>,
+    diag: Arc<Diag>,
+}
+
+/// The diagnostics log (see `romm_core::diagnostics`) and what the watchdog needs to know about the page.
+struct Diag {
+    log: LogFile,
+    started: Instant,
+    /// Milliseconds since start of the page's last report, plus one; 0 = none yet.
+    last_report: AtomicU64,
+    page_visible: AtomicBool,
+}
+
+impl Diag {
+    fn new(dirs: &AppDirs) -> Self {
+        Diag { log: LogFile::new(&dirs.data_dir), started: Instant::now(), last_report: AtomicU64::new(0), page_visible: AtomicBool::new(true) }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    fn last_report_ms(&self) -> Option<u64> {
+        self.last_report.load(Ordering::Relaxed).checked_sub(1)
+    }
+
+    /// A note from the backend.
+    fn app(&self, msg: &str) {
+        self.log.append(&format!("{} app  {msg}", diagnostics::timestamp()));
+    }
+
+    /// A line from the page. `report`: this is one of its periodic reports, which the watchdog listens for.
+    fn page(&self, line: &str, report: bool, visible: bool) {
+        if report {
+            self.last_report.store(self.elapsed_ms() + 1, Ordering::Relaxed);
+        }
+        self.page_visible.store(visible, Ordering::Relaxed);
+        self.log.append(&format!("{} page {line}", diagnostics::timestamp()));
+    }
 }
 
 struct LibraryCache {
@@ -140,9 +180,12 @@ impl AppState {
             let _ = a.emit("romm://library", LibraryEvent { phase: "loading", loaded, total, error: None });
         };
         let _ = app.emit("romm://library", LibraryEvent { phase: "loading", loaded: 0, total: None, error: None });
+        let began = Instant::now();
+        self.diag.app("library loading");
         match client.library(&mut progress).await {
             Ok(roms) => {
                 let n = roms.len();
+                self.diag.app(&format!("library loaded: {n} games in {} ms", began.elapsed().as_millis()));
                 let roms = Arc::new(roms);
                 *slot = Some(LibraryCache { at: Instant::now(), roms: roms.clone() });
                 let _ = app.emit("romm://library", LibraryEvent { phase: "finished", loaded: n, total: Some(n as i64), error: None });
@@ -150,6 +193,7 @@ impl AppState {
             }
             Err(e) => {
                 let e = s(e);
+                self.diag.app(&format!("library failed after {} ms: {e}", began.elapsed().as_millis()));
                 let _ = app.emit("romm://library", LibraryEvent { phase: "failed", loaded: 0, total: None, error: Some(e.clone()) });
                 match &*slot {
                     Some(c) => Ok(Loaded { roms: c.roms.clone(), refresh_error: Some(e) }),
@@ -286,6 +330,15 @@ struct VersionDto {
     /// The copy RomM chose to represent the game.
     is_default: bool,
     installed: bool,
+}
+
+/// How big one version of a game is (see `version_sizes`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionSizeDto {
+    id: i64,
+    size_bytes: u64,
+    multi_file: bool,
 }
 
 /// Progress of loading the whole library (`romm://library`).
@@ -612,6 +665,21 @@ async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) ->
     let db = st.db.lock().await;
     let items = hits.into_iter().skip(args.offset.max(0) as usize).take(args.limit.max(0) as usize).map(|r| game_dto(r, &db)).collect();
     Ok(GamesPage { items, total })
+}
+
+/// The size of each of the given versions of a game. The library list only knows the primary
+/// version's, because RomM's `sibling_roms` carries none; the panel asks for the others when it
+/// opens. A version the server can't be asked about is simply absent from the answer.
+#[tauri::command]
+async fn version_sizes(st: TauriState<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<VersionSizeDto>> {
+    let client = st.client().await?;
+    Ok(client.rom_sizes(&ids).await.into_iter().map(|r| VersionSizeDto { id: r.id, size_bytes: r.bytes, multi_file: r.multi_file }).collect())
+}
+
+/// The page reporting on itself (see `romm_core::diagnostics`). Fire and forget: nothing here may fail.
+#[tauri::command]
+fn diag_page(st: TauriState<'_, AppState>, line: String, report: bool, visible: bool) {
+    st.diag.page(&line, report, visible);
 }
 
 /// Loads the library (if it isn't already) so the first list opens instantly, and so the
@@ -1113,6 +1181,27 @@ pub fn run() {
             let cfg = Config::load(&dirs)?;
             let db = State::load(&dirs.state_file())?;
             let client = build_client(&dirs, &cfg);
+            let diag = Arc::new(Diag::new(&dirs));
+            diag.app(&format!(
+                "start romm-desktop {} on {}/{}, web view {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                tauri::webview_version().unwrap_or_else(|e| format!("unknown ({e})")),
+            ));
+            // If the page stops reporting while it is on screen, say so in the log.
+            let watched = diag.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut watchdog = Watchdog::new(Duration::from_secs(10));
+                let mut tick = tokio::time::interval(Duration::from_secs(2));
+                loop {
+                    tick.tick().await;
+                    let visible = watched.page_visible.load(Ordering::Relaxed);
+                    if let Some(line) = watchdog.check(watched.elapsed_ms(), watched.last_report_ms(), visible) {
+                        watched.app(&line);
+                    }
+                }
+            });
             app.manage(AppState {
                 dirs,
                 cfg: Arc::new(RwLock::new(cfg)),
@@ -1121,6 +1210,7 @@ pub fn run() {
                 busy: Arc::new(StdMutex::new(HashSet::new())),
                 ra_me: Arc::new(Mutex::new(None)),
                 library: Arc::new(Mutex::new(None)),
+                diag,
             });
             Ok(())
         })
@@ -1131,6 +1221,8 @@ pub fn run() {
             platforms,
             games,
             load_library,
+            version_sizes,
+            diag_page,
             cover,
             achievements,
             refresh_achievements,

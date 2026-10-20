@@ -55,6 +55,15 @@ pub struct RomFile {
     pub is_top_level: bool,
 }
 
+/// How big one ROM is on the server (see `RommClient::rom_sizes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RomSize {
+    pub id: i64,
+    pub bytes: u64,
+    /// More than one file; the download is then a zip.
+    pub multi_file: bool,
+}
+
 /// One entry of a ROM's `sibling_roms`: another file of the same game on the same platform
 /// (a different region, revision, translation...). RomM sends only these five fields, so
 /// anything more (regions, revision) has to be read from the file name; see `versions`.

@@ -103,6 +103,54 @@ export function achievementCounts(list: Achievement[]): Record<AchFilter, number
   return { all: list.length, earned, locked: list.length - earned };
 }
 
+/** What the achievements list is narrowed by: the earned/locked choice, "missable only", and words to search for. */
+export interface AchQuery {
+  status: AchFilter;
+  missable: boolean;
+  text: string;
+}
+
+/** Lower case with accents taken off, so "pokemon" finds "Pokémon". */
+export function foldText(s: string): string {
+  return s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+/** RetroAchievements marks an achievement `missable` when it can be lost for good (a one-time event, a point of no return). */
+export const isMissable = (a: Achievement): boolean => a.kind === "missable";
+
+/** The achievements whose title or description contains every word of `text`, in any order. No words: all of them. */
+export function searchAchievements(list: Achievement[], text: string): Achievement[] {
+  const words = foldText(text).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return list;
+  return list.filter((a) => {
+    const hay = foldText(`${a.title} ${a.description}`);
+    return words.every((w) => hay.includes(w));
+  });
+}
+
+/** Search, "missable only" and the earned/locked choice, all at once. */
+export function queryAchievements(list: Achievement[], q: AchQuery): Achievement[] {
+  const found = searchAchievements(list, q.text);
+  return filterAchievements(q.missable ? found.filter(isMissable) : found, q.status);
+}
+
+/** Whether anything beyond the earned/locked choice is narrowing the list. */
+export const isNarrowed = (q: AchQuery): boolean => q.missable || q.text.trim() !== "";
+
+/** The number on each control: how many achievements choosing it would show, given the other controls. */
+export interface AchFacets {
+  status: Record<AchFilter, number>;
+  missable: number;
+}
+
+export function achievementFacets(list: Achievement[], q: AchQuery): AchFacets {
+  const found = searchAchievements(list, q.text);
+  return {
+    status: achievementCounts(q.missable ? found.filter(isMissable) : found),
+    missable: filterAchievements(found, q.status).filter(isMissable).length,
+  };
+}
+
 export function achievementPercent(v: Pick<AchievementsView, "earned" | "total">): number {
   return v.total > 0 ? Math.round((v.earned / v.total) * 100) : 0;
 }

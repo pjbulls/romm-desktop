@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg, loadCover } from "../api";
 import {
-  ACH_FILTERS, ACH_KIND, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements, timeAgo,
-  type AchFilter,
+  ACH_FILTERS, ACH_KIND, ACH_PREVIEW, AWARD, achievementFacets, achievementPercent, fullDate, isMissable, isNarrowed, previewAchievements, queryAchievements,
+  timeAgo, type AchFilter, type AchQuery,
 } from "../format";
 import { useStore } from "../store";
 import type { Achievement, AchievementsView, Game } from "../types";
@@ -72,10 +72,23 @@ interface PanelProps {
   onToggleExpanded: () => void;
   onRefresh: () => void;
   onRetry: () => void;
+  /** Words to search titles and descriptions for. */
+  query?: string;
+  /** Show only the achievements RetroAchievements marks as missable. */
+  missableOnly?: boolean;
+  onQuery?: (text: string) => void;
+  onMissableOnly?: (on: boolean) => void;
+  /** Back to everything: no search, no missable filter, no earned/locked choice. */
+  onClear?: () => void;
 }
 
+const nothing = () => {};
+
 /** Everything the section shows, as a pure function of its props (so it can be rendered in tests). */
-export function AchievementsPanel({ romId, view, error, refreshing, filter, expanded, onFilter, onToggleExpanded, onRefresh, onRetry }: PanelProps) {
+export function AchievementsPanel({
+  romId, view, error, refreshing, filter, expanded, onFilter, onToggleExpanded, onRefresh, onRetry,
+  query = "", missableOnly = false, onQuery = nothing, onMissableOnly = nothing, onClear = nothing,
+}: PanelProps) {
   const header = (
     <div className="row-flex ach-head">
       <h3>Achievements</h3>
@@ -111,14 +124,17 @@ export function AchievementsPanel({ romId, view, error, refreshing, filter, expa
     return (
       <section data-testid="achievements">
         {header}
-        <p className="muted">No RetroAchievements for this game. RetroAchievements may not cover it, or RomM hasn't matched it.</p>
+        <p className="muted">No RetroAchievements found for this game.</p>
         {stale}
       </section>
     );
   }
 
-  const counts = achievementCounts(view.achievements);
-  const filtered = filterAchievements(view.achievements, filter);
+  const q: AchQuery = { status: filter, missable: missableOnly, text: query };
+  const facets = achievementFacets(view.achievements, q);
+  const filtered = queryAchievements(view.achievements, q);
+  const narrowed = isNarrowed(q);
+  const missableTotal = view.achievements.filter(isMissable).length;
   const shown = previewAchievements(filtered, expanded);
   const pct = achievementPercent(view);
   const award = view.award ? AWARD[view.award] : undefined;
@@ -131,12 +147,12 @@ export function AchievementsPanel({ romId, view, error, refreshing, filter, expa
 
       {view.state === "not_linked" && (
         <div className="banner banner-warn" data-testid="ach-not-linked">
-          Add your RetroAchievements username to your profile in RomM to see which of these you've earned.
+          Add your RetroAchievements username to your RomM profile first.
         </div>
       )}
       {ready && view.progress_missing && (
         <div className="banner banner-warn" data-testid="ach-no-progress">
-          RomM hasn't fetched your RetroAchievements progress yet, so nothing is marked as earned. Use Refresh, or run the sync in RomM.
+          RomM hasn't fetched your RetroAchievements progress yet.
         </div>
       )}
 
@@ -157,18 +173,39 @@ export function AchievementsPanel({ romId, view, error, refreshing, filter, expa
         </div>
       )}
 
-      {ready && (
-        <div className="ach-filters" role="group" aria-label="Filter achievements">
-          {ACH_FILTERS.map((f) => (
-            <button key={f.value} className="btn btn-ghost small" aria-pressed={filter === f.value} onClick={() => onFilter(f.value)} data-testid={`ach-filter-${f.value}`}>
-              {f.label} <span className="muted">{counts[f.value]}</span>
+      {view.achievements.length > 0 && (
+        <div className="ach-controls">
+          <input
+            className="search ach-search" type="search" placeholder="Search achievements" aria-label="Search achievements" data-testid="ach-search"
+            value={query} onChange={(e) => onQuery(e.target.value)}
+            // Escape clears a search before it closes the panel the search is in.
+            onKeyDown={(e) => { if (e.key === "Escape" && query) { e.stopPropagation(); onQuery(""); } }}
+          />
+          <div className="ach-filters" role="group" aria-label="Filter achievements">
+            {ready && ACH_FILTERS.map((f) => (
+              <button key={f.value} className="btn btn-ghost small" aria-pressed={filter === f.value} onClick={() => onFilter(f.value)} data-testid={`ach-filter-${f.value}`}>
+                {f.label} <span className="muted">{facets.status[f.value]}</span>
+              </button>
+            ))}
+            <button
+              className="btn btn-ghost small" aria-pressed={missableOnly} disabled={missableTotal === 0} onClick={() => onMissableOnly(!missableOnly)} data-testid="ach-filter-missable"
+              title={missableTotal === 0 ? "RetroAchievements marks none of this game's achievements as missable" : "Only achievements that can be missed for good"}
+            >
+              Missable <span className="muted">{facets.missable}</span>
             </button>
-          ))}
+          </div>
         </div>
       )}
+      {narrowed && filtered.length > 0 && <p className="muted small" data-testid="ach-showing">Showing {filtered.length} of {view.achievements.length}</p>}
 
       {filtered.length === 0 ? (
-        <p className="muted">{filter === "earned" ? "Nothing earned yet." : "Everything is earned."}</p>
+        narrowed ? (
+          <p className="muted" data-testid="ach-none">
+            No achievements match. <button className="link-btn" onClick={onClear} data-testid="ach-clear">Clear</button>
+          </p>
+        ) : (
+          <p className="muted">{filter === "earned" ? "Nothing earned yet." : "Everything is earned."}</p>
+        )
       ) : (
         <ul className="rows ach-list" data-testid="ach-list">
           {shown.map((a, i) => <AchievementRow key={`${a.id}-${i}`} romId={romId} a={a} />)}
@@ -189,6 +226,8 @@ export function Achievements({ game }: { game: Game }) {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<AchFilter>("all");
+  const [query, setQuery] = useState("");
+  const [missableOnly, setMissableOnly] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
   const load = useCallback(() => {
@@ -201,6 +240,8 @@ export function Achievements({ game }: { game: Game }) {
   useEffect(() => {
     setView(null);
     setFilter("all");
+    setQuery("");
+    setMissableOnly(false);
     setExpanded(false);
     return load();
   }, [load]);
@@ -222,6 +263,10 @@ export function Achievements({ game }: { game: Game }) {
     <AchievementsPanel
       romId={game.id} view={view} error={error} refreshing={refreshing} filter={filter} expanded={expanded}
       onFilter={(f) => { setFilter(f); setExpanded(false); }}
+      query={query} missableOnly={missableOnly}
+      onQuery={(t) => { setQuery(t); setExpanded(false); }}
+      onMissableOnly={(on) => { setMissableOnly(on); setExpanded(false); }}
+      onClear={() => { setQuery(""); setMissableOnly(false); setFilter("all"); setExpanded(false); }}
       onToggleExpanded={() => setExpanded((x) => !x)}
       onRefresh={refresh}
       onRetry={() => { setView(null); load(); }}

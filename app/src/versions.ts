@@ -1,4 +1,4 @@
-import type { Game, Version } from "./types";
+import type { Game, Version, VersionSize } from "./types";
 
 /** This session's installs and uninstalls (the store's `installed`), by ROM id. */
 type Overrides = Record<number, boolean>;
@@ -34,6 +34,27 @@ export function initialCopy(game: Game, overrides: Overrides): number {
 export function versionOptionText(v: Version, installed: boolean): string {
   const notes = [v.isDefault && "default", installed && "installed"].filter(Boolean).join(", ");
   return notes ? `${v.label} — ${notes}` : v.label;
+}
+
+/** What is known about one version's size, or null. */
+export interface CopyInfo {
+  sizeBytes: number;
+  multiFile: boolean;
+}
+
+/**
+ * The size of one version. The library list knows the primary's (`game.sizeBytes`) but RomM says
+ * nothing about the others', so theirs come from `fetched`, which the panel fills in when it opens.
+ */
+export function copyInfo(game: Game, id: number, fetched: Record<number, VersionSize>): CopyInfo | null {
+  if (id === game.id) return { sizeBytes: game.sizeBytes, multiFile: game.multiFile };
+  const got = fetched[id];
+  return got ? { sizeBytes: got.sizeBytes, multiFile: got.multiFile } : null;
+}
+
+/** The versions whose size the list doesn't already give: everything but the primary. */
+export function otherCopyIds(game: Game): number[] {
+  return game.versions.filter((v) => v.id !== game.id).map((v) => v.id);
 }
 
 /** "3 versions"; empty for a game with nothing to choose. */

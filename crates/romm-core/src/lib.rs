@@ -5,6 +5,7 @@ pub mod api;
 pub mod browse;
 pub mod config;
 pub mod detect;
+pub mod diagnostics;
 pub mod error;
 pub mod launch;
 pub mod library;

@@ -48,6 +48,10 @@ def version_select():
     """The drawer's version dropdown: its value and every [value, text], or None."""
     return d.js("const s = document.querySelector('[data-testid=version-select]'); return s ? {value: s.value, options: [...s.options].map(o => [o.value, o.textContent])} : null")
 
+def subtitle():
+    """The line under the game's title in the drawer: platform, size of the selected version."""
+    return d.js("const e = document.querySelector('.drawer-title > .muted'); return e ? e.textContent : ''")
+
 def choose_version(value):
     """Picks an option the way the app's own controller code does (native setter + change event)."""
     d.js("const s = document.querySelector('[data-testid=version-select]'); "
@@ -113,6 +117,8 @@ try:
     texts = [o[1] for o in sel["options"]]
     check("the pick is marked default and labelled from its file name", texts[0] == "USA — default", str(texts))
     check("the others are labelled by region and language", texts[1:] == ["Europe · En,Fr,De", "Japan"], str(texts))
+    check("the sizes are not in the dropdown", not any("MB" in t for t in texts), str(texts))
+    check("the size is in the panel: the default's, under the title", "1.9 MB" in subtitle(), subtitle())
     check("Install is offered, Play is not", d.find("[data-testid=install]") is not None and d.find("[data-testid=play]") is None)
     shot("v2-drawer")
 
@@ -120,6 +126,9 @@ try:
     choose_version("123")
     d.wait(lambda: (version_select() or {}).get("value") == "123", 5, "Japan selected")
     check("still offers Install for Japan", d.find("[data-testid=install]") is not None)
+    # The other versions' sizes are fetched when the drawer opens, so this can take a moment.
+    d.wait(lambda: "1 MB" in subtitle(), 10, "Japan's size in the panel")
+    check("the panel shows Japan's size, not the default's", "1 MB" in subtitle() and "1.9" not in subtitle(), subtitle())
     install_selected()
     japan = f"{HOME}/Games/RomM/psx/Spyro the Dragon (Japan).cue"
     check("the Japan file is on disk", os.path.exists(japan) and os.path.getsize(japan) == 2_000_000, japan)

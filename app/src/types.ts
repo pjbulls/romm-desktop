@@ -53,6 +53,13 @@ export interface Version {
   installed: boolean;
 }
 
+/** How big one version of a game is on the server. */
+export interface VersionSize {
+  id: number;
+  sizeBytes: number;
+  multiFile: boolean;
+}
+
 export interface Game {
   /** The primary copy's ROM id (the server's choice). */
   id: number;

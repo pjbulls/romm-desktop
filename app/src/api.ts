@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  AchievementsView, Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LibraryEvent, LoginArgs, Platform, ProgressEvent, Settings, Status,
+  AchievementsView, Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LibraryEvent, LoginArgs, Platform, ProgressEvent, Settings, Status, VersionSize,
 } from "./types";
 
 /** Tauri rejects with the Rust `String` error; normalise anything else. */
@@ -19,6 +19,8 @@ export const api = {
   platforms: () => invoke<Platform[]>("platforms"),
   games: (args: GamesArgs) => invoke<GamesPage>("games", { args }),
   /** Loads the whole library if it isn't loaded (or `force`: reloads it). Rejects when a forced reload fails; the old copy stays in use. Resolves to the number of games. */
+  /** The size of each of these versions of a game. The library list knows only the primary's, so the panel asks for the rest. Versions the server can't answer for are left out. */
+  versionSizes: (ids: number[]) => invoke<VersionSize[]>("version_sizes", { ids }),
   loadLibrary: (force = false) => invoke<number>("load_library", { force }),
   cover: (romId: number, path: string) => invoke<string | null>("cover", { romId, path }),
   /** Falls back to a saved copy (`stale`) when the server is unreachable. `force` skips the profile cache. */

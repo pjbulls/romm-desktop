@@ -218,6 +218,23 @@ impl RommClient {
         self.get_json(&["roms", &id.to_string()], &[]).await
     }
 
+    /// The size of each of `ids`, in the order given, each once. For the versions of a game:
+    /// RomM's `sibling_roms` names them but says nothing about their size, and the server can't
+    /// be asked for several ROMs at once, so this is one request each. A ROM that can't be read
+    /// (removed meanwhile, a server hiccup) is left out rather than failing the others.
+    pub async fn rom_sizes(&self, ids: &[i64]) -> Vec<RomSize> {
+        /// More than any game has versions; a bound on what one call can cost.
+        const MAX: usize = 32;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for &id in ids.iter().filter(|id| seen.insert(**id)).take(MAX) {
+            if let Ok(rom) = self.rom(id).await {
+                out.push(RomSize { id, bytes: rom.fs_size_bytes, multi_file: rom.has_multiple_files });
+            }
+        }
+        out
+    }
+
     /// Streams a ROM to `dest`. Single-file ROMs arrive as the file itself;
     /// multi-file ROMs arrive as a zip (RomM includes an .m3u where applicable).
     pub async fn download_rom(

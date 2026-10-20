@@ -26,6 +26,9 @@ ROMS += [mkrom(101, "Final Fantasy VII", 2, 'psx'), mkrom(102, "Crash Bandicoot"
          *[mkrom(i, "Spyro the Dragon", 2, 'psx', fs_stem=stem) for i, stem in SPYRO.items()],
          mkrom(201, "Daxter", 3, 'psp'), mkrom(202, "Lumines", 3, 'psp')]
 ROMS.sort(key=lambda r: (r['name'].lower(), r['id']))
+# The three copies differ in size, as real regional dumps do; RomM's sibling_roms doesn't carry it.
+for r in ROMS:
+    r['fs_size_bytes'] = {113: 3_145_728, 123: 1_048_576}.get(r['id'], r['fs_size_bytes'])
 for r in ROMS:
     r['sibling_roms'] = [dict(id=i, name=r['name'], fs_name_no_tags="Spyro the Dragon", fs_name_no_ext=stem, is_main_sibling=(i == SPYRO_PRIMARY))
                          for i, stem in SPYRO.items() if r['id'] in SPYRO and i != r['id']]

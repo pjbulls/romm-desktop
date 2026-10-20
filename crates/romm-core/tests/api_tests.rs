@@ -192,6 +192,49 @@ async fn sibling_roms_are_read_and_absent_ones_default_to_none() {
 }
 
 #[tokio::test]
+async fn rom_sizes_reads_each_rom_once_in_order_and_skips_the_ones_that_fail() {
+    let server = MockServer::start().await;
+    let mut big = rom_json(3);
+    big["fs_size_bytes"] = json!(300);
+    big["has_multiple_files"] = json!(true);
+    let mut small = rom_json(1);
+    small["fs_size_bytes"] = json!(100);
+    for (id, body) in [(1, small), (3, big)] {
+        Mock::given(method("GET")).and(path(format!("/api/roms/{id}"))).respond_with(ResponseTemplate::new(200).set_body_json(body)).expect(1).mount(&server).await;
+    }
+    Mock::given(method("GET")).and(path("/api/roms/2")).respond_with(ResponseTemplate::new(404)).expect(1).mount(&server).await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+
+    // 3 comes before 1, and 1 is asked for twice, 2 doesn't exist.
+    let got = c.rom_sizes(&[3, 2, 1, 3, 1]).await;
+    assert_eq!(
+        got,
+        [
+            romm_core::api::types::RomSize { id: 3, bytes: 300, multi_file: true },
+            romm_core::api::types::RomSize { id: 1, bytes: 100, multi_file: false },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn rom_sizes_of_nothing_asks_for_nothing() {
+    let server = MockServer::start().await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    assert!(c.rom_sizes(&[]).await.is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rom_sizes_never_asks_for_more_than_a_bounded_number() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(rom_json(1))).mount(&server).await;
+    let c = RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap();
+    let ids: Vec<i64> = (1..=100).collect();
+    assert_eq!(c.rom_sizes(&ids).await.len(), 32);
+    assert_eq!(server.received_requests().await.unwrap().len(), 32);
+}
+
+#[tokio::test]
 async fn download_streams_to_file_and_leaves_no_part_file_on_failure() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
