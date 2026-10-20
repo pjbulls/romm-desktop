@@ -83,7 +83,7 @@ describe("AchievementsPanel", () => {
 
   it("says plainly when a game has no set", () => {
     const html = render(view({ state: "no_set", achievements: [], total: 0 }));
-    expect(html).toContain("No RetroAchievements for this game");
+    expect(html).toContain("No RetroAchievements found for this game");
     expect(rows(html)).toBe(0);
     expect(html).not.toContain('data-testid="ach-refresh"');
   });

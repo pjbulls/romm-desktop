@@ -86,29 +86,18 @@ A game that exists as several files on your server (USA / Europe / Japan, revisi
 
 **Why the whole library is fetched.** Like Argosy, which syncs everything and browses locally, the app loads the grouped library (500 per page, no file lists, progress shown) and filters, searches and pages in memory. That makes the counts exact, platform switching and search instant, and a search finds a game through any of its versions (as RomM's does). The copy is reused for 10 minutes when you open a list from the top, never while you scroll, and **↻** next to the search box reloads it. If a reload fails, the previous copy stays in use.
 
-## If the window goes dark
-
-A web view that dies or stops painting leaves nothing on screen and nothing in any console, so the app keeps a small log of its own: `diagnostics/ui.log` (and `ui.log.1`, the one before it) in the app's data folder (`%APPDATA%\romm\romm-desktop\data` on Windows, `~/.local/share/romm-desktop` on Linux, `~/Library/Application Support/app.romm.romm-desktop` on macOS, or under `ROMM_DESKTOP_HOME`). It holds counts and timings only, never names or addresses, and is capped at about 512 KB.
-
-- `app` lines come from the backend: startup (version, OS, **web view version**), the library loading, and a `WATCHDOG` line if the page stops reporting for 10 seconds while it is on screen, and another when it starts again.
-- `page` lines come from the UI. `hb` is a report every two seconds: `heap` (JS memory), `nodes` (size of the page), `cards`, `imgs` (loaded/total), `scroll` (position), `lag` (how late its timer fired: a busy or hung page runs late), `vis`/`focus`, `pads` (controllers seen) and `hints` (controller hint bar shown). `error`, `rejection`, `csp blocked`, `longtask` and `visibility` lines say what it sounds like.
-
-Reading it after a black screen: if the `hb` lines **keep coming** after the screen went dark, the page is alive and it is the painting (GPU, compositor) that failed. If they **stop** (look for `WATCHDOG`), the page hung or its process died, and the last `hb` shows what it was doing: `heap` or `nodes` climbing, `lag` growing, or nothing unusual.
-
-On Windows the page runs in WebView2 (Chromium). To test whether the GPU path is involved, start the app from a terminal with `set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--disable-gpu` (cmd) or `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--disable-gpu"` (PowerShell) first.
-
-## How saves and states sync
+## Save and state syncing
 
 | | Saves | Save states |
 |---|---|---|
-| Protocol | RomM's device-sync protocol (negotiate → apply → complete) | Plain `/api/states` calls; RomM's sync protocol doesn't cover states |
-| RetroArch | `<rom>.srm`, uploaded as-is | `<rom>.state`, `.state1…`, `.state.auto` (+ `.png` thumbnail attached) |
-| Dolphin / PPSSPP / DuckStation / PCSX2 / Azahar | shared memory-card / NAND / emulated-SD-card folders, diffed around the session and zipped | one file per slot in the emulator's state folder, synced individually |
-| Change detection | MD5 vs. server record, per-device baseline held by RomM | local MD5 (stat-cached) + server `updated_at`/size vs. our own baseline; a file seen on both sides with no baseline is verified by download once |
+| Protocol | RomM (negotiate → apply → complete) | Plain `/api/states` calls; RomM doesn't cover states |
+| RetroArch | `<rom>.srm`, uploaded as-is | `<rom>.state`, `.state1…`, `.state.auto` |
+| Others | emulated memory card folders, diffed and zipped | one file per slot in the emulator's state folder, synced individually |
+| Change detection | MD5 vs. server | local MD5 + server `updated_at`/size |
 
 **xemu is launch only.** Its saves and snapshots live inside the virtual hard disk image (`xbox_hdd.qcow2`), not in separate files, so there is nothing safe to sync per game; syncing the whole image would make any two-device conflict a whole-disk conflict. Its BIOS and HDD image are set inside xemu itself, so there is no BIOS install either. Original Xbox disc images must be in XISO format (xemu's docs cover converting Redump ISOs with `extract-xiso`). Xbox 360 (`xbox360`) isn't mapped to any emulator.
 
-Deletions never propagate. A state you delete locally stays deleted unless the server's copy changes; one removed from the server isn't re-uploaded unless you changed it.
+Deletions never propagate. A state deleted locally won't resync unless the server's copy changes; one removed from the server isn't re-uploaded unless changed again.
 
 Emulator profiles are TOML in `crates/romm-core/src/profiles/`: detection, launch flags, per-OS/Flatpak/portable data folders, save and state rules. Adding an emulator is a new file, and its `platforms` list is what decides which systems offer it. RetroArch cores are the exception: they're listed per system in `CORES` in `crates/romm-core/src/retroarch.rs` (first entry is the default that "Automatic" uses).
 
