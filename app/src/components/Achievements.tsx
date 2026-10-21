@@ -221,7 +221,7 @@ export function AchievementsPanel({
 }
 
 export function Achievements({ game }: { game: Game }) {
-  const { push } = useStore();
+  const { push, achRevision } = useStore();
   const [view, setView] = useState<AchievementsView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -230,12 +230,23 @@ export function Achievements({ game }: { game: Game }) {
   const [missableOnly, setMissableOnly] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
+  // Reads can overlap (the backend announces a refresh while an earlier read may still be out), so an
+  // answer older than one already on screen is dropped: tickets are handed out in the order reads start.
+  const issued = useRef(0);
+  const applied = useRef(0);
+  const show = useCallback((ticket: number, v: AchievementsView) => {
+    if (ticket <= applied.current) return;
+    applied.current = ticket;
+    setView(v);
+  }, []);
+
   const load = useCallback(() => {
     let alive = true;
+    const ticket = ++issued.current;
     setError(null);
-    api.achievements(game.id).then((v) => alive && setView(v)).catch((e) => alive && setError(errMsg(e)));
+    api.achievements(game.id).then((v) => alive && show(ticket, v)).catch((e) => alive && setError(errMsg(e)));
     return () => { alive = false; };
-  }, [game.id]);
+  }, [game.id, show]);
 
   useEffect(() => {
     setView(null);
@@ -246,10 +257,24 @@ export function Achievements({ game }: { game: Game }) {
     return load();
   }, [load]);
 
+  // The backend re-pulled this user's progress from retroachievements.org after a game closed. Swap in
+  // the new answer quietly: what is on screen stays until it arrives, and if the reload fails it is
+  // still the best we have.
+  const seen = useRef(achRevision);
+  useEffect(() => {
+    if (seen.current === achRevision) return; // also what a change of game looks like: `load` handles that
+    seen.current = achRevision;
+    let alive = true;
+    const ticket = ++issued.current;
+    api.achievements(game.id).then((v) => { if (alive) { show(ticket, v); setError(null); } }).catch(() => {});
+    return () => { alive = false; };
+  }, [achRevision, game.id, show]);
+
   const refresh = async () => {
     setRefreshing(true);
     try {
-      setView(await api.refreshAchievements(game.id));
+      const fresh = await api.refreshAchievements(game.id);
+      show(++issued.current, fresh);
       setError(null);
       push("success", "RetroAchievements progress updated");
     } catch (e) {

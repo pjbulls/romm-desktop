@@ -61,6 +61,11 @@ export function onLibrary(fn: (e: LibraryEvent) => void): Promise<UnlistenFn> {
   return listen<LibraryEvent>("romm://library", (e) => fn(e.payload));
 }
 
+/** The backend asked RomM to re-pull RetroAchievements progress and it worked, so what an open panel shows is out of date. */
+export function onAchievementsRefreshed(fn: () => void): Promise<UnlistenFn> {
+  return listen("romm://achievements", () => fn());
+}
+
 export function onProgress(fn: (e: ProgressEvent) => void): Promise<UnlistenFn> {
   return listen<ProgressEvent>("romm://progress", (e) => fn(e.payload));
 }

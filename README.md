@@ -112,6 +112,8 @@ This app only *displays* what RomM knows. It doesn't talk to retroachievements.o
 3. **Earning** them happens in the emulator: sign in to RetroAchievements inside RetroArch, DuckStation, PCSX2, PPSSPP or Dolphin. This app doesn't configure that.
 4. RomM must have fetched your progress. It does so on a schedule only if the admin turned that on (daily at 04:00 by default), or when asked. The **Refresh** button asks, and needs the optional `me.write` scope. Without it Refresh explains what to do; refreshing from RomM's own profile page works too.
 
+With `me.write` the app also asks by itself, in the background, **when a game you launched from it closes**, so what you just earned is there when you look. If that game's panel is open it updates in place. This never shows an error: failures go to the diagnostics log, and only the **Refresh** button reports problems. Without `me.write` the first refusal is logged and the app stops asking until you sign in again. Progress earned anywhere other than through this app still needs the **Refresh** button (or RomM's own schedule).
+
 How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`merged_ra_metadata`) and your progress from `GET /api/users/me` (`ra_progression`, scope `me.read`, which the token already has). RomM records what you've earned under each achievement's *badge name*, not its numeric id, so that's what the two are matched on. A few games reuse one badge for several achievements; then the number earned is right but which of the look-alikes is ticked is a best guess.
 
 ## Tests

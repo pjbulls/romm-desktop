@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { onJob, onProgress } from "./api";
+import { onAchievementsRefreshed, onJob, onProgress } from "./api";
 import { formatDuration, hasProblems, summarizeSync } from "./format";
 import type { Game, JobEvent, PlaySummary, SyncAllResult, SyncSummary } from "./types";
 
@@ -27,6 +27,8 @@ interface Ctx {
   installed: Record<number, boolean>;
   /** Bumped when a game's saves/states may have changed, so open panels refetch. */
   revision: Record<number, number>;
+  /** Bumped when RomM has re-pulled RetroAchievements progress (for every game), so an open Achievements panel reloads. */
+  achRevision: number;
   remember: (games: Game[]) => void;
   setInstalled: (id: number, v: boolean) => void;
   push: (tone: Toast["tone"], text: string, detail?: string[]) => void;
@@ -48,6 +50,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [installed, setInstalledMap] = useState<Record<number, boolean>>({});
   const [revision, setRevision] = useState<Record<number, number>>({});
+  const [achRevision, setAchRevision] = useState(0);
   const names = useRef(new Map<number, string>());
   const nextId = useRef(1);
 
@@ -83,6 +86,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
 
     const un: Promise<() => void>[] = [
+      onAchievementsRefreshed(() => setAchRevision((n) => n + 1)),
+
       onProgress((p) => setJobs((j) => (j[p.romId] ? { ...j, [p.romId]: { ...j[p.romId], done: p.done, total: p.total } } : j))),
 
       onJob("install", (e: JobEvent) => {
@@ -139,8 +144,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [push, bump, setInstalled]);
 
   const value = useMemo<Ctx>(
-    () => ({ jobs, syncingAll, toasts, installed, revision, remember, setInstalled, push, dismiss, bump }),
-    [jobs, syncingAll, toasts, installed, revision, remember, setInstalled, push, dismiss, bump],
+    () => ({ jobs, syncingAll, toasts, installed, revision, achRevision, remember, setInstalled, push, dismiss, bump }),
+    [jobs, syncingAll, toasts, installed, revision, achRevision, remember, setInstalled, push, dismiss, bump],
   );
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }

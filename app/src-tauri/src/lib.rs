@@ -45,6 +45,9 @@ pub struct AppState {
     /// `GET /api/users/me`, kept briefly: it carries the user's whole RetroAchievements progression
     /// (megabytes for a heavy RA user) and every game panel needs it.
     ra_me: Arc<Mutex<Option<(Instant, Me)>>>,
+    /// RomM answered a refresh with 403: this token lacks `me.write`. Remembered so that a game
+    /// closing doesn't fetch the profile just to be refused again. Cleared on sign-in and sign-out.
+    ra_refresh_refused: Arc<AtomicBool>,
     /// The whole library, one entry per game, fetched once (see `AppState::library`). The lock is
     /// held while it loads, so everyone who needs the library waits for that one fetch.
     library: Arc<Mutex<Option<LibraryCache>>>,
@@ -154,6 +157,7 @@ impl AppState {
     /// (on login and logout, so one user's progress is never shown to the next).
     async fn forget_ra(&self) {
         *self.ra_me.lock().await = None;
+        self.ra_refresh_refused.store(false, Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(self.dirs.data_dir.join("achievements"));
     }
 
@@ -782,6 +786,46 @@ async fn achievements(st: TauriState<'_, AppState>, rom_id: i64, force: Option<b
     fetch_achievements(&st, rom_id, force.unwrap_or(false)).await
 }
 
+/// After a game closes, ask RomM to re-pull the user's progress from retroachievements.org, so what
+/// was just earned shows up without a trip to the Refresh button. RomM re-pulls the whole profile
+/// (every game), and an open Achievements panel is told to reload once it has.
+///
+/// Never speaks to the user, and nothing waits for it. A failure is only logged, because most tokens
+/// lack `me.write` and would otherwise hear about it after every game. The first 403 stops further
+/// attempts until the next sign-in.
+async fn refresh_ra_after_play(app: &AppHandle, st: &AppState) {
+    if st.ra_refresh_refused.load(Ordering::Relaxed) {
+        return;
+    }
+    // One refresh at a time. The Refresh button holds the same key; if it is running, it will show
+    // its own result.
+    let Ok(_busy) = st.busy(RA_REFRESH) else { return };
+    let Ok(client) = st.client().await else { return }; // not signed in
+    let me = match st.me(&client, false).await {
+        Ok(me) => me,
+        Err(e) => {
+            st.diag.app(&format!("ra refresh after play: couldn't read the profile: {e}"));
+            return;
+        }
+    };
+    // Without a username RomM answers 404; there is nothing to pull, so don't ask.
+    if me.ra_username.as_deref().is_none_or(|u| u.trim().is_empty()) {
+        return;
+    }
+    match client.refresh_ra(me.id, true).await {
+        Ok(()) => {
+            *st.ra_me.lock().await = None; // the profile we hold predates the refresh
+            let _ = app.emit("romm://achievements", ());
+            st.diag.app("ra refresh after play: done");
+        }
+        Err(e) if e.status() == Some(403) => {
+            st.ra_refresh_refused.store(true, Ordering::Relaxed);
+            st.diag.app("ra refresh after play: RomM refused (this token lacks me.write); not asking again until the next sign-in");
+        }
+        Err(e) => st.diag.app(&format!("ra refresh after play: failed: {e}")),
+    }
+}
+
 /// Ask RomM to re-pull the user's progress from retroachievements.org, then reload this game.
 /// RomM only does that on a schedule (daily, and only if the admin enabled it) or on request, so
 /// without this the panel shows whatever RomM last fetched. Needs the `me.write` scope, which
@@ -791,7 +835,15 @@ async fn refresh_achievements(st: TauriState<'_, AppState>, rom_id: i64) -> CmdR
     let _busy = st.busy(RA_REFRESH)?;
     let client = st.client().await?;
     let me = st.me(&client, false).await?;
-    client.refresh_ra(me.id, true).await.map_err(|e| match e.status() {
+    let result = client.refresh_ra(me.id, true).await;
+    // What the button learns, the refresh after a game should know too: a 403 means it would only be
+    // refused as well, and a success proves the token can refresh after all.
+    match &result {
+        Ok(()) => st.ra_refresh_refused.store(false, Ordering::Relaxed),
+        Err(e) if e.status() == Some(403) => st.ra_refresh_refused.store(true, Ordering::Relaxed),
+        Err(_) => {}
+    }
+    result.map_err(|e| match e.status() {
         Some(403) => "RomM refused: refreshing needs the me.write scope, which this token doesn't have. \
                       Pair a new token with it (RomM → Profile → Client API Tokens), or refresh from RomM's own profile page."
             .to_string(),
@@ -882,6 +934,12 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
             };
             emit_job::<()>(&app, "romm://play", rom_id, "running", None, None);
             let run = session::run_emulator(cmd, &env.profile.name).await.map_err(s)?;
+            // The emulator has exited, so whatever was earned is on retroachievements.org by now. Ask
+            // RomM to pull it while the saves upload; this neither delays the upload nor can fail it.
+            {
+                let (app, st) = (app.clone(), st.clone());
+                tauri::async_runtime::spawn(async move { refresh_ra_after_play(&app, &st).await });
+            }
             emit_job::<()>(&app, "romm://play", rom_id, "saving", None, None);
             let out = {
                 let mut db = st.db.lock().await;
@@ -1209,6 +1267,7 @@ pub fn run() {
                 client: Arc::new(RwLock::new(client)),
                 busy: Arc::new(StdMutex::new(HashSet::new())),
                 ra_me: Arc::new(Mutex::new(None)),
+                ra_refresh_refused: Arc::new(AtomicBool::new(false)),
                 library: Arc::new(Mutex::new(None)),
                 diag,
             });
