@@ -97,12 +97,19 @@ try:
     d.click(d.find("[data-testid=ach-filter-locked]"))
     d.wait(lambda: count("[data-testid=achievement]") == 2, 5, "locked filter")
     check("Locked filter shows only the two unearned", count("li.ach.earned") == 0)
-    d.click(d.find("[data-testid=ach-filter-all]"))
+    # Earned and Locked are toggles: choosing one switches the other off, and pressing the one that's on turns it off (there is no "All" button).
+    pressed = lambda tid: d.attr(d.find(f"[data-testid={tid}]"), "aria-pressed")
+    check("there is no All button", d.find("[data-testid=ach-filter-all]") is None)
+    d.click(d.find("[data-testid=ach-filter-earned]"))
+    d.wait(lambda: count("[data-testid=achievement]") == 1, 5, "earned replaces locked")
+    check("Earned switches Locked off", pressed("ach-filter-earned") == "true" and pressed("ach-filter-locked") == "false" and count("li.ach.earned") == 1)
+    d.click(d.find("[data-testid=ach-filter-earned]"))
+    d.wait(lambda: count("[data-testid=achievement]") == 3, 5, "earned off")
+    check("Pressing Earned again turns it off", pressed("ach-filter-earned") == "false" and pressed("ach-filter-locked") == "false")
     time.sleep(0.3); shot("04b-achievements")
     # Kind filters. The set has one of each: First Blood (progression), Green Hill Clear (win condition, the earned one) and
     # Secret Stage (missable). The Progression filter covers progression and win condition alike.
     titles = lambda: [d.text(e) for e in d.find_all("li.ach .ach-title")]
-    pressed = lambda tid: d.attr(d.find(f"[data-testid={tid}]"), "aria-pressed")
     def shows(n, what): d.wait(lambda: count("[data-testid=achievement]") == n, 5, what)
     d.click(d.find("[data-testid=ach-filter-progression]")); shows(2, "progression filter")
     check("Progression filter shows the progression and win-condition achievements", titles() == ["First Blood", "Green Hill Clear"], str(titles()))
@@ -117,8 +124,9 @@ try:
     d.wait(lambda: d.find("[data-testid=ach-none]"), 5, "nothing left")
     check("A missable achievement doesn't match under Progression", count("[data-testid=achievement]") == 0)
     d.click(d.find("[data-testid=ach-clear]")); shows(3, "cleared")
-    check("Clear resets the kind filters and the search too",
-          pressed("ach-filter-progression") == "false" and pressed("ach-filter-missable") == "false" and pressed("ach-filter-all") == "true"
+    check("Clear resets Earned/Locked, the kind filters and the search",
+          pressed("ach-filter-progression") == "false" and pressed("ach-filter-missable") == "false"
+          and pressed("ach-filter-earned") == "false" and pressed("ach-filter-locked") == "false"
           and d.js("return document.querySelector('[data-testid=ach-search]').value") == "" and count("[data-testid=achievement]") == 3)
     d.click(d.find("[data-testid=ach-refresh]"))
     wait_toast("Couldn't refresh RetroAchievements", 15)

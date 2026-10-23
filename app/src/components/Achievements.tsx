@@ -66,6 +66,7 @@ interface PanelProps {
   view: AchievementsView | null;
   error: string | null;
   refreshing: boolean;
+  /** Earned or locked only, or "all" when neither is chosen. */
   filter: AchFilter;
   expanded: boolean;
   onFilter: (f: AchFilter) => void;
@@ -201,7 +202,11 @@ export function AchievementsPanel({
           />
           <div className="ach-filters" role="group" aria-label="Filter achievements">
             {ready && ACH_FILTERS.map((f) => (
-              <button key={f.value} className="btn btn-ghost small" aria-pressed={filter === f.value} onClick={() => onFilter(f.value)} data-testid={`ach-filter-${f.value}`}>
+              <button
+                key={f.value} className="btn btn-ghost small" aria-pressed={filter === f.value} data-testid={`ach-filter-${f.value}`}
+                // A toggle: the one that's on turns off (back to everything), the other one switches to it.
+                onClick={() => onFilter(filter === f.value ? "all" : f.value)}
+              >
                 {f.label} <span className="muted">{facets.status[f.value]}</span>
               </button>
             ))}

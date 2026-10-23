@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatDuration, normalizeCode, summarizeSync, timeAgo, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements } from "./format";
+import { formatBytes, formatDuration, normalizeCode, summarizeSync, timeAgo, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements, ACH_FILTERS } from "./format";
 import type { Achievement, SyncSummary } from "./types";
 
 const empty = (): SyncSummary => ({
@@ -85,6 +85,8 @@ describe("achievement helpers", () => {
 
   it("filters by earned state and keeps order", () => {
     expect(filterAchievements(list, "all").map((a) => a.id)).toEqual([1, 2, 3, 4, 5]);
+    // "all" is what you get with neither chosen; there is a control for earned and one for locked, none for "all"
+    expect(ACH_FILTERS.map((f) => f.value)).toEqual(["earned", "locked"]);
     expect(filterAchievements(list, "earned").map((a) => a.id)).toEqual([1, 3]);
     expect(filterAchievements(list, "locked").map((a) => a.id)).toEqual([2, 4, 5]);
   });

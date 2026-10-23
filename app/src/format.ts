@@ -83,10 +83,14 @@ export function normalizeCode(input: string): string {
 
 // ---------------------------------------------------------------------- RetroAchievements
 
+/** The earned/locked choice. "all" is neither chosen, which is how it starts. */
 export type AchFilter = "all" | "earned" | "locked";
 
-export const ACH_FILTERS: { value: AchFilter; label: string }[] = [
-  { value: "all", label: "All" },
+/**
+ * The controls for it. Each is a toggle (pressing the one that's on turns it off, back to "all"), and choosing one swaps out
+ * the other, so there's no button for "all".
+ */
+export const ACH_FILTERS: { value: Exclude<AchFilter, "all">; label: string }[] = [
   { value: "earned", label: "Earned" },
   { value: "locked", label: "Locked" },
 ];

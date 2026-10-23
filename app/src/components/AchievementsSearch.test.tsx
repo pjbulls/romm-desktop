@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AchievementsPanel } from "./Achievements";
+import type { AchFilter } from "../format";
 import type { Achievement, AchievementsView } from "../types";
 
 const ach = (id: number, over: Partial<Achievement> = {}): Achievement => ({
@@ -72,9 +73,9 @@ describe("search box and missable filter", () => {
 
   it("makes the earned/locked counts follow the search and the missable filter", () => {
     const searched = render(view(), { query: "achievement 3" });
-    expect([number(searched, "ach-filter-all"), number(searched, "ach-filter-earned"), number(searched, "ach-filter-locked")]).toEqual(["1", "0", "1"]);
+    expect([number(searched, "ach-filter-earned"), number(searched, "ach-filter-locked")]).toEqual(["0", "1"]);
     const missable = render(view(), { missableOnly: true });
-    expect([number(missable, "ach-filter-all"), number(missable, "ach-filter-earned"), number(missable, "ach-filter-locked")]).toEqual(["2", "1", "1"]);
+    expect([number(missable, "ach-filter-earned"), number(missable, "ach-filter-locked")]).toEqual(["1", "1"]);
   });
 
   it("makes the missable count follow the earned/locked choice", () => {
@@ -173,7 +174,7 @@ describe("progression filter", () => {
 
   it("makes the earned/locked counts follow the progression filter", () => {
     const html = render(view({ achievements: KIND_SET }), { progressionOnly: true });
-    expect([number(html, "ach-filter-all"), number(html, "ach-filter-earned"), number(html, "ach-filter-locked")]).toEqual(["2", "1", "1"]);
+    expect([number(html, "ach-filter-earned"), number(html, "ach-filter-locked")]).toEqual(["1", "1"]);
   });
 
   it("makes the progression count follow the earned/locked choice, and counts it whether or not Missable is chosen", () => {
@@ -222,6 +223,26 @@ describe("progression filter", () => {
     expect(html).toContain('data-testid="ach-filter-progression"');
     expect(html).not.toContain('data-testid="ach-filter-earned"');
     expect(rows(html)).toBe(2);
+  });
+});
+
+describe("earned and locked controls", () => {
+  it("are two toggles ahead of the kind toggles, with no All button", () => {
+    const html = render(view());
+    expect(html).not.toContain('data-testid="ach-filter-all"');
+    const at = (id: string) => html.indexOf(`data-testid="ach-filter-${id}"`);
+    const order = [at("earned"), at("locked"), at("missable"), at("progression")];
+    expect(order.every((n) => n > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("show which one is chosen", () => {
+    const cases: [AchFilter, string, string][] = [["all", "false", "false"], ["earned", "true", "false"], ["locked", "false", "true"]];
+    for (const [filter, earned, locked] of cases) {
+      const html = render(view(), { filter });
+      expect(chip(html, "ach-filter-earned")).toContain(`aria-pressed="${earned}"`);
+      expect(chip(html, "ach-filter-locked")).toContain(`aria-pressed="${locked}"`);
+    }
   });
 });
 

@@ -133,9 +133,9 @@ describe("searching and filtering achievements in the panel", () => {
   it("updates the counts as the others change", async () => {
     await mount();
     const num = (id: string) => q(`[data-testid=${id}] .muted`)!.textContent;
-    expect([num("ach-filter-all"), num("ach-filter-earned"), num("ach-filter-locked"), num("ach-filter-missable")]).toEqual(["12", "1", "11", "3"]);
+    expect([num("ach-filter-earned"), num("ach-filter-locked"), num("ach-filter-missable")]).toEqual(["1", "11", "3"]);
     await type("boss");
-    expect([num("ach-filter-all"), num("ach-filter-locked"), num("ach-filter-missable")]).toEqual(["3", "3", "1"]);
+    expect([num("ach-filter-locked"), num("ach-filter-missable")]).toEqual(["3", "1"]);
   });
 
   it("says nothing matches, and Clear brings everything back", async () => {
@@ -148,7 +148,8 @@ describe("searching and filtering achievements in the panel", () => {
     await click("[data-testid=ach-clear]");
     expect(q<HTMLInputElement>("[data-testid=ach-search]")!.value).toBe("");
     expect(q("[data-testid=ach-filter-missable]")!.getAttribute("aria-pressed")).toBe("false");
-    expect(q("[data-testid=ach-filter-all]")!.getAttribute("aria-pressed")).toBe("true");
+    expect(q("[data-testid=ach-filter-earned]")!.getAttribute("aria-pressed")).toBe("false");
+    expect(q("[data-testid=ach-filter-locked]")!.getAttribute("aria-pressed")).toBe("false");
     expect(rows()).toBe(8);
   });
 
@@ -220,10 +221,10 @@ describe("the progression toggle in the panel", () => {
 
   it("updates the counts as the others change", async () => {
     await mount();
-    expect([num("ach-filter-all"), num("ach-filter-earned"), num("ach-filter-locked"), num("ach-filter-missable"), num("ach-filter-progression")])
-      .toEqual(["6", "2", "4", "2", "3"]);
+    expect([num("ach-filter-earned"), num("ach-filter-locked"), num("ach-filter-missable"), num("ach-filter-progression")])
+      .toEqual(["2", "4", "2", "3"]);
     await click("[data-testid=ach-filter-progression]");
-    expect([num("ach-filter-all"), num("ach-filter-earned"), num("ach-filter-locked")]).toEqual(["3", "1", "2"]);
+    expect([num("ach-filter-earned"), num("ach-filter-locked")]).toEqual(["1", "2"]);
     expect(num("ach-filter-missable")).toBe("2"); // its own count, not affected by the other kind being chosen
     await click("[data-testid=ach-filter-locked]");
     expect([num("ach-filter-progression"), num("ach-filter-missable")]).toEqual(["2", "1"]);
@@ -238,7 +239,8 @@ describe("the progression toggle in the panel", () => {
     expect(rows()).toBe(0);
     await click("[data-testid=ach-clear]");
     expect(q<HTMLInputElement>("[data-testid=ach-search]")!.value).toBe("");
-    expect([pressed("ach-filter-progression"), pressed("ach-filter-missable"), pressed("ach-filter-all")]).toEqual(["false", "false", "true"]);
+    expect([pressed("ach-filter-progression"), pressed("ach-filter-missable"), pressed("ach-filter-earned"), pressed("ach-filter-locked")])
+      .toEqual(["false", "false", "false", "false"]);
     expect(rows()).toBe(6);
   });
 
@@ -276,6 +278,102 @@ describe("the progression toggle in the panel", () => {
     await click("[data-testid=ach-filter-progression]");
     const row = [...document.querySelectorAll("[data-testid=achievement]")].find((r) => r.textContent!.includes("Defeat the Warden"))!;
     expect(row.textContent).toContain("Win condition");
+  });
+});
+
+describe("the earned/locked toggles in the panel", () => {
+  const earned = "[data-testid=ach-filter-earned]";
+  const locked = "[data-testid=ach-filter-locked]";
+  const both = () => [pressed("ach-filter-earned"), pressed("ach-filter-locked")];
+  const EARNED = ["Reach the Castle", "Last Chance"];
+  const LOCKED = ["Cross the Bridge", "Defeat the Warden", "Secret Room", "Collector"];
+  beforeEach(() => { h.view = view(KIND_SET); });
+
+  it("has no All button, and starts with neither chosen", async () => {
+    await mount();
+    expect(q("[data-testid=ach-filter-all]")).toBeNull();
+    expect(both()).toEqual(["false", "false"]);
+    expect(rows()).toBe(6);
+  });
+
+  it("turns Earned on and off", async () => {
+    await mount();
+    await click(earned);
+    expect(titles()).toEqual(EARNED);
+    expect(both()).toEqual(["true", "false"]);
+    await click(earned);
+    expect(both()).toEqual(["false", "false"]);
+    expect(rows()).toBe(6);
+  });
+
+  it("turns Locked on and off", async () => {
+    await mount();
+    await click(locked);
+    expect(titles()).toEqual(LOCKED);
+    expect(both()).toEqual(["false", "true"]);
+    await click(locked);
+    expect(both()).toEqual(["false", "false"]);
+    expect(rows()).toBe(6);
+  });
+
+  it("switches between Earned and Locked, never both at once", async () => {
+    await mount();
+    await click(earned);
+    await click(locked);
+    expect(both()).toEqual(["false", "true"]);
+    expect(titles()).toEqual(LOCKED);
+    await click(earned);
+    expect(both()).toEqual(["true", "false"]);
+    expect(titles()).toEqual(EARNED);
+    await click(earned);
+    expect(both()).toEqual(["false", "false"]);
+    expect(rows()).toBe(6);
+  });
+
+  it("leaves the search and the kind toggles as they were when it turns off", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    await click(earned);
+    expect(titles()).toEqual(["Reach the Castle"]);
+    await click(earned);
+    expect(titles()).toEqual(["Reach the Castle", "Cross the Bridge", "Defeat the Warden"]);
+    expect(pressed("ach-filter-progression")).toBe("true");
+    await type("bridge");
+    await click(locked);
+    expect(titles()).toEqual(["Cross the Bridge"]);
+    await click(locked);
+    expect(titles()).toEqual(["Cross the Bridge"]);
+    expect(pressed("ach-filter-progression")).toBe("true");
+  });
+
+  it("shows the same numbers whether the chips are on or off", async () => {
+    await mount();
+    expect([num("ach-filter-earned"), num("ach-filter-locked")]).toEqual(["2", "4"]);
+    await click(earned);
+    expect([num("ach-filter-earned"), num("ach-filter-locked")]).toEqual(["2", "4"]);
+    await click(earned);
+    expect([num("ach-filter-earned"), num("ach-filter-locked")]).toEqual(["2", "4"]);
+  });
+
+  it("is how you get back from an empty Earned list", async () => {
+    h.view = view([ach(1, "First", "One"), ach(2, "Second", "Two")]); // nothing earned
+    await mount();
+    await click(earned);
+    expect(rows()).toBe(0);
+    expect(text()).toContain("Nothing earned yet.");
+    await click(earned);
+    expect(rows()).toBe(2);
+    expect(text()).not.toContain("Nothing earned yet.");
+  });
+
+  it("is how you get back from an empty Locked list", async () => {
+    h.view = view([ach(1, "First", "One", { earned: true }), ach(2, "Second", "Two", { earned: true })]); // everything earned
+    await mount();
+    await click(locked);
+    expect(rows()).toBe(0);
+    expect(text()).toContain("Everything is earned.");
+    await click(locked);
+    expect(rows()).toBe(2);
   });
 });
 
