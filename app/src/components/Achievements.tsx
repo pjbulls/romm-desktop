@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg, loadCover } from "../api";
 import {
-  ACH_FILTERS, ACH_KIND, ACH_PREVIEW, AWARD, achievementFacets, achievementPercent, fullDate, isMissable, isNarrowed, previewAchievements, queryAchievements,
+  ACH_FILTERS, ACH_KIND, ACH_PREVIEW, AWARD, achievementFacets, achievementPercent, fullDate, isMissable, isNarrowed, isProgression, previewAchievements, queryAchievements,
   timeAgo, type AchFilter, type AchQuery,
 } from "../format";
 import { useStore } from "../store";
@@ -74,11 +74,14 @@ interface PanelProps {
   onRetry: () => void;
   /** Words to search titles and descriptions for. */
   query?: string;
-  /** Show only the achievements RetroAchievements marks as missable. */
+  /** Show only the achievements RetroAchievements marks as missable (with `progressionOnly` too: either kind). */
   missableOnly?: boolean;
+  /** Show only the achievements RetroAchievements marks as progression (with `missableOnly` too: either kind). */
+  progressionOnly?: boolean;
   onQuery?: (text: string) => void;
   onMissableOnly?: (on: boolean) => void;
-  /** Back to everything: no search, no missable filter, no earned/locked choice. */
+  onProgressionOnly?: (on: boolean) => void;
+  /** Back to everything: no search, no kind filters, no earned/locked choice. */
   onClear?: () => void;
 }
 
@@ -87,7 +90,8 @@ const nothing = () => {};
 /** Everything the section shows, as a pure function of its props (so it can be rendered in tests). */
 export function AchievementsPanel({
   romId, view, error, refreshing, filter, expanded, onFilter, onToggleExpanded, onRefresh, onRetry,
-  query = "", missableOnly = false, onQuery = nothing, onMissableOnly = nothing, onClear = nothing,
+  query = "", missableOnly = false, progressionOnly = false, onQuery = nothing, onMissableOnly = nothing, onProgressionOnly = nothing,
+  onClear = nothing,
 }: PanelProps) {
   const header = (
     <div className="row-flex ach-head">
@@ -130,11 +134,25 @@ export function AchievementsPanel({
     );
   }
 
-  const q: AchQuery = { status: filter, missable: missableOnly, text: query };
+  const q: AchQuery = { status: filter, missable: missableOnly, progression: progressionOnly, text: query };
   const facets = achievementFacets(view.achievements, q);
   const filtered = queryAchievements(view.achievements, q);
   const narrowed = isNarrowed(q);
-  const missableTotal = view.achievements.filter(isMissable).length;
+  // The kind toggles: each is greyed out when RetroAchievements marks none of the game's achievements that way.
+  const kindFilters = [
+    {
+      id: "missable", label: "Missable", on: missableOnly, set: onMissableOnly, count: facets.missable,
+      total: view.achievements.filter(isMissable).length,
+      hint: "Only achievements that can be missed for good",
+      none: "RetroAchievements marks none of this game's achievements as missable",
+    },
+    {
+      id: "progression", label: "Progression", on: progressionOnly, set: onProgressionOnly, count: facets.progression,
+      total: view.achievements.filter(isProgression).length,
+      hint: "Only achievements that mark your way through the game, win conditions included",
+      none: "RetroAchievements marks none of this game's achievements as progression or win condition",
+    },
+  ];
   const shown = previewAchievements(filtered, expanded);
   const pct = achievementPercent(view);
   const award = view.award ? AWARD[view.award] : undefined;
@@ -187,12 +205,14 @@ export function AchievementsPanel({
                 {f.label} <span className="muted">{facets.status[f.value]}</span>
               </button>
             ))}
-            <button
-              className="btn btn-ghost small" aria-pressed={missableOnly} disabled={missableTotal === 0} onClick={() => onMissableOnly(!missableOnly)} data-testid="ach-filter-missable"
-              title={missableTotal === 0 ? "RetroAchievements marks none of this game's achievements as missable" : "Only achievements that can be missed for good"}
-            >
-              Missable <span className="muted">{facets.missable}</span>
-            </button>
+            {kindFilters.map((k) => (
+              <button
+                key={k.id} className="btn btn-ghost small" aria-pressed={k.on} disabled={k.total === 0} onClick={() => k.set(!k.on)} data-testid={`ach-filter-${k.id}`}
+                title={k.total === 0 ? k.none : k.hint}
+              >
+                {k.label} <span className="muted">{k.count}</span>
+              </button>
+            ))}
           </div>
         </div>
       )}
@@ -228,6 +248,7 @@ export function Achievements({ game }: { game: Game }) {
   const [filter, setFilter] = useState<AchFilter>("all");
   const [query, setQuery] = useState("");
   const [missableOnly, setMissableOnly] = useState(false);
+  const [progressionOnly, setProgressionOnly] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
   // Reads can overlap (the backend announces a refresh while an earlier read may still be out), so an
@@ -253,6 +274,7 @@ export function Achievements({ game }: { game: Game }) {
     setFilter("all");
     setQuery("");
     setMissableOnly(false);
+    setProgressionOnly(false);
     setExpanded(false);
     return load();
   }, [load]);
@@ -288,10 +310,11 @@ export function Achievements({ game }: { game: Game }) {
     <AchievementsPanel
       romId={game.id} view={view} error={error} refreshing={refreshing} filter={filter} expanded={expanded}
       onFilter={(f) => { setFilter(f); setExpanded(false); }}
-      query={query} missableOnly={missableOnly}
+      query={query} missableOnly={missableOnly} progressionOnly={progressionOnly}
       onQuery={(t) => { setQuery(t); setExpanded(false); }}
       onMissableOnly={(on) => { setMissableOnly(on); setExpanded(false); }}
-      onClear={() => { setQuery(""); setMissableOnly(false); setFilter("all"); setExpanded(false); }}
+      onProgressionOnly={(on) => { setProgressionOnly(on); setExpanded(false); }}
+      onClear={() => { setQuery(""); setMissableOnly(false); setProgressionOnly(false); setFilter("all"); setExpanded(false); }}
       onToggleExpanded={() => setExpanded((x) => !x)}
       onRefresh={refresh}
       onRetry={() => { setView(null); load(); }}

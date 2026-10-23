@@ -123,6 +123,108 @@ describe("search box and missable filter", () => {
   });
 });
 
+/** 1 progression earned, 2 progression locked, 3 missable locked, 4 no kind locked. */
+const KIND_SET = [ach(1, { kind: "progression", earned: true }), ach(2, { kind: "progression" }), ach(3, { kind: "missable" }), ach(4)];
+
+describe("progression filter", () => {
+  it("is offered next to Missable and the earned/locked filters", () => {
+    const html = render(view({ achievements: KIND_SET }));
+    expect(chip(html, "ach-filter-progression")).toContain("Progression");
+    expect(chip(html, "ach-filter-progression")).toContain('aria-pressed="false"');
+    expect(html).toContain('data-testid="ach-filter-missable"');
+    expect(html).toContain('data-testid="ach-filter-locked"');
+  });
+
+  it("counts the progression achievements on the toggle", () => {
+    const html = render(view({ achievements: KIND_SET }));
+    expect(number(html, "ach-filter-progression")).toBe("2");
+    expect(number(html, "ach-filter-missable")).toBe("1");
+  });
+
+  it("shows only the progression ones when asked, and says how many of how many", () => {
+    const html = render(view({ achievements: KIND_SET }), { progressionOnly: true });
+    expect(rows(html)).toBe(2);
+    expect(html).toContain("Achievement 1");
+    expect(html).toContain("Achievement 2");
+    expect(html).not.toContain("Achievement 3");
+    expect(chip(html, "ach-filter-progression")).toContain('aria-pressed="true"');
+    expect(chip(html, "ach-filter-missable")).toContain('aria-pressed="false"');
+    expect(html).toContain("Showing 2 of 4");
+  });
+
+  it("combines with locked and with earned", () => {
+    const locked = render(view({ achievements: KIND_SET }), { progressionOnly: true, filter: "locked" });
+    expect(rows(locked)).toBe(1);
+    expect(locked).toContain("Achievement 2");
+    expect(locked).toContain("Showing 1 of 4");
+    const earned = render(view({ achievements: KIND_SET }), { progressionOnly: true, filter: "earned" });
+    expect(rows(earned)).toBe(1);
+    expect(earned).toContain("Achievement 1");
+  });
+
+  it("shows either kind when Missable is chosen too", () => {
+    const html = render(view({ achievements: KIND_SET }), { progressionOnly: true, missableOnly: true });
+    expect(rows(html)).toBe(3);
+    expect(html).not.toContain("Achievement 4");
+    expect(chip(html, "ach-filter-progression")).toContain('aria-pressed="true"');
+    expect(chip(html, "ach-filter-missable")).toContain('aria-pressed="true"');
+    expect(html).toContain("Showing 3 of 4");
+  });
+
+  it("makes the earned/locked counts follow the progression filter", () => {
+    const html = render(view({ achievements: KIND_SET }), { progressionOnly: true });
+    expect([number(html, "ach-filter-all"), number(html, "ach-filter-earned"), number(html, "ach-filter-locked")]).toEqual(["2", "1", "1"]);
+  });
+
+  it("makes the progression count follow the earned/locked choice, and counts it whether or not Missable is chosen", () => {
+    expect(number(render(view({ achievements: KIND_SET }), { filter: "locked" }), "ach-filter-progression")).toBe("1");
+    expect(number(render(view({ achievements: KIND_SET }), { missableOnly: true }), "ach-filter-progression")).toBe("2");
+  });
+
+  it("disables the toggle, and says why, when RetroAchievements marks none", () => {
+    const html = render(view()); // SET has missable achievements but no progression or win-condition ones
+    const btn = chip(html, "ach-filter-progression");
+    expect(btn).toContain("disabled");
+    expect(btn).toContain("marks none of this game");
+    expect(number(html, "ach-filter-progression")).toBe("0");
+    expect(chip(html, "ach-filter-missable")).not.toContain("disabled");
+  });
+
+  it("includes win conditions, in the count and in what it shows, each keeping its own badge", () => {
+    const set = [ach(1, { kind: "progression", earned: true }), ach(2, { kind: "win_condition" }), ach(3, { kind: "missable" }), ach(4)];
+    const html = render(view({ achievements: set }), { progressionOnly: true });
+    expect(number(html, "ach-filter-progression")).toBe("2");
+    expect(rows(html)).toBe(2);
+    expect(html).toContain("Achievement 2");
+    expect(html).not.toContain("Achievement 3");
+    expect(html).toContain("Win condition");
+    expect(html).toContain("Showing 2 of 4");
+    const locked = render(view({ achievements: set }), { progressionOnly: true, filter: "locked" });
+    expect(rows(locked)).toBe(1);
+    expect(locked).toContain("Achievement 2");
+  });
+
+  it("is available for a game whose only story achievement is a win condition", () => {
+    const html = render(view({ achievements: [ach(1, { kind: "win_condition" }), ach(2)] }));
+    expect(chip(html, "ach-filter-progression")).not.toContain("disabled");
+    expect(number(html, "ach-filter-progression")).toBe("1");
+  });
+
+  it("says nothing matches, with a way back, when nothing is left", () => {
+    const html = render(view({ achievements: KIND_SET }), { progressionOnly: true, filter: "earned", query: "achievement 2" });
+    expect(rows(html)).toBe(0);
+    expect(html).toContain("No achievements match.");
+    expect(html).toContain('data-testid="ach-clear"');
+  });
+
+  it("is there for a set the user hasn't linked, like Missable", () => {
+    const html = render(view({ state: "not_linked", achievements: KIND_SET }), { progressionOnly: true });
+    expect(html).toContain('data-testid="ach-filter-progression"');
+    expect(html).not.toContain('data-testid="ach-filter-earned"');
+    expect(rows(html)).toBe(2);
+  });
+});
+
 describe("where the controls appear", () => {
   it("for a set the user hasn't linked: search and missable, but no earned/locked (nothing can be earned)", () => {
     const html = render(view({ state: "not_linked" }));

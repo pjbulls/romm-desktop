@@ -53,9 +53,15 @@ try:
 
     print("== Library")
     d.wait(lambda: count("[data-testid=game-card]") >= 48, 20, "first page of games")
-    check("first page has 48 games", count("[data-testid=game-card]") == 48, str(count("[data-testid=game-card]")))
+    # The list grows a whole page (48) at a time, and the scroll observer (600px margin) may already have prefetched the next
+    # one by the time this looks, so "exactly 48" was a race. Either is right: the first page, or all 67 (paging is checked below).
+    first = count("[data-testid=game-card]")
+    check("first page of games loaded (48, or all 67 if the next page was already prefetched)", first in (48, 67), str(first))
+    # The platforms are a separate request from the games, so they can show up after the first games do.
+    platforms = ("GameCube", "PlayStation", "PlayStation Portable")
+    d.wait(lambda: all(p in d.text(d.find(".sidebar")) for p in platforms), 20, "platforms in the sidebar")
     side = d.text(d.find(".sidebar"))
-    check("sidebar lists the platforms", all(p in side for p in ("GameCube", "PlayStation", "PlayStation Portable")), side[:200])
+    check("sidebar lists the platforms", all(p in side for p in platforms), side[:200])
     check("platforms without an installed emulator are flagged", d.find(".sidebar .dot-warn") is not None)
     d.wait(lambda: d.js("return document.querySelectorAll('.cover img').length") > 0, 15, "cover art")
     check("cover art loads", True)
@@ -93,6 +99,27 @@ try:
     check("Locked filter shows only the two unearned", count("li.ach.earned") == 0)
     d.click(d.find("[data-testid=ach-filter-all]"))
     time.sleep(0.3); shot("04b-achievements")
+    # Kind filters. The set has one of each: First Blood (progression), Green Hill Clear (win condition, the earned one) and
+    # Secret Stage (missable). The Progression filter covers progression and win condition alike.
+    titles = lambda: [d.text(e) for e in d.find_all("li.ach .ach-title")]
+    pressed = lambda tid: d.attr(d.find(f"[data-testid={tid}]"), "aria-pressed")
+    def shows(n, what): d.wait(lambda: count("[data-testid=achievement]") == n, 5, what)
+    d.click(d.find("[data-testid=ach-filter-progression]")); shows(2, "progression filter")
+    check("Progression filter shows the progression and win-condition achievements", titles() == ["First Blood", "Green Hill Clear"], str(titles()))
+    d.click(d.find("[data-testid=ach-filter-earned]")); shows(1, "progression, earned")
+    check("...with Earned: the win condition counts as progression", titles() == ["Green Hill Clear"], str(titles()))
+    d.click(d.find("[data-testid=ach-filter-locked]")); shows(1, "progression, locked")
+    check("...with Locked: what is still to do", titles() == ["First Blood"], str(titles()))
+    d.click(d.find("[data-testid=ach-filter-missable]")); shows(2, "progression + missable, locked")
+    check("Adding Missable shows either kind (and not the earned win condition)", titles() == ["First Blood", "Secret Stage"], str(titles()))
+    d.click(d.find("[data-testid=ach-filter-missable]")); shows(1, "missable off again")
+    type_into("[data-testid=ach-search]", "secret")
+    d.wait(lambda: d.find("[data-testid=ach-none]"), 5, "nothing left")
+    check("A missable achievement doesn't match under Progression", count("[data-testid=achievement]") == 0)
+    d.click(d.find("[data-testid=ach-clear]")); shows(3, "cleared")
+    check("Clear resets the kind filters and the search too",
+          pressed("ach-filter-progression") == "false" and pressed("ach-filter-missable") == "false" and pressed("ach-filter-all") == "true"
+          and d.js("return document.querySelector('[data-testid=ach-search]').value") == "" and count("[data-testid=achievement]") == 3)
     d.click(d.find("[data-testid=ach-refresh]"))
     wait_toast("Couldn't refresh RetroAchievements", 15)
     check("refresh without me.write explains what to do", "me.write" in toast_text(), toast_text())

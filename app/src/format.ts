@@ -103,10 +103,14 @@ export function achievementCounts(list: Achievement[]): Record<AchFilter, number
   return { all: list.length, earned, locked: list.length - earned };
 }
 
-/** What the achievements list is narrowed by: the earned/locked choice, "missable only", and words to search for. */
+/**
+ * What the achievements list is narrowed by: the earned/locked choice, the kinds to show (missable, progression),
+ * and words to search for.
+ */
 export interface AchQuery {
   status: AchFilter;
   missable: boolean;
+  progression: boolean;
   text: string;
 }
 
@@ -118,6 +122,22 @@ export function foldText(s: string): string {
 /** RetroAchievements marks an achievement `missable` when it can be lost for good (a one-time event, a point of no return). */
 export const isMissable = (a: Achievement): boolean => a.kind === "missable";
 
+/**
+ * What the "Progression" filter shows: RetroAchievements' two story types, `progression` (a step along the way: a boss, a
+ * stage, a story beat) and `win_condition` (the one that finishes the game).
+ */
+export const isProgression = (a: Achievement): boolean => a.kind === "progression" || a.kind === "win_condition";
+
+/**
+ * The achievements of the chosen kinds. An achievement has exactly one kind and the two groups (missable; progression and
+ * win condition) don't overlap, so choosing both shows the ones that are either (asking for both at once could never match
+ * anything). Choosing neither shows everything.
+ */
+export function filterByKind(list: Achievement[], q: Pick<AchQuery, "missable" | "progression">): Achievement[] {
+  if (!q.missable && !q.progression) return list;
+  return list.filter((a) => (q.missable && isMissable(a)) || (q.progression && isProgression(a)));
+}
+
 /** The achievements whose title or description contains every word of `text`, in any order. No words: all of them. */
 export function searchAchievements(list: Achievement[], text: string): Achievement[] {
   const words = foldText(text).split(/\s+/).filter(Boolean);
@@ -128,26 +148,32 @@ export function searchAchievements(list: Achievement[], text: string): Achieveme
   });
 }
 
-/** Search, "missable only" and the earned/locked choice, all at once. */
+/** Search, the kinds and the earned/locked choice, all at once. */
 export function queryAchievements(list: Achievement[], q: AchQuery): Achievement[] {
-  const found = searchAchievements(list, q.text);
-  return filterAchievements(q.missable ? found.filter(isMissable) : found, q.status);
+  return filterAchievements(filterByKind(searchAchievements(list, q.text), q), q.status);
 }
 
 /** Whether anything beyond the earned/locked choice is narrowing the list. */
-export const isNarrowed = (q: AchQuery): boolean => q.missable || q.text.trim() !== "";
+export const isNarrowed = (q: AchQuery): boolean => q.missable || q.progression || q.text.trim() !== "";
 
-/** The number on each control: how many achievements choosing it would show, given the other controls. */
+/**
+ * The number on each control: how many achievements choosing it would show, given the other controls. The kinds are
+ * alternatives, so each counts its own achievements (within the search and the earned/locked choice) whether or not
+ * the other kind is chosen; the earned/locked numbers follow whichever kinds are chosen.
+ */
 export interface AchFacets {
   status: Record<AchFilter, number>;
   missable: number;
+  progression: number;
 }
 
 export function achievementFacets(list: Achievement[], q: AchQuery): AchFacets {
   const found = searchAchievements(list, q.text);
+  const inStatus = filterAchievements(found, q.status);
   return {
-    status: achievementCounts(q.missable ? found.filter(isMissable) : found),
-    missable: filterAchievements(found, q.status).filter(isMissable).length,
+    status: achievementCounts(filterByKind(found, q)),
+    missable: inStatus.filter(isMissable).length,
+    progression: inStatus.filter(isProgression).length,
   };
 }
 

@@ -153,7 +153,7 @@ try:
     check("RB switches to the next entry", first != start_label and "Installed" in first, f"{start_label!r} → {first!r}")
     press("rb"); second = sidebar_active()
     check("RB again reaches a platform", "GameCube" in second, second)
-    d.wait(lambda: len(card_ids()) == 48, 10, "grid")
+    d.wait(lambda: len(card_ids()) >= 48, 10, "grid")  # >=: the next page may already be prefetched
     d.wait(lambda: (focused() or {}).get("cls", "").find("game-card") >= 0, 6, "focus restored")
     check("focus is restored onto the new grid", True)
     press("lb"); check("LB goes back", "Installed" in sidebar_active())

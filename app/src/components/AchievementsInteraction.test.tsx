@@ -161,6 +161,124 @@ describe("searching and filtering achievements in the panel", () => {
   });
 });
 
+/** Progression: 1 (earned), 2. Win condition: 3 (shown with the progression ones). Missable: 4, 5 (earned). Six in all, so the preview (8) never hides any. */
+const KIND_SET: Achievement[] = [
+  ach(1, "Reach the Castle", "Get to the gates", { kind: "progression", earned: true }),
+  ach(2, "Cross the Bridge", "Get over the river", { kind: "progression" }),
+  ach(3, "Defeat the Warden", "Beat the warden", { kind: "win_condition" }),
+  ach(4, "Secret Room", "Find the hidden room", { kind: "missable" }),
+  ach(5, "Last Chance", "Buy the sword", { kind: "missable", earned: true }),
+  ach(6, "Collector", "Gather coins"),
+];
+const pressed = (id: string) => q(`[data-testid=${id}]`)!.getAttribute("aria-pressed");
+const num = (id: string) => q(`[data-testid=${id}] .muted`)!.textContent;
+
+describe("the progression toggle in the panel", () => {
+  beforeEach(() => { h.view = view(KIND_SET); });
+
+  it("shows only the progression ones, and un-toggles", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    expect(titles()).toEqual(["Reach the Castle", "Cross the Bridge", "Defeat the Warden"]);
+    expect(pressed("ach-filter-progression")).toBe("true");
+    expect(text()).toContain("Showing 3 of 6");
+    await click("[data-testid=ach-filter-progression]");
+    expect(rows()).toBe(6);
+    expect(pressed("ach-filter-progression")).toBe("false");
+  });
+
+  it("finds the progression ones you haven't earned yet", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    await click("[data-testid=ach-filter-locked]");
+    expect(titles()).toEqual(["Cross the Bridge", "Defeat the Warden"]);
+    expect(text()).toContain("Showing 2 of 6");
+    await click("[data-testid=ach-filter-earned]");
+    expect(titles()).toEqual(["Reach the Castle"]);
+  });
+
+  it("shows either kind with Missable, and each toggle still works on its own", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    await click("[data-testid=ach-filter-missable]");
+    expect(titles()).toEqual(["Reach the Castle", "Cross the Bridge", "Defeat the Warden", "Secret Room", "Last Chance"]);
+    expect([pressed("ach-filter-progression"), pressed("ach-filter-missable")]).toEqual(["true", "true"]);
+    await click("[data-testid=ach-filter-progression]");
+    expect(titles()).toEqual(["Secret Room", "Last Chance"]);
+    expect([pressed("ach-filter-progression"), pressed("ach-filter-missable")]).toEqual(["false", "true"]);
+  });
+
+  it("combines the search with the toggle", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    await type("bridge");
+    expect(titles()).toEqual(["Cross the Bridge"]);
+    await type("secret"); // missable, so not shown under progression
+    expect(rows()).toBe(0);
+    expect(text()).toContain("No achievements match.");
+  });
+
+  it("updates the counts as the others change", async () => {
+    await mount();
+    expect([num("ach-filter-all"), num("ach-filter-earned"), num("ach-filter-locked"), num("ach-filter-missable"), num("ach-filter-progression")])
+      .toEqual(["6", "2", "4", "2", "3"]);
+    await click("[data-testid=ach-filter-progression]");
+    expect([num("ach-filter-all"), num("ach-filter-earned"), num("ach-filter-locked")]).toEqual(["3", "1", "2"]);
+    expect(num("ach-filter-missable")).toBe("2"); // its own count, not affected by the other kind being chosen
+    await click("[data-testid=ach-filter-locked]");
+    expect([num("ach-filter-progression"), num("ach-filter-missable")]).toEqual(["2", "1"]);
+  });
+
+  it("is cleared by Clear along with everything else", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    await click("[data-testid=ach-filter-missable]");
+    await click("[data-testid=ach-filter-earned]");
+    await type("bridge"); // progression, but locked
+    expect(rows()).toBe(0);
+    await click("[data-testid=ach-clear]");
+    expect(q<HTMLInputElement>("[data-testid=ach-search]")!.value).toBe("");
+    expect([pressed("ach-filter-progression"), pressed("ach-filter-missable"), pressed("ach-filter-all")]).toEqual(["false", "false", "true"]);
+    expect(rows()).toBe(6);
+  });
+
+  it("starts the next game from scratch", async () => {
+    await mount(game(1));
+    await click("[data-testid=ach-filter-progression]");
+    expect(rows()).toBe(3);
+    await rerender(game(2));
+    expect(pressed("ach-filter-progression")).toBe("false");
+    expect(rows()).toBe(6);
+  });
+
+  it("is greyed out for a game with no progression or win-condition achievements, and does nothing when clicked", async () => {
+    h.view = view(SET.filter((a) => a.kind !== "win_condition")); // the main SET without its win condition: only missable ones are typed
+    await mount();
+    const btn = q<HTMLButtonElement>("[data-testid=ach-filter-progression]")!;
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("marks none of this game");
+    await click("[data-testid=ach-filter-progression]");
+    expect(rows()).toBe(8);
+    expect(q("[data-testid=ach-filter-missable]")!.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("is there when the game's only story achievement is its win condition", async () => {
+    h.view = view([ach(1, "Final Boss", "Win the game", { kind: "win_condition" }), ach(2, "Collector", "Gather coins")]);
+    await mount();
+    expect(q<HTMLButtonElement>("[data-testid=ach-filter-progression]")!.disabled).toBe(false);
+    expect(num("ach-filter-progression")).toBe("1");
+    await click("[data-testid=ach-filter-progression]");
+    expect(titles()).toEqual(["Final Boss"]);
+  });
+
+  it("keeps the win condition's own badge on its row", async () => {
+    await mount();
+    await click("[data-testid=ach-filter-progression]");
+    const row = [...document.querySelectorAll("[data-testid=achievement]")].find((r) => r.textContent!.includes("Defeat the Warden"))!;
+    expect(row.textContent).toContain("Win condition");
+  });
+});
+
 describe("Escape in the search box", () => {
   it("clears the search and does not reach the drawer's own Escape handler", async () => {
     const closes = vi.fn();
