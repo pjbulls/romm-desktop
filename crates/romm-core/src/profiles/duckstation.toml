@@ -20,11 +20,10 @@ windows = [
   "{documents}/DuckStation",
 ]
 
-# Memory cards are per-game or shared depending on user settings; diffing the
-# folder handles both.
+# Memory cards are per-game or shared depending on user settings (Card1Type); the game's card is
+# cut out of them by game id (see unit.rs / route.rs).
 [saves]
 mode = "diff"
-roots = ["memcards"]
 
 [states]
 mode = "diff"

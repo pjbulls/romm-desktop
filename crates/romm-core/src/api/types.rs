@@ -136,6 +136,8 @@ pub struct Save {
     pub slot: Option<String>,
     #[serde(default)]
     pub content_hash: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 /// Response of `POST /api/client-tokens/exchange`.
@@ -172,7 +174,8 @@ pub struct NegotiateSave {
     pub file_name: String,
     pub slot: Option<String>,
     pub emulator: Option<String>,
-    /// MD5 hex of the file exactly as it would be uploaded.
+    /// RomM's `content_hash` of the file as it would be uploaded (see `unit::content_hash`): md5 of a
+    /// plain file, or of a zip's sorted `<entry>:<entry md5>` lines.
     pub content_hash: String,
     /// ISO 8601, UTC.
     pub updated_at: String,
@@ -185,6 +188,9 @@ pub struct NegotiateRequest {
     pub saves: Vec<NegotiateSave>,
     pub rom_ids: Vec<i64>,
     pub restore_unlisted: bool,
+    /// Left out unless set: Argosy's negotiate has no filter, and a filter would hide saves other
+    /// clients wrote under a different emulator label (`ppsspp_gold`, a libretro core's name).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub emulators: Option<Vec<String>>,
 }
 

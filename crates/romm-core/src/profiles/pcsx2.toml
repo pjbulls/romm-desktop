@@ -21,9 +21,10 @@ windows = [
   "{documents}/PCSX2",
 ]
 
+# Memory cards (file or folder cards, named by Slot1_Filename); the game's card is cut out of them
+# by game id (see unit.rs / route.rs).
 [saves]
 mode = "diff"
-roots = ["memcards"]
 
 [states]
 mode = "diff"

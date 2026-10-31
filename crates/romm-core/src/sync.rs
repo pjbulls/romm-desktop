@@ -1,7 +1,12 @@
-//! Save sync against RomM's device-sync protocol: negotiate → apply operations →
-//! complete the session.
+//! Save sync against RomM's device-sync protocol: negotiate → apply operations → complete the
+//! session.
+//!
+//! What a game's save *is*, and the bytes that travel, come from `route` and `unit` (Sigil, the
+//! library Argosy uses), so a save uploaded here is one Argosy restores and vice versa. This module
+//! is the protocol around that: what to tell the server, what to do with its answer, and what to
+//! remember afterwards.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::Utc;
@@ -11,8 +16,10 @@ use crate::api::RommClient;
 use crate::error::{Error, Result};
 use crate::profiles::{Profile, SaveMode};
 use crate::retroarch;
+use crate::route::{self, Kind, Plan};
 use crate::saves::{self, SLOT};
 use crate::state::{save_key, LocalRom, SaveRecord, State};
+use crate::unit::{self, Identity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,79 +42,166 @@ pub struct EmuEnv {
     pub profile: Profile,
     pub data_root: PathBuf,
     pub retroarch: Option<retroarch::Layout>,
-}
-
-#[derive(Debug, Clone)]
-pub enum UnitKind {
-    /// A single file saved as-is (compatible with RomM's own web player).
-    Raw(PathBuf),
-    /// Files under `data_root`, zipped.
-    Bundle { files: Vec<String> },
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalUnit {
-    pub emulator: String,
-    pub slot: String,
-    pub file_name: String,
-    pub kind: UnitKind,
+    /// The libretro core in use (RetroArch only), named as RomM and Argosy name it (`snes9x`).
+    /// Which files are a game's save, and the `emulator` RomM is told, depend on it.
+    pub core: Option<String>,
 }
 
 impl EmuEnv {
     pub fn save_mode(&self) -> Option<SaveMode> {
         self.profile.saves.as_ref().map(|s| s.mode)
     }
+}
 
-    /// Folders to snapshot around a play session (diff mode).
-    pub fn watch_roots(&self) -> Vec<String> {
-        match &self.profile.saves {
-            Some(r) if r.mode == SaveMode::Diff => r.roots.clone(),
-            _ => vec![],
+/// The ids Sigil read from the ROM, cached in the state file. Argosy reads them once, when a game is
+/// installed; here that happens the first time the game is synced (and again if its launch path
+/// changes, which means the ROM did).
+pub fn identity_for(state: &mut State, rom: &LocalRom) -> Identity {
+    let source = rom.launch_path.to_string_lossy();
+    let platform = unit::platform_slug(&rom.platform_slug);
+    if let Some(id) = state.roms.get(&rom.rom_id).and_then(|r| r.identity.as_ref()) {
+        if id.source == source && id.platform == platform {
+            return id.clone();
+        }
+    }
+    let id = unit::identify(&rom.launch_path, &rom.platform_slug);
+    // Only remember a reading that found something; an unreadable ROM is tried again next time.
+    let found = !id.title_id.is_empty() || !id.save_id.is_empty() || id.features != 0 || !id.n64_md5.is_empty();
+    if found {
+        if let Some(r) = state.roms.get_mut(&rom.rom_id) {
+            r.identity = Some(id.clone());
+        }
+    }
+    id
+}
+
+/// What a game's local save is made of.
+#[derive(Debug, Clone)]
+pub enum LocalKind {
+    /// One file, uploaded as it is (RetroArch cores without a Sigil layout).
+    Raw(PathBuf),
+    /// A unit Sigil collected from the emulator's files.
+    Unit(unit::Unit),
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalUnit {
+    /// The `emulator` RomM is told.
+    pub emulator: String,
+    pub slot: String,
+    /// The name it is uploaded under: `<rom stem>.<extension>`, as Argosy names it.
+    pub file_name: String,
+    pub kind: LocalKind,
+    pub size: u64,
+    /// When the files holding the save were last written.
+    pub modified: SystemTime,
+    /// RomM's `content_hash` of the bytes as they would be uploaded.
+    pub hash: String,
+    /// Differs from what was last exchanged with the server.
+    pub changed: bool,
+}
+
+impl LocalUnit {
+    /// The bytes that would be uploaded.
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        match &self.kind {
+            LocalKind::Raw(p) => Ok(std::fs::read(p)?),
+            LocalKind::Unit(u) => Ok(u.data.clone()),
         }
     }
 
-    /// Stem mode: (path, exists). When no save exists yet, the path is where
-    /// RetroArch would create it.
-    pub fn stem_target(&self, rom: &LocalRom) -> Option<(PathBuf, bool)> {
-        let rule = self.profile.saves.as_ref()?;
-        let layout = self.retroarch.as_ref()?;
-        let ext = rule.extensions.first()?;
-        match retroarch::find_save(layout, &rom.stem, ext) {
-            Some(p) => Some((p, true)),
-            None => Some((layout.saves.join(format!("{}.{ext}", rom.stem)), false)),
+    fn detail(&self) -> Option<String> {
+        let LocalKind::Unit(u) = &self.kind else { return None };
+        if u.shape == unit::Shape::Single {
+            return None;
         }
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(&u.data)).ok()?;
+        let n = (0..z.len()).filter(|i| z.by_index(*i).is_ok_and(|f| !f.name().ends_with('/'))).count();
+        Some(format!("{n} file{}", if n == 1 { "" } else { "s" }))
     }
+}
 
-    /// Saves that currently exist locally for this ROM.
-    pub fn save_units(&self, rom: &LocalRom, state: &State) -> Vec<LocalUnit> {
-        let emu = self.profile.id.clone();
-        match self.save_mode() {
-            Some(SaveMode::Stem) => match self.stem_target(rom) {
-                Some((path, true)) => {
-                    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    vec![LocalUnit { emulator: emu, slot: SLOT.into(), file_name, kind: UnitKind::Raw(path) }]
-                }
-                _ => vec![],
-            },
-            Some(SaveMode::Diff) => {
-                let files: Vec<String> = state
-                    .saves
-                    .get(&save_key(rom.rom_id, &emu))
-                    .map(|r| r.files.iter().filter(|f| self.data_root.join(f).is_file()).cloned().collect())
-                    .unwrap_or_default();
-                if files.is_empty() {
-                    return vec![];
-                }
-                vec![LocalUnit {
-                    emulator: emu,
-                    slot: SLOT.into(),
-                    file_name: format!("{}.zip", rom.stem),
-                    kind: UnitKind::Bundle { files },
-                }]
+/// Collects `rom`'s local save under `plan`, if it has one. `rec` and `sigil_state` are what the last
+/// sync left behind; they decide `changed`.
+pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecord>, sigil_state: Option<&[u8]>) -> Result<Option<LocalUnit>> {
+    let last = rec.and_then(|r| r.last_hash.as_deref());
+    match &plan.kind {
+        Kind::Raw { path, exists } => {
+            if !*exists {
+                return Ok(None);
             }
-            None => vec![],
+            let meta = std::fs::metadata(path)?;
+            let hash = saves::md5_file(path)?;
+            let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            Ok(Some(LocalUnit {
+                emulator: plan.label.clone(),
+                slot: SLOT.into(),
+                file_name: upload_name(&rom.stem, &ext),
+                size: meta.len(),
+                modified: meta.modified()?,
+                changed: last != Some(hash.as_str()),
+                hash,
+                kind: LocalKind::Raw(path.clone()),
+            }))
+        }
+        Kind::Unit(route) => {
+            ensure_identified(route, id, rom)?;
+            let Some(u) = unit::collect(route, id, &plan.content_name, sigil_state)? else { return Ok(None) };
+            let modified = unit::newest_mtime(route, id, &plan.content_name).unwrap_or_else(SystemTime::now);
+            Ok(Some(LocalUnit {
+                emulator: plan.label.clone(),
+                slot: SLOT.into(),
+                file_name: upload_name(&rom.stem, &u.extension()),
+                size: u.data.len() as u64,
+                modified,
+                hash: u.content_hash.clone(),
+                changed: u.changed || rec.is_some_and(|r| r.dirty),
+                kind: LocalKind::Unit(u),
+            }))
         }
     }
+}
+
+/// The unowned saves that appeared since `previous` was recorded. With nothing recorded there is no
+/// "since": whatever is already on the volume is not claimed for the game that happens to run.
+fn new_unowned(previous: Option<&[String]>, now: &[String]) -> Vec<String> {
+    match previous {
+        None => Vec::new(),
+        Some(before) => now.iter().filter(|n| !before.contains(n)).cloned().collect(),
+    }
+}
+
+/// A game whose saves are found by id must have one, or there is no telling which of the
+/// emulator's files are its saves. Sigil would only say "invalid argument"; say what to do instead.
+fn ensure_identified(route: &unit::Route, id: &Identity, rom: &LocalRom) -> Result<()> {
+    if unit::needs_game_id(&route.platform) && !id.has_id() {
+        return Err(Error::msg(format!(
+            "can't tell which game \"{}\" is: no game id could be read from the ROM or its file name, so its saves can't be located. \
+             Naming the file with its id (like \"Daxter [ULUS10064].iso\") is enough",
+            rom.stem
+        )));
+    }
+    Ok(())
+}
+
+/// Argosy uploads as `<rom base name>.<extension of what it uploads>`.
+fn upload_name(stem: &str, ext: &str) -> String {
+    if ext.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{stem}.{ext}")
+    }
+}
+
+/// What to tell the server about a local save. While the save is unchanged since the last transfer
+/// the server's own hash and timestamp are reported back (as Argosy does), so a save that was only
+/// restored, moved or touched can never look newer than the server's copy.
+fn reported(local: &LocalUnit, rec: Option<&SaveRecord>) -> (String, String) {
+    if let Some(last) = rec.and_then(|r| r.last_hash.clone()).filter(|_| !local.changed) {
+        let when = rec.and_then(|r| r.server_updated_at.clone()).unwrap_or_else(|| saves::iso(local.modified));
+        return (last, when);
+    }
+    (local.hash.clone(), saves::iso(local.modified))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -125,42 +219,32 @@ pub struct SaveView {
     pub name: String,
     pub size: u64,
     pub modified: Option<String>,
-    /// e.g. "2 files" for shared-folder bundles
+    /// e.g. "2 files" for a save made of several
     pub detail: Option<String>,
     pub status: SaveStatus,
 }
 
 /// Local view of a game's saves and whether each differs from the last sync. No network.
 pub fn saves_overview(env: &EmuEnv, rom: &LocalRom, db: &State) -> Result<Vec<SaveView>> {
-    let mut out = Vec::new();
-    for u in env.save_units(rom, db) {
-        let rec = db.saves.get(&save_key(rom.rom_id, &u.emulator));
-        let (size, modified, detail, status) = match &u.kind {
-            UnitKind::Raw(p) => {
-                let meta = std::fs::metadata(p)?;
-                let hash = saves::md5_file(p)?;
-                let st = match rec.and_then(|r| r.last_hash.as_deref()) {
-                    None => SaveStatus::NeverSynced,
-                    Some(h) if h == hash => SaveStatus::Synced,
-                    Some(_) => SaveStatus::Modified,
-                };
-                (meta.len(), meta.modified().ok().map(saves::iso), None, st)
-            }
-            UnitKind::Bundle { files } => {
-                let fp = saves::fingerprint(&env.data_root, files)?;
-                let size = files.iter().filter_map(|f| std::fs::metadata(env.data_root.join(f)).ok()).map(|m| m.len()).sum();
-                let st = match rec {
-                    Some(r) if r.last_hash.is_some() && r.fingerprint.as_deref() == Some(fp.as_str()) => SaveStatus::Synced,
-                    Some(r) if r.last_hash.is_some() => SaveStatus::Modified,
-                    _ => SaveStatus::NeverSynced,
-                };
-                let when = saves::latest_mtime(&env.data_root, files);
-                (size, Some(saves::iso(when)), Some(format!("{} file{}", files.len(), if files.len() == 1 { "" } else { "s" })), st)
-            }
-        };
-        out.push(SaveView { name: u.file_name, size, modified, detail, status });
-    }
-    Ok(out)
+    let id = db
+        .roms
+        .get(&rom.rom_id)
+        .and_then(|r| r.identity.clone())
+        .filter(|i| i.source == rom.launch_path.to_string_lossy())
+        .unwrap_or_else(|| unit::identify(&rom.launch_path, &rom.platform_slug));
+    let Some(plan) = route::plan(env, rom, &id) else { return Ok(vec![]) };
+    let rec = db.saves.get(&save_key(rom.rom_id, &plan.label));
+    let blob = match &plan.kind {
+        Kind::Unit(r) => db.sigil_state(&r.state_key()),
+        Kind::Raw { .. } => None,
+    };
+    let Some(local) = gather(rom, &id, &plan, rec, blob.as_deref())? else { return Ok(vec![]) };
+    let status = match rec.and_then(|r| r.last_hash.as_deref()) {
+        None => SaveStatus::NeverSynced,
+        Some(_) if local.changed => SaveStatus::Modified,
+        Some(_) => SaveStatus::Synced,
+    };
+    Ok(vec![SaveView { detail: local.detail(), name: local.file_name, size: local.size, modified: Some(saves::iso(local.modified)), status }])
 }
 
 #[derive(Debug, Clone)]
@@ -196,53 +280,59 @@ pub struct Syncer<'a> {
     pub policy: ConflictPolicy,
 }
 
+/// Everything an operation needs to know about the game being synced.
+struct Cx<'x> {
+    rom: &'x LocalRom,
+    env: &'x EmuEnv,
+    id: &'x Identity,
+    plan: Option<&'x Plan>,
+    local: Option<&'x LocalUnit>,
+    session_id: i64,
+}
+
 impl<'a> Syncer<'a> {
-    /// Hash/size/mtime of a local unit, exactly as it would be uploaded.
-    fn describe(&self, rom: &LocalRom, env: &EmuEnv, unit: &LocalUnit) -> Result<(String, u64, SystemTime)> {
-        match &unit.kind {
-            UnitKind::Raw(p) => {
-                let meta = std::fs::metadata(p)?;
-                Ok((saves::md5_file(p)?, meta.len(), meta.modified()?))
-            }
-            UnitKind::Bundle { files } => {
-                let bytes = saves::pack_bundle(&unit.emulator, &env.data_root, files)?;
-                let fp = saves::fingerprint(&env.data_root, files)?;
-                // If nothing changed since the last sync, report the hash we last
-                // exchanged with the server rather than a freshly packed one, so a
-                // zip-library upgrade can never fake a local change.
-                let hash = match self.state.saves.get(&save_key(rom.rom_id, &unit.emulator)) {
-                    Some(r) if r.fingerprint.as_deref() == Some(fp.as_str()) && r.last_hash.is_some() => {
-                        r.last_hash.clone().unwrap()
-                    }
-                    _ => saves::md5_bytes(&bytes),
-                };
-                Ok((hash, bytes.len() as u64, saves::latest_mtime(&env.data_root, files)))
-            }
-        }
-    }
-
-    fn unit_bytes(&self, env: &EmuEnv, unit: &LocalUnit) -> Result<Vec<u8>> {
-        match &unit.kind {
-            UnitKind::Raw(p) => Ok(std::fs::read(p)?),
-            UnitKind::Bundle { files } => saves::pack_bundle(&unit.emulator, &env.data_root, files),
-        }
-    }
-
     pub async fn sync_rom(&mut self, rom: &LocalRom, env: &EmuEnv, play: Option<PlaySession>) -> Result<SyncReport> {
-        let emu = env.profile.id.clone();
-        let units = env.save_units(rom, self.state);
+        let id = identity_for(self.state, rom);
+        let plan = route::plan(env, rom, &id);
+        let label = plan.as_ref().map_or_else(|| env.profile.id.clone(), |p| p.label.clone());
+        let mut report = SyncReport::default();
+
+        // A save Sigil refuses to read (two candidate memory cards, a damaged card) must not stop
+        // playtime being recorded, nor be mistaken for "no save": sync nothing for this game and say why.
+        if let Some(p @ Plan { kind: Kind::Unit(route), .. }) = &plan {
+            if unit::has_unowned_saves(&route.platform) {
+                self.claim_unowned(rom, &id, p, route, play.is_some());
+            }
+        }
+        let (local, unreadable) = match &plan {
+            None => (None, None),
+            Some(p) => {
+                let rec = self.state.saves.get(&save_key(rom.rom_id, &p.label));
+                let blob = match &p.kind {
+                    Kind::Unit(r) => self.state.sigil_state(&r.state_key()),
+                    Kind::Raw { .. } => None,
+                };
+                match gather(rom, &id, p, rec, blob.as_deref()) {
+                    Ok(l) => (l, None),
+                    Err(e) => (None, Some(e)),
+                }
+            }
+        };
+        if let Some(e) = &unreadable {
+            report.failed.push(format!("{}: {e}", rom.stem));
+        }
 
         let mut saves_list = Vec::new();
-        for u in &units {
-            let (hash, size, mtime) = self.describe(rom, env, u)?;
+        if let Some(l) = &local {
+            let (hash, updated_at) = reported(l, self.state.saves.get(&save_key(rom.rom_id, &label)));
             saves_list.push(NegotiateSave {
                 rom_id: rom.rom_id,
-                file_name: u.file_name.clone(),
-                slot: Some(u.slot.clone()),
-                emulator: Some(emu.clone()),
+                file_name: l.file_name.clone(),
+                slot: Some(l.slot.clone()),
+                emulator: Some(l.emulator.clone()),
                 content_hash: hash,
-                updated_at: saves::iso(mtime),
-                file_size_bytes: size,
+                updated_at,
+                file_size_bytes: l.size,
             });
         }
         let resp = self
@@ -250,16 +340,18 @@ impl<'a> Syncer<'a> {
             .negotiate(&NegotiateRequest {
                 device_id: self.device_id.to_string(),
                 saves: saves_list,
-                rom_ids: vec![rom.rom_id],
+                rom_ids: if unreadable.is_some() { vec![] } else { vec![rom.rom_id] },
                 restore_unlisted: false,
-                emulators: Some(vec![emu.clone()]),
+                // No filter, as in Argosy: other clients label the same save differently (a libretro
+                // core's name, `ppsspp_gold`), and a filter would hide theirs from us.
+                emulators: None,
             })
             .await?;
 
-        let mut report = SyncReport::default();
         let (mut ok, mut bad) = (0u32, 0u32);
         for op in &resp.operations {
-            match self.apply(op, rom, env, resp.session_id, &units, &mut report).await {
+            let cx = Cx { rom, env, id: &id, plan: plan.as_ref(), local: local.as_ref(), session_id: resp.session_id };
+            match self.apply(op, &cx, &mut report).await {
                 Ok(()) => ok += 1,
                 Err(e) => {
                     bad += 1;
@@ -282,75 +374,98 @@ impl<'a> Syncer<'a> {
         Ok(report)
     }
 
-    async fn apply(
-        &mut self,
-        op: &Operation,
-        rom: &LocalRom,
-        env: &EmuEnv,
-        session_id: i64,
-        units: &[LocalUnit],
-        report: &mut SyncReport,
-    ) -> Result<()> {
-        let unit = units.iter().find(|u| Some(&u.slot) == op.slot.as_ref()).or_else(|| units.first());
+    /// Sega CD, Dreamcast and Saturn saves carry no game id, so on a shared volume Sigil can't say whose
+    /// they are until a client claims them (without this such a game would silently never sync).
+    /// Argosy claims what appeared on the volume during a session, for the game that was played:
+    /// every collect records which unowned saves exist, and after a play session the new ones are
+    /// claimed. Nothing is claimed the first time a volume is seen, or outside a play session.
+    fn claim_unowned(&mut self, rom: &LocalRom, id: &Identity, plan: &Plan, route: &unit::Route, claim_new: bool) {
+        let key = route.state_key();
+        let blob = self.state.sigil_state(&key);
+        // A refusal is reported by the collect that follows; this only maintains the baseline.
+        let Ok(first) = unit::collect_claiming(route, id, &plan.content_name, blob.as_deref(), &[]) else { return };
+        let fresh = if claim_new { new_unowned(self.state.sigil_unowned.get(&key).map(Vec::as_slice), &first.unowned) } else { Vec::new() };
+        if fresh.is_empty() {
+            self.state.sigil_unowned.insert(key, first.unowned);
+            return;
+        }
+        match unit::collect_claiming(route, id, &plan.content_name, blob.as_deref(), &fresh) {
+            Ok(claimed) => {
+                // The claim is recorded only in the state Sigil returns, so keep that now. The save has
+                // not reached the server yet: until it does, it must not look unchanged.
+                if let Some(u) = &claimed.unit {
+                    self.state.set_sigil_state(&key, &u.state);
+                }
+                self.state.saves.entry(save_key(rom.rom_id, &plan.label)).or_default().dirty = true;
+                self.state.sigil_unowned.insert(key, claimed.unowned);
+            }
+            Err(e) => {
+                tracing::warn!("could not claim {fresh:?} for {}: {e}", rom.stem);
+                self.state.sigil_unowned.insert(key, first.unowned);
+            }
+        }
+    }
+
+    async fn apply(&mut self, op: &Operation, cx: &Cx<'_>, report: &mut SyncReport) -> Result<()> {
         match op.action {
             Action::NoOp | Action::Unknown => {
                 report.unchanged += 1;
+                // The server already holds exactly this: remember it, so later changes are measured from here.
+                if let Some(local) = cx.local {
+                    let hash = op.server_content_hash.clone().unwrap_or_else(|| local.hash.clone());
+                    self.record_synced(cx, local, &hash, op.save_id, op.server_updated_at.clone());
+                }
                 Ok(())
             }
             Action::Upload => {
-                let unit = unit.ok_or_else(|| Error::msg("server asked for an upload but nothing is saved locally"))?;
-                self.upload(rom, env, session_id, unit, Some(SLOT.to_string()), unit.file_name.clone(), report).await
+                let local = cx.local.ok_or_else(|| Error::msg("server asked for an upload but nothing is saved locally"))?;
+                self.upload(cx, local, Some(SLOT.to_string()), local.file_name.clone(), report).await
             }
             Action::Download => {
                 let id = op.save_id.ok_or_else(|| Error::msg("download operation without save_id"))?;
-                self.download(rom, env, session_id, id, unit, report).await
+                self.download(cx, id, op.server_updated_at.clone(), report).await
             }
-            Action::Conflict => self.resolve_conflict(op, rom, env, session_id, unit, report).await,
+            Action::Conflict => self.resolve_conflict(op, cx, report).await,
             Action::Delete => {
-                // The slot was emptied on the server. Raw saves are backed up then
-                // removed; shared memory cards are never deleted, only untracked.
-                if let Some(u) = unit {
-                    match &u.kind {
-                        UnitKind::Raw(p) => {
-                            saves::backup_file(p, &self.backup_dir, &u.file_name)?;
+                // The slot was emptied on the server. A raw save is backed up then removed; anything
+                // Sigil cut out of an emulator's own files (cards, folders) is never deleted, only untracked.
+                if let Some(l) = cx.local {
+                    match &l.kind {
+                        LocalKind::Raw(p) => {
+                            saves::backup_file(p, &self.backup_dir, &l.file_name)?;
                             std::fs::remove_file(p)?;
                         }
-                        UnitKind::Bundle { .. } => {
-                            self.state.saves.remove(&save_key(rom.rom_id, &u.emulator));
+                        LocalKind::Unit(_) => {
+                            if let Some(Plan { kind: Kind::Unit(r), .. }) = cx.plan {
+                                self.state.set_sigil_state(&r.state_key(), &[]);
+                            }
                         }
                     }
+                    self.state.saves.remove(&save_key(cx.rom.rom_id, &l.emulator));
                 }
                 Ok(())
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn upload(
-        &mut self,
-        rom: &LocalRom,
-        env: &EmuEnv,
-        session_id: i64,
-        unit: &LocalUnit,
-        slot: Option<String>,
-        file_name: String,
-        report: &mut SyncReport,
-    ) -> Result<()> {
-        let bytes = self.unit_bytes(env, unit)?;
-        let hash = saves::md5_bytes(&bytes);
+    async fn upload(&mut self, cx: &Cx<'_>, local: &LocalUnit, slot: Option<String>, file_name: String, report: &mut SyncReport) -> Result<()> {
+        let bytes = local.bytes()?;
+        let hash = unit::content_hash(&bytes);
         let params = UploadParams {
-            rom_id: rom.rom_id,
-            emulator: Some(unit.emulator.clone()),
+            rom_id: cx.rom.rom_id,
+            emulator: Some(local.emulator.clone()),
             slot: slot.clone(),
             device_id: Some(self.device_id.to_string()),
-            session_id: Some(session_id),
+            session_id: Some(cx.session_id),
             content_hash: Some(hash.clone()),
             file_name: file_name.clone(),
         };
         match self.client.upload_save(&params, bytes).await {
             Ok(saved) => {
                 if slot.is_some() {
-                    self.record_synced(rom, env, unit, &hash, Some(saved.id))?;
+                    // Only now has the save reached RomM, so only now does Sigil's state advance.
+                    let stored = saved.content_hash.clone().unwrap_or(hash);
+                    self.record_synced(cx, local, &stored, Some(saved.id), saved.updated_at.clone());
                     report.uploaded.push(file_name);
                 } else {
                     report.archived.push(file_name);
@@ -360,7 +475,7 @@ impl<'a> Syncer<'a> {
             // The server refuses to overwrite a slot another device filled.
             Err(e) if e.status() == Some(409) => {
                 report.conflicts.push(PendingConflict {
-                    rom_id: rom.rom_id,
+                    rom_id: cx.rom.rom_id,
                     file_name,
                     server_updated_at: None,
                     reason: Some("server holds a newer save for this slot".into()),
@@ -371,132 +486,170 @@ impl<'a> Syncer<'a> {
         }
     }
 
-    async fn download(
-        &mut self,
-        rom: &LocalRom,
-        env: &EmuEnv,
-        session_id: i64,
-        save_id: i64,
-        _unit: Option<&LocalUnit>,
-        report: &mut SyncReport,
-    ) -> Result<()> {
-        let bytes = self.client.download_save(save_id, self.device_id, session_id).await?;
-        let hash = saves::md5_bytes(&bytes);
-        let emu = &env.profile.id;
+    async fn download(&mut self, cx: &Cx<'_>, save_id: i64, server_updated_at: Option<String>, report: &mut SyncReport) -> Result<()> {
+        let plan = cx.plan.ok_or_else(|| Error::msg("this emulator has no save rule"))?;
+        let bytes = self.client.download_save(save_id, self.device_id, cx.session_id).await?;
+        let hash = unit::content_hash(&bytes);
         let stamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let backup = self.backup_dir.join(&stamp).join(emu);
+        let backup = self.backup_dir.join(&stamp).join(&plan.label);
 
-        let name = match env.save_mode() {
-            Some(SaveMode::Stem) => {
-                let (path, exists) = env.stem_target(rom).ok_or_else(|| Error::msg("no save location for this emulator"))?;
-                let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if exists {
-                    saves::backup_file(&path, &backup, &fname)?;
+        let name = match &plan.kind {
+            Kind::Raw { path, exists } => {
+                if saves::is_zip(&bytes) {
+                    return Err(Error::msg(format!(
+                        "the server's save is a unit from a core with its own save layout; {} keeps a plain save file, so it wasn't applied",
+                        plan.label
+                    )));
                 }
-                saves::write_atomic(&path, &bytes)?;
+                let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if *exists {
+                    saves::backup_file(path, &backup, &fname)?;
+                }
+                saves::write_atomic(path, &bytes)?;
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
                 fname
             }
-            Some(SaveMode::Diff) => {
-                if !saves::is_zip(&bytes) {
-                    return Err(Error::msg(
-                        "server save isn't a romm-desktop bundle (it was probably uploaded by another client)",
-                    ));
+            Kind::Unit(route) => {
+                if saves::is_legacy_bundle(&bytes) {
+                    self.download_legacy(cx, plan, route, &bytes, &backup, save_id, &hash, report).await?;
+                    return Ok(());
                 }
-                let written = saves::unpack_bundle(&bytes, &env.data_root, &backup)?;
-                let rec = self.state.saves.entry(save_key(rom.rom_id, emu)).or_default();
-                let mut files: Vec<String> = rec.files.iter().cloned().chain(written).collect();
-                files.sort();
-                files.dedup();
-                rec.files = files;
-                format!("{}.zip", rom.stem)
+                ensure_identified(route, cx.id, cx.rom)?;
+                // Keep what is there, in the form that would have been uploaded.
+                if let Some(LocalUnit { kind: LocalKind::Unit(u), file_name, .. }) = cx.local {
+                    std::fs::create_dir_all(&backup)?;
+                    std::fs::write(backup.join(file_name), &u.data)?;
+                }
+                let blob = self.state.sigil_state(&route.state_key());
+                let restored = unit::restore(route, cx.id, &plan.content_name, &bytes, blob.as_deref())?;
+                self.state.set_sigil_state(&route.state_key(), &restored.state);
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                upload_name(&cx.rom.stem, &extension_of_unit(&bytes))
             }
-            None => return Err(Error::msg("emulator has no save rule")),
         };
-        // Baseline for the next negotiate.
-        let fp = match env.save_mode() {
-            Some(SaveMode::Diff) => {
-                let files = self.state.saves.get(&save_key(rom.rom_id, emu)).map(|r| r.files.clone()).unwrap_or_default();
-                Some(saves::fingerprint(&env.data_root, &files)?)
-            }
-            _ => None,
-        };
-        let rec = self.state.saves.entry(save_key(rom.rom_id, emu)).or_insert_with(SaveRecord::default);
-        rec.last_hash = Some(hash);
-        rec.fingerprint = fp;
-        rec.server_save_id = Some(save_id);
         report.downloaded.push(name);
         Ok(())
     }
 
-    async fn resolve_conflict(
+    /// An older romm-desktop uploaded a zip with a manifest and paths relative to the emulator's data
+    /// folder. Put it back, then replace the server's copy with the same save in Argosy's form, so
+    /// every client can read it from here on.
+    #[allow(clippy::too_many_arguments)]
+    async fn download_legacy(
         &mut self,
-        op: &Operation,
-        rom: &LocalRom,
-        env: &EmuEnv,
-        session_id: i64,
-        unit: Option<&LocalUnit>,
+        cx: &Cx<'_>,
+        plan: &Plan,
+        route: &unit::Route,
+        bytes: &[u8],
+        backup: &Path,
+        save_id: i64,
+        legacy_hash: &str,
         report: &mut SyncReport,
     ) -> Result<()> {
+        saves::unpack_bundle(bytes, &cx.env.data_root, backup)?;
+        // Converting needs the game's id; without one the files are back in place and the server's
+        // copy simply stays as it was.
+        let converted = if ensure_identified(route, cx.id, cx.rom).is_ok() { unit::collect(route, cx.id, &plan.content_name, None)? } else { None };
+        let Some(u) = converted else {
+            // Put back, but Sigil can't find it by id (the ROM couldn't be identified): leave the
+            // server's copy as it was.
+            self.remember_download(cx, &plan.label, legacy_hash, save_id, None);
+            report.downloaded.push(upload_name(&cx.rom.stem, "zip"));
+            return Ok(());
+        };
+        let file_name = upload_name(&cx.rom.stem, &u.extension());
+        let params = UploadParams {
+            rom_id: cx.rom.rom_id,
+            emulator: Some(plan.label.clone()),
+            slot: Some(SLOT.to_string()),
+            device_id: Some(self.device_id.to_string()),
+            session_id: Some(cx.session_id),
+            content_hash: Some(u.content_hash.clone()),
+            file_name: file_name.clone(),
+        };
+        let saved = self.client.replace_save(save_id, &params, u.data.clone()).await?;
+        let rec = self.state.saves.entry(save_key(cx.rom.rom_id, &plan.label)).or_default();
+        rec.last_hash = Some(saved.content_hash.clone().unwrap_or_else(|| u.content_hash.clone()));
+        rec.server_save_id = Some(saved.id);
+        rec.server_updated_at = saved.updated_at.clone();
+        rec.dirty = false;
+        self.state.set_sigil_state(&route.state_key(), &u.state);
+        report.downloaded.push(file_name);
+        Ok(())
+    }
+
+    fn remember_download(&mut self, cx: &Cx<'_>, label: &str, hash: &str, save_id: i64, server_updated_at: Option<String>) {
+        let rec = self.state.saves.entry(save_key(cx.rom.rom_id, label)).or_default();
+        rec.last_hash = Some(hash.to_string());
+        rec.server_save_id = Some(save_id);
+        rec.server_updated_at = server_updated_at.or_else(|| Some(saves::iso(SystemTime::now())));
+        rec.dirty = false;
+    }
+
+    async fn resolve_conflict(&mut self, op: &Operation, cx: &Cx<'_>, report: &mut SyncReport) -> Result<()> {
         let server_id = op.save_id.ok_or_else(|| Error::msg("conflict without save_id"))?;
-        let Some(unit) = unit else {
+        let Some(local) = cx.local else {
             // Nothing local to protect: just take the server's.
-            return self.download(rom, env, session_id, server_id, None, report).await;
+            return self.download(cx, server_id, op.server_updated_at.clone(), report).await;
         };
         match self.policy {
             ConflictPolicy::Ask => {
                 report.conflicts.push(PendingConflict {
-                    rom_id: rom.rom_id,
-                    file_name: unit.file_name.clone(),
+                    rom_id: cx.rom.rom_id,
+                    file_name: local.file_name.clone(),
                     server_updated_at: op.server_updated_at.clone(),
                     reason: op.reason.clone(),
                 });
                 Ok(())
             }
-            ConflictPolicy::ServerWins => self.download(rom, env, session_id, server_id, Some(unit), report).await,
+            ConflictPolicy::ServerWins => self.download(cx, server_id, op.server_updated_at.clone(), report).await,
             ConflictPolicy::KeepBoth => {
                 let stamp = Utc::now().format("%Y%m%dT%H%M%S");
-                let archive_name = match &unit.kind {
-                    UnitKind::Raw(p) => {
-                        let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                        let ext = p.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                        format!("{stem}.conflict-{stamp}.{ext}")
-                    }
-                    UnitKind::Bundle { .. } => format!("{}.conflict-{stamp}.zip", rom.stem),
-                };
+                let ext = Path::new(&local.file_name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                let archive_name = upload_name(&format!("{}.conflict-{stamp}", cx.rom.stem), &ext);
                 // 1. preserve the local copy on the server as an archival save (no slot, never paired)
-                self.upload(rom, env, session_id, unit, None, archive_name, report).await?;
-                // 2. then adopt the server's version; download() also backs the local file up on disk
-                self.download(rom, env, session_id, server_id, Some(unit), report).await
+                self.upload(cx, local, None, archive_name, report).await?;
+                // 2. then adopt the server's version; download() also backs the local save up on disk
+                self.download(cx, server_id, op.server_updated_at.clone(), report).await
             }
             ConflictPolicy::DeviceWins => {
-                let bytes = self.unit_bytes(env, unit)?;
-                let hash = saves::md5_bytes(&bytes);
+                let bytes = local.bytes()?;
+                let hash = unit::content_hash(&bytes);
                 let params = UploadParams {
-                    rom_id: rom.rom_id,
-                    emulator: Some(unit.emulator.clone()),
-                    slot: Some(unit.slot.clone()),
+                    rom_id: cx.rom.rom_id,
+                    emulator: Some(local.emulator.clone()),
+                    slot: Some(local.slot.clone()),
                     device_id: Some(self.device_id.to_string()),
-                    session_id: Some(session_id),
+                    session_id: Some(cx.session_id),
                     content_hash: Some(hash.clone()),
-                    file_name: unit.file_name.clone(),
+                    file_name: local.file_name.clone(),
                 };
                 let saved = self.client.replace_save(server_id, &params, bytes).await?;
-                self.record_synced(rom, env, unit, &hash, Some(saved.id))?;
-                report.uploaded.push(unit.file_name.clone());
+                let stored = saved.content_hash.clone().unwrap_or(hash);
+                self.record_synced(cx, local, &stored, Some(saved.id), saved.updated_at.clone());
+                report.uploaded.push(local.file_name.clone());
                 Ok(())
             }
         }
     }
 
-    fn record_synced(&mut self, rom: &LocalRom, env: &EmuEnv, unit: &LocalUnit, hash: &str, save_id: Option<i64>) -> Result<()> {
-        let fp = match &unit.kind {
-            UnitKind::Bundle { files } => Some(saves::fingerprint(&env.data_root, files)?),
-            UnitKind::Raw(_) => None,
-        };
-        let rec = self.state.saves.entry(save_key(rom.rom_id, &unit.emulator)).or_default();
+    /// The save is now on the server: remember what was exchanged, and let Sigil's state catch up
+    /// (it must not advance before this, or a failed upload would lose the change marker).
+    fn record_synced(&mut self, cx: &Cx<'_>, local: &LocalUnit, hash: &str, save_id: Option<i64>, server_updated_at: Option<String>) {
+        let rec = self.state.saves.entry(save_key(cx.rom.rom_id, &local.emulator)).or_default();
         rec.last_hash = Some(hash.to_string());
-        rec.fingerprint = fp;
-        rec.server_save_id = save_id;
-        Ok(())
+        if save_id.is_some() {
+            rec.server_save_id = save_id;
+        }
+        rec.server_updated_at = server_updated_at.or_else(|| Some(saves::iso(SystemTime::now())));
+        rec.dirty = false;
+        if let (LocalKind::Unit(u), Some(Plan { kind: Kind::Unit(route), .. })) = (&local.kind, cx.plan) {
+            self.state.set_sigil_state(&route.state_key(), &u.state);
+        }
     }
+}
+
+/// `zip` for a zip unit, else nothing: the extension a restored unit is reported under.
+fn extension_of_unit(bytes: &[u8]) -> String {
+    if saves::is_zip(bytes) { "zip".into() } else { String::new() }
 }

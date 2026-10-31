@@ -172,6 +172,12 @@ impl App {
         Ok(self.resolver().emu_env(emu_id)?)
     }
 
+    /// The environment for the emulator that plays `slug`, with the RetroArch core filled in: what a
+    /// game's save is depends on it.
+    fn env_for_platform(&self, slug: &str) -> Result<(EmuEnv, Installed)> {
+        Ok(self.resolver().env_for_platform(slug)?)
+    }
+
     fn state_opts(&self, skip: bool) -> Option<StateOptions> {
         (self.cfg.sync_states && !skip).then(|| StateOptions { max_bytes: self.cfg.max_state_mb * 1024 * 1024 })
     }
@@ -433,8 +439,10 @@ async fn main() -> Result<()> {
             }
             let mut any_failed = false;
             for rom in roms {
-                let Ok(emu_id) = app.emulator_for(&rom.platform_slug) else { continue };
-                let env = match app.emu_env(&emu_id) {
+                if app.emulator_for(&rom.platform_slug).is_err() {
+                    continue;
+                }
+                let env = match app.env_for_platform(&rom.platform_slug) {
                     Ok((e, _)) => e,
                     Err(e) => {
                         println!("{}: skipped ({e})", rom.name);
@@ -477,7 +485,7 @@ async fn main() -> Result<()> {
             let c = app.client()?;
             let state = app.state()?;
             let rom = state.roms.get(&rom_id).cloned().ok_or_else(|| anyhow!("game {rom_id} isn't installed"))?;
-            let (env, _) = app.emu_env(&app.emulator_for(&rom.platform_slug)?)?;
+            let (env, _) = app.env_for_platform(&rom.platform_slug)?;
             let views = match states::overview(Some(&c), &state, &rom, &env).await {
                 Ok(v) => v,
                 Err(e) => {

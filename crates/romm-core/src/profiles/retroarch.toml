@@ -26,10 +26,12 @@ windows = [
   "{appdata}/RetroArch",
 ]
 
-# One <rom stem>.srm per game, found by name inside RetroArch's saves directory.
+# One <rom stem>.srm (or .sav) per game, found by name inside RetroArch's saves directory. Cores
+# with their own layout in Argosy (Game Boy, N64, Dreamcast, Mega-CD) travel as units instead
+# (route.rs).
 [saves]
 mode = "stem"
-extensions = ["srm"]
+extensions = ["srm", "sav"]
 
 [states]
 mode = "stem"

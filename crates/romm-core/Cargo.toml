@@ -21,6 +21,8 @@ futures-util.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 tokio-util.workspace = true
+base64.workspace = true
+sigil-sys = { path = "../sigil-sys" }
 
 [dev-dependencies]
 wiremock = "0.6"

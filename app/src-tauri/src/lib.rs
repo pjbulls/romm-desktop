@@ -974,7 +974,7 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
 }
 
 async fn sync_one(st: &AppState, client: &RommClient, device: &str, rom: &LocalRom, cfg: &Config, opts: Option<&StateOptions>) -> CmdResult<SyncSummary> {
-    let (env, _) = Resolver::new(cfg).emu_env(&Resolver::new(cfg).emulator_for(&rom.platform_slug).map_err(s)?).map_err(s)?;
+    let (env, _) = Resolver::new(cfg).env_for_platform(&rom.platform_slug).map_err(s)?;
     let mut sum = SyncSummary::default();
     let mut db = st.db.lock().await;
     let backups = st.dirs.backups_dir();
@@ -1063,7 +1063,7 @@ async fn game_details(st: TauriState<'_, AppState>, rom_id: i64, platform_slug: 
 
     let emu_id = resolver.emulator_for(&platform_slug).ok();
     let profile = emu_id.as_deref().and_then(profiles::get);
-    let resolved = emu_id.as_deref().map(|id| resolver.emu_env(id));
+    let resolved = emu_id.as_deref().map(|_| resolver.env_for_platform(&platform_slug));
     let emulator = match (&profile, &resolved) {
         (Some(p), Some(Ok(_))) => Some(EmulatorRef { id: p.id.clone(), name: p.name.clone(), installed: true, problem: None }),
         (Some(p), Some(Err(e))) => Some(EmulatorRef { id: p.id.clone(), name: p.name.clone(), installed: false, problem: Some(e.to_string()) }),

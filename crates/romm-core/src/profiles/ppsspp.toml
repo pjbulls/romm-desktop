@@ -22,9 +22,10 @@ windows = [
   "{documents}/PPSSPP/PSP",
 ]
 
+# Saves are the game's SAVEDATA/<id>* folders, found by disc id (see unit.rs / route.rs); the
+# data root only has to be the PSP folder (or the memory stick around it).
 [saves]
 mode = "diff"
-roots = ["SAVEDATA"]
 
 [states]
 mode = "diff"

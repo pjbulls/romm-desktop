@@ -99,6 +99,7 @@ pub async fn install_rom(
         launch_path,
         stem,
         cover_path: rom.path_cover_small.clone(),
+        identity: None,
     })
 }
 

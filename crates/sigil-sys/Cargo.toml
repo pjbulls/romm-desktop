@@ -1,0 +1,12 @@
+[package]
+name = "sigil-sys"
+description = "Raw bindings to argosy-sigil, the save-unit library Argosy uses (sources vendored, MPL-2.0)"
+version.workspace = true
+edition.workspace = true
+# The glue (build.rs, src/) is GPL like the rest of the workspace; vendor/ keeps its own licences.
+license = "GPL-3.0-or-later AND MPL-2.0"
+links = "sigil"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"

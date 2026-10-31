@@ -65,20 +65,20 @@ pub struct DataDirs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SaveMode {
-    /// One file per game, named after the ROM (`<stem>.<ext>`).
+    /// RetroArch: files named after the ROM (`<stem>.<ext>`) in its saves directory. Which of them
+    /// are the game's save, and whether they travel raw or as a unit, depends on the core.
     Stem,
-    /// Shared folders; saves are attributed to a game by diffing them around a session.
+    /// A standalone emulator with its own save layout (shared cards, per-title folders). Saves are
+    /// found by game id (`unit`, via Sigil); save *states* are attributed by diffing a folder.
     Diff,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaveRule {
     pub mode: SaveMode,
+    /// Extensions of the raw save file, most preferred first (`stem` mode).
     #[serde(default)]
     pub extensions: Vec<String>,
-    /// Folders (relative to the data root) to watch in `diff` mode.
-    #[serde(default)]
-    pub roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,12 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn diff_profiles_declare_roots() {
+    fn standalone_emulators_use_their_own_layout_and_retroarch_uses_stems() {
         for id in ["dolphin", "ppsspp", "duckstation", "pcsx2", "azahar"] {
-            let r = get(id).unwrap().saves.unwrap();
-            assert_eq!(r.mode, SaveMode::Diff);
-            assert!(!r.roots.is_empty(), "{id}");
+            assert_eq!(get(id).unwrap().saves.unwrap().mode, SaveMode::Diff, "{id}");
         }
+        let ra = get("retroarch").unwrap().saves.unwrap();
+        assert_eq!(ra.mode, SaveMode::Stem);
+        // Argosy looks for `.srm` first, then `.sav`.
+        assert_eq!(ra.extensions, ["srm", "sav"]);
     }
 }
 
@@ -212,19 +214,10 @@ mod azahar_xemu_tests {
     use super::*;
 
     #[test]
-    fn azahar_watches_game_saves_and_extdata_under_the_sd_card() {
+    fn azahar_plays_3ds_and_new_3ds() {
         let p = get("azahar").unwrap();
         assert_eq!(p.platforms, ["3ds", "new-nintendo-3ds"]);
-        let roots = p.saves.unwrap().roots;
-        assert_eq!(roots.len(), 2);
-        // Literal, traversal-free paths (snapshot() rejects anything else), and narrower
-        // than the whole SD card so installed titles aren't re-hashed every session.
-        for r in &roots {
-            assert!(r.starts_with("sdmc/Nintendo 3DS/"), "{r}");
-            assert!(crate::saves::safe_rel(r).is_some(), "{r}");
-        }
-        assert!(roots.iter().any(|r| r.ends_with("/title/00040000")));
-        assert!(roots.iter().any(|r| r.ends_with("/extdata")));
+        assert_eq!(p.saves.unwrap().mode, SaveMode::Diff);
     }
 
     #[test]

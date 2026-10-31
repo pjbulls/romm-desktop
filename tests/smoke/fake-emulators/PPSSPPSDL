@@ -1,0 +1,22 @@
+#!/bin/sh
+# Fake PPSSPP: reports the PSP save it finds at startup, then "plays" and saves (two save folders
+# of one game, as PPSSPP writes them, with a real PARAM.SFO so the folders count as saves).
+DATA="${XDG_CONFIG_HOME:-$HOME/.config}/ppsspp/PSP"
+SD="$DATA/SAVEDATA/ULUS10064DATA00"
+echo "   [fake-ppsspp on $FAKE_DEVICE] save at launch: $(cat "$SD/DATA.BIN" 2>/dev/null || echo '<none>')"
+mkdir -p "$SD" "$DATA/SAVEDATA/ULUS10064SETTINGS"
+printf "progress-from-%s" "$FAKE_DEVICE" > "$SD/DATA.BIN"
+printf "opts-from-%s" "$FAKE_DEVICE" > "$DATA/SAVEDATA/ULUS10064SETTINGS/OPT.BIN"
+python3 - "$SD/PARAM.SFO" "$DATA/SAVEDATA/ULUS10064SETTINGS/PARAM.SFO" <<'PY'
+import struct, sys
+e = [("SAVEDATA_PARAMS", "x" * 8), ("SAVEDATA_FILE_LIST", "y" * 8), ("TITLE", "Save")]
+keys = b""; ko = []
+for k, _ in e: ko.append(len(keys)); keys += k.encode() + b"\0"
+while len(keys) % 4: keys += b"\0"
+data = b""; do = []; ln = []
+for _, v in e: do.append(len(data)); b = v.encode() + b"\0"; data += b; ln.append(len(b))
+idx = b"".join(struct.pack("<HHIII", ko[i], 0x0204, ln[i], ln[i], do[i]) for i in range(len(e)))
+ks = 20 + len(idx)
+sfo = b"\0PSF" + struct.pack("<IIII", 0x101, ks, ks + len(keys), len(e)) + idx + keys + data
+for p in sys.argv[1:]: open(p, "wb").write(sfo)
+PY

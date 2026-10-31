@@ -80,6 +80,17 @@ def multipart_file(body, ctype, field):
             return re.search(rb'filename="([^"]*)"', head).group(1).decode(), data.rsplit(b'\r\n', 1)[0]
     return None, None
 
+def romm_hash(blob):
+    """RomM's Save.content_hash: md5 of a plain file, or of a zip's sorted '<entry>:<entry md5>' lines.
+    (The mock used to md5 the raw bytes, which hid exactly the mismatch Argosy-compatible zips hit.)"""
+    import io, zipfile
+    try:
+        z = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        return hashlib.md5(blob).hexdigest()
+    lines = [f"{n}:{hashlib.md5(z.read(n)).hexdigest()}" for n in sorted(z.namelist()) if not n.endswith('/')]
+    return hashlib.md5("\n".join(lines).encode()).hexdigest()
+
 def stamp(blob): return f"T{len(blob)}-{hashlib.md5(blob).hexdigest()[:6]}"
 
 class H(BaseHTTPRequestHandler):
@@ -168,7 +179,7 @@ class H(BaseHTTPRequestHandler):
             for rid in req['rom_ids']:
                 latest = {}
                 for i, sv in sorted(SAVES.items()):
-                    if sv['rom_id'] == rid and sv['slot'] == 'autosave' and sv['emulator'] in (req['emulators'] or [sv['emulator']]): latest[sv['emulator']] = (i, sv)
+                    if sv['rom_id'] == rid and sv['slot'] == 'autosave' and sv['emulator'] in (req.get('emulators') or [sv['emulator']]): latest[sv['emulator']] = (i, sv)
                 for emu, (i, sv) in latest.items():
                     loc = mine.pop((rid, emu, 'autosave'), None)
                     base = dict(rom_id=rid, save_id=i, file_name=sv['name'], slot='autosave', emulator=emu); b = BASE.get((dev, rid, emu))
@@ -183,7 +194,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, dict(session_id=5, operations=ops))
         if p == '/api/saves':
             name, blob = multipart_file(data, self.headers['Content-Type'], 'saveFile'); NEXT[0] += 1
-            SAVES[NEXT[0]] = dict(rom_id=int(q['rom_id']), emulator=q.get('emulator'), slot=q.get('slot'), name=name, data=blob, hash=hashlib.md5(blob).hexdigest())
+            SAVES[NEXT[0]] = dict(rom_id=int(q['rom_id']), emulator=q.get('emulator'), slot=q.get('slot'), name=name, data=blob, hash=romm_hash(blob))
             if q.get('device_id') and q.get('slot'): BASE[(q['device_id'], int(q['rom_id']), q.get('emulator'))] = SAVES[NEXT[0]]['hash']
             LOG.write(f"  SAVE-UPLOAD slot={q.get('slot')} {name} {len(blob)}B\n"); LOG.flush()
             return self.send(201, dict(id=NEXT[0], rom_id=int(q['rom_id']), file_name=name))

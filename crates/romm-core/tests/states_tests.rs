@@ -20,11 +20,12 @@ fn ra_env(root: &Path) -> EmuEnv {
         profile: profiles::get("retroarch").unwrap(),
         data_root: root.to_path_buf(),
         retroarch: Some(retroarch::layout(root, Os::Linux, &PathCtx::default())),
+        core: None,
     }
 }
 
 fn diff_env(id: &str, root: &Path) -> EmuEnv {
-    EmuEnv { profile: profiles::get(id).unwrap(), data_root: root.to_path_buf(), retroarch: None }
+    EmuEnv { profile: profiles::get(id).unwrap(), data_root: root.to_path_buf(), retroarch: None, core: None }
 }
 
 fn rom(stem: &str) -> LocalRom {

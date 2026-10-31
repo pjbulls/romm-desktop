@@ -30,18 +30,10 @@ windows = [
   "{appdata}/Azahar",
 ]
 
-# Game saves live in the emulated SD card: sdmc/Nintendo 3DS/<id0>/<id1>/title/00040000/<tid>/data/
-# and "extra data" in .../extdata/. Both ids are all zeros unless the user imported a
-# real console's movable.sed; roots are literal paths (no globs), so such a setup would
-# need these edited. Watching only `title/00040000` + `extdata` instead of all of
-# `sdmc/` keeps the before/after hashing cheap: installed (CIA) titles keep large
-# content files under title/, but only for titles installed there, not for cartridge dumps.
+# Game saves live in the emulated SD card (sdmc/Nintendo 3DS/<id0>/<id1>/title/00040000/<tid>/data/
+# and extdata/); the game's save, metadata and extdata are found by title id (see unit.rs / route.rs).
 [saves]
 mode = "diff"
-roots = [
-  "sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title/00040000",
-  "sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/extdata",
-]
 
 # Save states are states/<16-hex program id>.<slot>.cst: one file per slot in a flat
 # folder, with nothing else stored alongside.

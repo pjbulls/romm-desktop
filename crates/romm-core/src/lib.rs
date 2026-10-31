@@ -14,11 +14,13 @@ pub mod platforms;
 pub mod profiles;
 pub mod resolve;
 pub mod retroarch;
+pub mod route;
 pub mod saves;
 pub mod session;
 pub mod state;
 pub mod states;
 pub mod sync;
+pub mod unit;
 pub mod versions;
 
 pub use error::{Error, Result};

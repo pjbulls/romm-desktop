@@ -1,4 +1,9 @@
 #!/bin/bash
+# NOTE: the memory-card parts of this script predate save units. They feed a fake Dolphin arbitrary
+# bytes as a "memory card", which is no longer a save (a unit is cut out of a real card or GCI
+# folder by game id, and the mock ROM isn't a real disc). Use psp_smoke.sh to check that saves
+# really travel between two devices in Argosy's form; this script still exercises login, install,
+# BIOS and the conflict flow's plumbing.
 export RUST_BACKTRACE=0
 ROMM=${ROMM:-$(dirname "$0")/../../target/debug/romm}
 mkdir -p /tmp/smoke; SRV=127.0.0.1:18765

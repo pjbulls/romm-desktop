@@ -63,21 +63,35 @@ impl<'a> Resolver<'a> {
         let root = resolve_data_root(&profile, installed.is_flatpak(), self.os, &pctx)
             .ok_or_else(|| Error::msg(format!("could not work out where {} keeps its data", profile.name)))?;
         let retro = (profile.id == "retroarch").then(|| retroarch::layout(&root.path, self.os, &pctx));
-        Ok((EmuEnv { profile, data_root: root.path, retroarch: retro }, installed))
+        Ok((EmuEnv { profile, data_root: root.path, retroarch: retro, core: None }, installed))
+    }
+
+    /// The libretro core chosen for a platform: the user's override, else the default. Named the way
+    /// RomM and Argosy name it (`snes9x`, never `snes9x_libretro.so`).
+    pub fn retroarch_core_name(&self, slug: &str) -> Option<String> {
+        let name = self.cfg.retroarch_cores.get(slug).map(String::as_str).or_else(|| retroarch::default_core(slug))?;
+        Some(retroarch::core_slug(name))
+    }
+
+    /// `emu_env` for the emulator that plays `slug`, with the RetroArch core filled in, so what a
+    /// game's save is (and what RomM is told it came from) can be worked out.
+    pub fn env_for_platform(&self, slug: &str) -> Result<(EmuEnv, Installed)> {
+        let (mut env, installed) = self.emu_env(&self.emulator_for(slug)?)?;
+        if env.retroarch.is_some() {
+            env.core = self.retroarch_core_name(slug);
+        }
+        Ok((env, installed))
     }
 
     /// Everything needed to launch an installed game.
     pub fn prepare(&self, rom: &LocalRom) -> Result<Prepared> {
         let emu_id = self.emulator_for(&rom.platform_slug)?;
-        let (env, installed) = self.emu_env(&emu_id)?;
+        let (env, installed) = self.env_for_platform(&rom.platform_slug)?;
         let core = match &env.retroarch {
             Some(layout) => {
-                let name = self
-                    .cfg
-                    .retroarch_cores
-                    .get(&rom.platform_slug)
-                    .map(String::as_str)
-                    .or_else(|| retroarch::default_core(&rom.platform_slug))
+                let name = env
+                    .core
+                    .as_deref()
                     .ok_or_else(|| Error::msg(format!("no RetroArch core chosen for '{}'", rom.platform_slug)))?;
                 Some(retroarch::find_core(layout, name, self.os).ok_or_else(|| {
                     Error::msg(format!("RetroArch core '{name}' isn't installed (in RetroArch: Load Core → Download a Core)"))

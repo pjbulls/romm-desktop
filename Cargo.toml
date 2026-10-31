@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/romm-core", "crates/romm-cli", "app/src-tauri"]
+members = ["crates/sigil-sys", "crates/romm-core", "crates/romm-cli", "app/src-tauri"]
 
 [workspace.package]
 version = "0.2.0"

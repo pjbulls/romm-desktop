@@ -25,12 +25,10 @@ windows = [
   "{documents}/Dolphin Emulator",
 ]
 
-# GameCube memory cards (raw card or per-game GCI folders) and Wii NAND save data
-# live in shared folders, so saves are attributed to a game by diffing these
-# folders around a play session.
+# GameCube memory cards (raw card or per-game GCI folders) and Wii NAND save data live in shared
+# places; the game's own saves are cut out of them by game id (see unit.rs / route.rs).
 [saves]
 mode = "diff"
-roots = ["GC", "Wii/title/00010000", "Wii/title/00010001", "Wii/title/00010004"]
 
 # Save states are one file per slot in a flat folder, synced individually.
 [states]

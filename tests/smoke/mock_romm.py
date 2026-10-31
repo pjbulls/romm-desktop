@@ -2,6 +2,17 @@ import json, re, sys, hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+def romm_hash(blob):
+    """RomM's Save.content_hash: md5 of a plain file, or of a zip's sorted '<entry>:<entry md5>' lines.
+    (The mock used to md5 the raw bytes, which hid exactly the mismatch Argosy-compatible zips hit.)"""
+    import io, zipfile
+    try:
+        z = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        return hashlib.md5(blob).hexdigest()
+    lines = [f"{n}:{hashlib.md5(z.read(n)).hexdigest()}" for n in sorted(z.namelist()) if not n.endswith('/')]
+    return hashlib.md5("\n".join(lines).encode()).hexdigest()
+
 STATES = {}  # id -> dict(rom_id, emulator, name, data, updated)
 BASE = {}    # (device, rom, emu) -> hash this device last synced
 SAVES = {}   # id -> dict(rom_id, emulator, slot, name, data, hash)
@@ -9,6 +20,33 @@ NEXT = [100]
 LOG = open('/tmp/smoke/server.log', 'w')
 SCOPES = ["me.read","platforms.read","roms.read","firmware.read","assets.read","assets.write","devices.read","devices.write"]
 BIOS = b"FAKE-PS1-BIOS"
+import os, struct
+
+def iso9660(files):
+    """A minimal valid ISO 9660 image with `files` in the root (what identifying a disc reads)."""
+    S = 2048
+    def both32(v): return struct.pack("<I", v) + struct.pack(">I", v)
+    def both16(v): return struct.pack("<H", v) + struct.pack(">H", v)
+    def rec(extent, size, is_dir, name):
+        n = 33 + len(name); n += n % 2
+        r = bytearray(n); r[0] = n; r[2:10] = both32(extent); r[10:18] = both32(size)
+        r[18:25] = bytes([126, 1, 1, 0, 0, 0, 0]); r[25] = 2 if is_dir else 0; r[28:32] = both16(1)
+        r[32] = len(name); r[33:33 + len(name)] = name
+        return bytes(r)
+    d = rec(18, S, True, b"\0") + rec(18, S, True, b"\1"); nxt = 19; placed = []
+    for name, data in files:
+        d += rec(nxt, len(data), False, name.encode() + b";1"); placed.append((nxt, data)); nxt += max(1, -(-len(data) // S))
+    img = bytearray(nxt * S)
+    p = 16 * S; img[p] = 1; img[p+1:p+6] = b"CD001"; img[p+6] = 1; img[p+8:p+72] = b" " * 64
+    img[p+80:p+88] = both32(nxt); img[p+120:p+124] = both16(1); img[p+124:p+128] = both16(1); img[p+128:p+132] = both16(S)
+    img[p+132:p+140] = both32(10); img[p+156:p+190] = rec(18, S, True, b"\0")[:34]; img[p+881] = 1
+    t = 17 * S; img[t] = 0xFF; img[t+1:t+6] = b"CD001"; img[t+6] = 1
+    img[18*S:18*S+len(d)] = d
+    for e, data in placed: img[e*S:e*S+len(data)] = data
+    return bytes(img)
+
+GAME = os.environ.get("SMOKE_GAME", "ngc")
+ROM_BYTES = b"FAKE-GC-ISO"
 ROM = {"id": 7, "name": "Super Smash Bros. Melee", "fs_name": "Melee.iso", "fs_name_no_ext": "Melee", "fs_size_bytes": 11,
        "platform_id": 1, "platform_slug": "ngc", "platform_fs_slug": "ngc", "has_multiple_files": False, "files": []}
 PLATS = [
@@ -17,6 +55,13 @@ PLATS = [
    "firmware": [{"id": 9, "platform_id": 2, "file_name": "scph5501.bin", "file_size_bytes": len(BIOS),
                  "md5_hash": hashlib.md5(BIOS).hexdigest(), "is_verified": True, "missing_from_fs": False}]},
 ]
+
+if GAME == "psp":
+    # A real PSP disc image, named without its id: the game must be identified from inside it.
+    ROM_BYTES = iso9660([("UMD_DATA.BIN", b"ULUS-10064|0000000000000000|0001|G")])
+    ROM = {"id": 7, "name": "Crisis Core", "fs_name": "Crisis Core.iso", "fs_name_no_ext": "Crisis Core", "fs_size_bytes": len(ROM_BYTES),
+           "platform_id": 3, "platform_slug": "psp", "platform_fs_slug": "psp", "has_multiple_files": False, "files": []}
+    PLATS.append({"id": 3, "slug": "psp", "fs_slug": "psp", "name": "PSP", "rom_count": 1, "firmware": []})
 
 def multipart_file(body, ctype, field='saveFile'):
     boundary = re.search(r'boundary=(.+)', ctype).group(1).encode()
@@ -44,7 +89,7 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/platforms': return self.send(200, PLATS)
         if p == '/api/roms': return self.send(200, {"items": [ROM], "total": 1, "limit": 50, "offset": 0})
         if p == '/api/roms/7': return self.send(200, ROM)
-        if p == '/api/roms/7/content/Melee.iso': return self.send(200, raw=b"FAKE-GC-ISO")
+        if p == '/api/roms/7/content/' + ROM["fs_name"].replace(" ", "%20") or p == '/api/roms/7/content/' + ROM["fs_name"]: return self.send(200, raw=ROM_BYTES)
         if p == '/api/firmware/9/content/scph5501.bin': return self.send(200, raw=BIOS)
         if p == '/api/states':
             return self.send(200, [dict(id=i, rom_id=v['rom_id'], file_name=v['name'], file_size_bytes=len(v['data']), emulator=v['emulator'], updated_at=v['updated'], missing_from_fs=False) for i, v in STATES.items()])
@@ -84,7 +129,7 @@ class H(BaseHTTPRequestHandler):
             for rid in req['rom_ids']:
                 latest = {}
                 for i, sv in sorted(SAVES.items()):
-                    if sv['rom_id'] == rid and sv['slot'] == 'autosave' and sv['emulator'] in (req['emulators'] or [sv['emulator']]):
+                    if sv['rom_id'] == rid and sv['slot'] == 'autosave' and sv['emulator'] in (req.get('emulators') or [sv['emulator']]):
                         latest[sv['emulator']] = (i, sv)
                 for emu, (i, sv) in latest.items():
                     loc = mine.pop((rid, emu, 'autosave'), None)
@@ -110,10 +155,13 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/saves':
             name, blob = multipart_file(data, self.headers['Content-Type'])
             NEXT[0] += 1
-            SAVES[NEXT[0]] = dict(rom_id=int(q['rom_id']), emulator=q.get('emulator'), slot=q.get('slot'), name=name, data=blob, hash=hashlib.md5(blob).hexdigest())
+            SAVES[NEXT[0]] = dict(rom_id=int(q['rom_id']), emulator=q.get('emulator'), slot=q.get('slot'), name=name, data=blob, hash=romm_hash(blob))
             assert q.get('content_hash') in (None, SAVES[NEXT[0]]['hash']), "content_hash mismatch"
             if q.get('device_id') and q.get('slot'): BASE[(q['device_id'], int(q['rom_id']), q.get('emulator'))] = SAVES[NEXT[0]]['hash']
-            LOG.write(f"  UPLOAD slot={q.get('slot')} name={name} bytes={len(blob)}\n")
+            import io, zipfile
+            try: ents = sorted(n for n in zipfile.ZipFile(io.BytesIO(blob)).namelist() if not n.endswith('/'))
+            except zipfile.BadZipFile: ents = None
+            LOG.write(f"  UPLOAD slot={q.get('slot')} emu={q.get('emulator')} name={name} bytes={len(blob)} hash={SAVES[NEXT[0]]['hash']} entries={ents}\n")
             return self.send(201, {"id": NEXT[0], "rom_id": int(q['rom_id']), "file_name": name})
         m = re.match(r'/api/sync/sessions/(\d+)/complete', p)
         if m:

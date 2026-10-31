@@ -1,5 +1,9 @@
-//! Local save handling: hashing, folder snapshots/diffs, and the zip "bundle"
-//! format used for emulators whose saves live in shared folders.
+//! Local file helpers: hashing, safe paths, atomic writes, state-file snapshots, and the reader
+//! for the zip "bundle" older romm-desktop versions uploaded.
+//!
+//! What a game's save *is*, and the format it travels in, is decided by `unit` (Sigil, as in
+//! Argosy). The bundle format here (a zip with a `romm-bundle.json` manifest and data-root-relative
+//! paths) is no longer written; it is only read, so saves uploaded before the switch still restore.
 //!
 //! Safety rules enforced here:
 //!   * restoring a bundle never writes outside the emulator's data root;
@@ -8,7 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -16,7 +20,7 @@ use chrono::{DateTime, Utc};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
-use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
+use zip::ZipArchive;
 
 use crate::error::{Error, Result};
 
@@ -24,9 +28,6 @@ use crate::error::{Error, Result};
 /// (rom_id, slot), and we additionally scope negotiation to our emulator id.
 pub const SLOT: &str = "autosave";
 pub const MANIFEST: &str = "romm-bundle.json";
-
-/// relative path (forward slashes) → md5
-pub type Snapshot = BTreeMap<String, String>;
 
 pub fn md5_bytes(b: &[u8]) -> String {
     hex::encode(Md5::digest(b))
@@ -68,23 +69,6 @@ pub fn safe_rel(s: &str) -> Option<PathBuf> {
     Some(p.to_path_buf())
 }
 
-/// Hash every file under `root/<sub>` for each `sub`.
-pub fn snapshot(root: &Path, subdirs: &[String]) -> std::io::Result<Snapshot> {
-    let mut snap = Snapshot::new();
-    for sub in subdirs {
-        let dir = root.join(sub);
-        if !dir.is_dir() {
-            continue;
-        }
-        for e in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-            if e.file_type().is_file() {
-                snap.insert(rel_string(root, e.path()), md5_file(e.path())?);
-            }
-        }
-    }
-    Ok(snap)
-}
-
 /// (size, mtime in ns) per file; much cheaper than hashing for large save states.
 pub type StatSnapshot = BTreeMap<String, (u64, u128)>;
 
@@ -111,34 +95,6 @@ pub fn changed_stat(before: &StatSnapshot, after: &StatSnapshot) -> Vec<String> 
     after.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, _)| k.clone()).collect()
 }
 
-/// Files that are new or whose content changed. Deletions are ignored on purpose:
-/// an emulator removing a file must never delete anything on the server.
-pub fn changed_files(before: &Snapshot, after: &Snapshot) -> Vec<String> {
-    after.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, _)| k.clone()).collect()
-}
-
-/// Version-independent identity of a set of files (unlike the zip's own bytes).
-pub fn fingerprint(root: &Path, files: &[String]) -> std::io::Result<String> {
-    let mut sorted: Vec<&String> = files.iter().collect();
-    sorted.sort();
-    let mut h = Md5::new();
-    for f in sorted {
-        h.update(f.as_bytes());
-        h.update([0]);
-        h.update(md5_file(&root.join(f))?.as_bytes());
-        h.update([b'\n']);
-    }
-    Ok(hex::encode(h.finalize()))
-}
-
-pub fn latest_mtime(root: &Path, files: &[String]) -> SystemTime {
-    files
-        .iter()
-        .filter_map(|f| fs::metadata(root.join(f)).ok()?.modified().ok())
-        .max()
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
     pub format: u32,
@@ -150,26 +106,10 @@ pub fn is_zip(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
 }
 
-/// Deterministic zip: sorted entries, fixed timestamps, so identical content
-/// always yields identical bytes (and therefore an identical md5).
-pub fn pack_bundle(emulator: &str, root: &Path, files: &[String]) -> Result<Vec<u8>> {
-    let mut names: Vec<String> = files.to_vec();
-    names.sort();
-    names.dedup();
-    let opts = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
-    let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
-    let manifest = Manifest { format: 1, emulator: emulator.to_string(), files: names.clone() };
-    zw.start_file(MANIFEST, opts)?;
-    zw.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
-    for n in &names {
-        let rel = safe_rel(n).ok_or_else(|| Error::msg(format!("unsafe path in bundle: {n}")))?;
-        zw.start_file(n, opts)?;
-        zw.write_all(&fs::read(root.join(rel))?)?;
-    }
-    Ok(zw.finish()?.into_inner())
+/// A zip an older romm-desktop uploaded: it carries the `romm-bundle.json` manifest and paths
+/// relative to the emulator's data folder. Argosy's units never contain that file.
+pub fn is_legacy_bundle(bytes: &[u8]) -> bool {
+    is_zip(bytes) && ZipArchive::new(Cursor::new(bytes)).is_ok_and(|mut z| z.by_name(MANIFEST).is_ok())
 }
 
 /// Copy `path` (if it exists) to `backup_dir/<rel>`.
@@ -196,7 +136,7 @@ pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::rename(&tmp, dest)
 }
 
-/// Restore a bundle under `root`. Returns the relative paths written.
+/// Restore an older romm-desktop bundle under `root`. Returns the relative paths written.
 pub fn unpack_bundle(bytes: &[u8], root: &Path, backup_dir: &Path) -> Result<Vec<String>> {
     let mut ar = ZipArchive::new(Cursor::new(bytes))?;
     let manifest: Manifest = {
@@ -237,48 +177,50 @@ mod tests {
         fs::write(p, s).unwrap();
     }
 
-    #[test]
-    fn snapshot_diff_detects_new_and_modified_but_not_deleted() {
-        let t = tempfile::tempdir().unwrap();
-        let r = t.path();
-        write(&r.join("memcards/a.mcd"), "one");
-        write(&r.join("memcards/b.mcd"), "two");
-        write(&r.join("other/ignored.txt"), "x");
-        let subs = vec!["memcards".to_string()];
-        let before = snapshot(r, &subs).unwrap();
-        assert_eq!(before.len(), 2, "only watched roots are scanned");
-
-        write(&r.join("memcards/a.mcd"), "ONE");
-        write(&r.join("memcards/sub/c.mcd"), "new");
-        fs::remove_file(r.join("memcards/b.mcd")).unwrap();
-        write(&r.join("other/ignored.txt"), "changed");
-        let after = snapshot(r, &subs).unwrap();
-        assert_eq!(changed_files(&before, &after), ["memcards/a.mcd", "memcards/sub/c.mcd"]);
+    /// A bundle exactly as older romm-desktop versions wrote it.
+    fn legacy_bundle(emulator: &str, root: &Path, files: &[&str]) -> Vec<u8> {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+        let opts = SimpleFileOptions::default();
+        let mut names: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+        names.sort();
+        let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
+        let manifest = Manifest { format: 1, emulator: emulator.to_string(), files: names.clone() };
+        zw.start_file(MANIFEST, opts).unwrap();
+        zw.write_all(&serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        for n in &names {
+            zw.start_file(n, opts).unwrap();
+            zw.write_all(&fs::read(root.join(n)).unwrap()).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
     }
 
     #[test]
-    fn bundle_is_deterministic_and_roundtrips() {
+    fn legacy_bundles_are_recognised_and_unpacked_under_the_data_root() {
         let t = tempfile::tempdir().unwrap();
         let src = t.path().join("src");
-        write(&src.join("GC/USA/Card A.raw"), "memcard-bytes");
-        write(&src.join("Wii/title/00010000/52534245/data/save.bin"), "wii");
-        let files = vec!["Wii/title/00010000/52534245/data/save.bin".to_string(), "GC/USA/Card A.raw".to_string()];
-
-        let a = pack_bundle("dolphin", &src, &files).unwrap();
-        // Different input order, later mtime: identical bytes.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        write(&src.join("GC/USA/Card A.raw"), "memcard-bytes");
-        let mut rev = files.clone();
-        rev.reverse();
-        let b = pack_bundle("dolphin", &src, &rev).unwrap();
-        assert_eq!(md5_bytes(&a), md5_bytes(&b));
-        assert!(is_zip(&a));
+        write(&src.join("SAVEDATA/ULUS10064DATA00/DATA.BIN"), "psp-save");
+        write(&src.join("SAVEDATA/ULUS10064DATA00/PARAM.SFO"), "sfo");
+        let bundle = legacy_bundle("ppsspp", &src, &["SAVEDATA/ULUS10064DATA00/DATA.BIN", "SAVEDATA/ULUS10064DATA00/PARAM.SFO"]);
+        assert!(is_legacy_bundle(&bundle));
 
         let dst = t.path().join("dst");
-        let written = unpack_bundle(&a, &dst, &t.path().join("bak")).unwrap();
-        assert_eq!(written, ["GC/USA/Card A.raw", "Wii/title/00010000/52534245/data/save.bin"]);
-        assert_eq!(fs::read_to_string(dst.join("GC/USA/Card A.raw")).unwrap(), "memcard-bytes");
-        assert_eq!(fingerprint(&src, &files).unwrap(), fingerprint(&dst, &files).unwrap());
+        let written = unpack_bundle(&bundle, &dst, &t.path().join("bak")).unwrap();
+        assert_eq!(written, ["SAVEDATA/ULUS10064DATA00/DATA.BIN", "SAVEDATA/ULUS10064DATA00/PARAM.SFO"]);
+        assert_eq!(fs::read_to_string(dst.join("SAVEDATA/ULUS10064DATA00/DATA.BIN")).unwrap(), "psp-save");
+    }
+
+    #[test]
+    fn an_argosy_unit_is_not_a_legacy_bundle() {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+        let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
+        zw.start_file("ULUS10064DATA00/PARAM.SFO", SimpleFileOptions::default()).unwrap();
+        zw.write_all(b"x").unwrap();
+        let unit = zw.finish().unwrap().into_inner();
+        assert!(is_zip(&unit));
+        assert!(!is_legacy_bundle(&unit));
+        assert!(!is_legacy_bundle(b"\x00\x01SRAM"));
     }
 
     #[test]
@@ -286,7 +228,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let src = t.path().join("src");
         write(&src.join("memcards/x.mcd"), "server");
-        let bundle = pack_bundle("duckstation", &src, &["memcards/x.mcd".into()]).unwrap();
+        let bundle = legacy_bundle("duckstation", &src, &["memcards/x.mcd"]);
 
         let dst = t.path().join("dst");
         write(&dst.join("memcards/x.mcd"), "local-progress");
@@ -303,6 +245,8 @@ mod tests {
 
     #[test]
     fn rejects_path_traversal_in_manifest() {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, ZipWriter};
         let t = tempfile::tempdir().unwrap();
         let opts = SimpleFileOptions::default();
         let mut zw = ZipWriter::new(Cursor::new(Vec::new()));

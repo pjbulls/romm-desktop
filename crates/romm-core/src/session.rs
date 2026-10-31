@@ -1,8 +1,10 @@
-//! One play session: pull saves → run the emulator → attribute what changed → push.
+//! One play session: pull saves → run the emulator → push.
 //!
-//! Network trouble never blocks playing and never loses data: if the pre-launch
-//! pull fails you still play, and if the post-session push fails the changed files
-//! stay tracked in the state file so the next sync uploads them.
+//! Network trouble never blocks playing and never loses data: if the pre-launch pull fails you
+//! still play, and if the post-session push fails nothing is marked as synced, so the next sync
+//! finds the save still changed and uploads it. (Which files are a game's save is worked out from
+//! the game's id each time, by `unit`; nothing is attributed by watching folders around a session.
+//! Only save *states* in shared folders still are.)
 //!
 //! The session is split into `pre_play`, `run_emulator` and `post_play` so a GUI can
 //! hold its database lock only during the two short sync phases, not for the hours
@@ -16,9 +18,8 @@ use tokio::process::Command;
 use crate::api::types::PlaySession;
 use crate::api::RommClient;
 use crate::error::{Error, Result};
-use crate::profiles::SaveMode;
-use crate::saves::{self, StatSnapshot, Snapshot, SLOT};
-use crate::state::{save_key, LocalRom, State};
+use crate::saves::{self, StatSnapshot, SLOT};
+use crate::state::{LocalRom, State};
 use crate::states::{self, StateOptions, StateReport};
 use crate::sync::{ConflictPolicy, EmuEnv, SyncReport, Syncer};
 
@@ -33,8 +34,6 @@ pub struct PlayOutcome {
     pub state_error: Option<String>,
     pub exit_code: Option<i32>,
     pub elapsed: Duration,
-    /// Files attributed to this game during the session (shared-folder emulators).
-    pub changed_files: Vec<String>,
     pub changed_states: Vec<String>,
 }
 
@@ -44,7 +43,6 @@ pub struct Pre {
     pub pull_error: Option<String>,
     pub state_pull: Option<StateReport>,
     pub state_error: Option<String>,
-    before: Option<Snapshot>,
     before_states: Option<StatSnapshot>,
 }
 
@@ -56,24 +54,12 @@ pub struct Run {
     pub ended: SystemTime,
 }
 
-/// Remember which files this game touched (union with those seen in earlier sessions).
-pub fn attribute_changes(state: &mut State, rom_id: i64, emulator: &str, changed: &[String]) {
-    if changed.is_empty() {
-        return;
-    }
-    let rec = state.saves.entry(save_key(rom_id, emulator)).or_default();
-    let mut files: Vec<String> = rec.files.iter().cloned().chain(changed.iter().cloned()).collect();
-    files.sort();
-    files.dedup();
-    rec.files = files;
-}
-
 fn leaf(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
 
-/// Phase 1: pull saves (and states), then snapshot shared folders. Failures to reach the server are
-/// recorded, not raised.
+/// Phase 1: pull saves (and states), then snapshot the shared state folder. Failures to reach the
+/// server are recorded, not raised.
 #[allow(clippy::too_many_arguments)]
 pub async fn pre_play(
     client: &RommClient,
@@ -86,7 +72,7 @@ pub async fn pre_play(
     policy: ConflictPolicy,
     states: Option<&StateOptions>,
 ) -> Result<Pre> {
-    let mut pre = Pre { pull: None, pull_error: None, state_pull: None, state_error: None, before: None, before_states: None };
+    let mut pre = Pre { pull: None, pull_error: None, state_pull: None, state_error: None, before_states: None };
     {
         let mut s = Syncer { client, device_id, state: &mut *state, backup_dir: backup_dir.clone(), policy };
         match s.sync_rom(rom, env, None).await {
@@ -102,9 +88,6 @@ pub async fn pre_play(
     }
     state.save(state_path)?;
 
-    if env.save_mode() == Some(SaveMode::Diff) {
-        pre.before = Some(saves::snapshot(&env.data_root, &env.watch_roots())?);
-    }
     if states.is_some() {
         let roots = env.state_watch_roots();
         if !roots.is_empty() {
@@ -125,7 +108,7 @@ pub async fn run_emulator(mut cmd: Command, emulator_name: &str) -> Result<Run> 
     Ok(Run { exit_code: status.code(), elapsed: t0.elapsed(), started, ended: SystemTime::now() })
 }
 
-/// Phase 3: attribute what changed, then push saves, states and playtime.
+/// Phase 3: attribute changed states, then push saves, states and playtime.
 #[allow(clippy::too_many_arguments)]
 pub async fn post_play(
     client: &RommClient,
@@ -150,11 +133,6 @@ pub async fn post_play(
         ..Default::default()
     };
 
-    if let Some(before) = pre.before {
-        let after = saves::snapshot(&env.data_root, &env.watch_roots())?;
-        out.changed_files = saves::changed_files(&before, &after);
-        attribute_changes(state, rom.rom_id, &env.profile.id, &out.changed_files);
-    }
     if let Some(before) = pre.before_states {
         let after = saves::snapshot_stat(&env.data_root, &env.state_watch_roots())?;
         out.changed_states = saves::changed_stat(&before, &after)

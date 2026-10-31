@@ -53,7 +53,7 @@ tests/e2e          drives the real app through WebDriver under Xvfb (mouse/keybo
 
 ## Build
 
-Rust 1.90+ (the locked Tauri needs it; the core and CLI crates alone need 1.88), Node 20+.
+Rust 1.90+ (the locked Tauri needs it; the core and CLI crates alone need 1.88), Node 20+, and a C compiler (`build-essential` / MSVC): the core builds the vendored C library `crates/sigil-sys` that decides what a game's save is.
 
 ```bash
 # Debian / Ubuntu: Tauri's system libraries
@@ -91,9 +91,31 @@ A game that exists as several files on your server (USA / Europe / Japan, revisi
 | | Saves | Save states |
 |---|---|---|
 | Protocol | RomM (negotiate → apply → complete) | Plain `/api/states` calls; RomM doesn't cover states |
-| RetroArch | `<rom>.srm`, uploaded as-is | `<rom>.state`, `.state1…`, `.state.auto` |
-| Others | emulated memory card folders, diffed and zipped | one file per slot in the emulator's state folder, synced individually |
-| Change detection | MD5 vs. server | local MD5 + server `updated_at`/size |
+| RetroArch | `<rom>.srm` (or `.sav`), uploaded as-is; Game Boy, N64, Dreamcast and Mega-CD cores as Argosy's *save units* | `<rom>.state`, `.state1…`, `.state.auto` |
+| Others | one *save unit* per game, cut out of the emulator's own files by game id (see below) | one file per slot in the emulator's state folder, synced individually |
+| Change detection | RomM's `content_hash` vs. server, plus Sigil's own change marker | local MD5 + server `updated_at`/size |
+
+### Saves match Argosy's, byte for byte
+
+A game's save is not "whatever changed while you played". It is what [argosy-sigil](https://github.com/rommapp/argosy-sigil), the library Argosy uses, says it is, and this app embeds that same library (`crates/sigil-sys`, vendored at Argosy's pin, see its `VENDOR.md`). So a save uploaded here restores in Argosy, and the other way round:
+
+| Emulator | What travels (`<game>.zip` unless noted) |
+|---|---|
+| PPSSPP | every `SAVEDATA/<disc id>*` folder of the game, each under its own name (`ULUS10064DATA00/PARAM.SFO`, …); installed game data is not a save |
+| Dolphin (GameCube) | the game's `.gci` files, flat, whether Dolphin keeps a GCI folder or a raw card |
+| Dolphin (Wii) | the title's `data/` folder under its code |
+| DuckStation | the game's own 128 KiB card (`.mcd`), cut out of a shared card if need be |
+| PCSX2 | the game's own card |
+| Azahar | the title's save, metadata and extdata |
+| RetroArch | `<rom>.srm` / `.sav` as it is; Game Boy / N64 / Dreamcast / Mega-CD cores as units |
+
+The `emulator` RomM records is what Argosy records: the libretro core's name for RetroArch (`snes9x`), the emulator's id otherwise. Saves use RomM's `autosave` slot. No emulator filter is sent when syncing, so a save another client wrote under a different label is found. Each save is one file named `<rom>.<ext>`, as Argosy names it.
+
+**Sigil reads a game's id from its ROM** (disc id, title id, cart header) once and keeps it in the state file. A ROM it can't read falls back to the id in the file name (`Daxter [ULUS10064].iso`). With neither, a game whose saves are found by id (PSP, GameCube/Wii, PS1/PS2, 3DS) can't have its saves located, and that game's sync reports the problem (naming the file with its id fixes it) instead of guessing; playtime is still recorded.
+
+**Shared volumes with no game id.** Sega CD backup RAM, Dreamcast VMUs and Saturn cards hold saves that name no game, so Sigil can't say whose they are until one is *claimed*. Like Argosy, this app notes which such saves exist before a game starts and, after the session, claims the ones that newly appeared for the game that was played. Nothing is claimed the first time a volume is seen, or outside a session launched here, so another game's saves are never taken.
+
+**Older versions of this app** uploaded a zip with a `romm-bundle.json` manifest and folder-relative paths, which nothing else could read. Those still restore, and the server's copy is replaced with the same save in Argosy's form straight away.
 
 **xemu is launch only.** Its saves and snapshots live inside the virtual hard disk image (`xbox_hdd.qcow2`), not in separate files, so there is nothing safe to sync per game; syncing the whole image would make any two-device conflict a whole-disk conflict. Its BIOS and HDD image are set inside xemu itself, so there is no BIOS install either. Original Xbox disc images must be in XISO format (xemu's docs cover converting Redump ISOs with `extract-xiso`). Xbox 360 (`xbox360`) isn't mapped to any emulator.
 
@@ -125,7 +147,7 @@ tests/e2e/run.sh                        # 36 checks driving the real app (needs 
 DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
 DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
 DRIVER=drive_versions.py tests/e2e/run.sh # 30 checks on games with several versions (written, not yet run: see below)
-tests/smoke/smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devices
+tests/smoke/psp_smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devices (smoke.sh: see its header)
 ```
 
 ## What has and hasn't been verified
@@ -151,9 +173,12 @@ tests/smoke/smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devic
 - Versions: the whole library is held in memory, so a very large library takes a moment to load the first time (progress is shown) and changes made on the server show up after ↻ or 10 minutes. The Installed list works offline and therefore shows only what is installed, with no dropdown for versions you haven't. `romm games` (CLI) lists every file, not one per game. RomM links "siblings" by any shared provider id, so now and then it chains in an unrelated game (Argosy documents HeartGold/SoulSilver); such a game appears in the dropdown, with its full file name when its label would clash. The version labels are read from file names; a file with no tags is labelled by its whole name. The search is local, over names and file names, and doesn't use RomM's alternative titles.
 - Keyboard shortcuts are minimal (`/` focuses search, `Esc` closes the panel).
 - Nintendo pads are labelled as printed (their A/B are swapped relative to Xbox) but "accept" is always the bottom button; there is no swap option yet.
-- Shared-folder saves are this app's own zip format, so they don't interoperate with Argosy's. RetroArch states only interoperate when both devices use the same core and version.
+- RetroArch states only interoperate when both devices use the same core and version. (Saves do interoperate with Argosy; see above.)
 - No in-app conflict-resolution dialog yet. "Leave it alone" reports conflicts without acting; the other policies resolve them automatically.
 - The token lives in a 0600 file, not the OS keychain.
-- RetroArch saves are `.srm` only (no `.rtc`).
+- Unclaimed saves (above) are only claimed automatically, for sessions launched from here. Argosy also lets you claim one by hand; there is no equivalent yet. The claim logic is exercised against a Dreamcast VMU; Sega CD and Saturn take the same path but no BRAM/Saturn image was available to test with.
+- PS2: PCSX2's card is built and read by the same code as Argosy's, but it is the one emulator whose real card images the tests could not reproduce (a valid PS2 card needs ECC-protected data), so it is checked only for routing and the "nothing saved yet" case.
+- The vendored C library has been built and tested with gcc on Linux only. The MSVC build follows Sigil's own CMake settings (including its force-included compat header) but hasn't been run, and neither has the GitHub Actions workflow.
+- RetroArch core options (`.opt`) are read only for cores that travel as units, where Sigil's layout can depend on them (Genesis Plus GX's backup-RAM mode, Flycast's per-game VMUs). Argosy doesn't read them at all, so a non-default setting is honoured here but not there.
 
 License: GPL-3.0-or-later
