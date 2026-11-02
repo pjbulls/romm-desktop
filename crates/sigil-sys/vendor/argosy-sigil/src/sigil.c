@@ -220,7 +220,8 @@ static sigil_io *open_io_for_platform(const char *path, sigil_platform p) {
     /* A Dreamcast data track dumped alongside a .gdi is raw 2352-byte MODE1,
      * like a PSX .bin; the raw-CD layer cooks it and passes a plain 2048-byte
      * image through untouched. */
-    if ((p == SIGIL_PLATFORM_PSX || p == SIGIL_PLATFORM_DREAMCAST)
+    if ((p == SIGIL_PLATFORM_PSX || p == SIGIL_PLATFORM_PS2
+         || p == SIGIL_PLATFORM_DREAMCAST)
         && strcmp(ext, "bin") == 0) {
         sigil_io *io = sigil_io_open_raw_cd(path);
         if (io) return io;
@@ -510,7 +511,8 @@ int sigil_extract_from_path(const char *path, sigil_platform hint,
     sigil_io *io = NULL;
     char sheet_ext[16];
     sigil_lower_ext(path_basename(effective_path), sheet_ext);
-    bool reads_sheet = (resolved == SIGIL_PLATFORM_PSX || resolved == SIGIL_PLATFORM_DREAMCAST)
+    bool reads_sheet = (resolved == SIGIL_PLATFORM_PSX || resolved == SIGIL_PLATFORM_PS2
+                        || resolved == SIGIL_PLATFORM_DREAMCAST)
                        && (strcmp(sheet_ext, "cue") == 0 || strcmp(sheet_ext, "gdi") == 0);
     if (reads_sheet) {
         char track_path[1024];
