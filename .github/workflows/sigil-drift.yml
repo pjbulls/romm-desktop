@@ -1,0 +1,26 @@
+# Keeps the vendored sigil in step with Argosy. Argosy pins sigil as a git submodule; this compares that pin
+# on Argosy's default branch with crates/sigil-sys/vendor/PINNED. Scheduled runs only fire from the default branch.
+name: sigil-drift
+on:
+  schedule: [{ cron: '0 6 * * 1' }]
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare PINNED with Argosy's sigil pin
+        run: |
+          ours=$(awk '$1=="argosy-sigil"{print $2}' crates/sigil-sys/vendor/PINNED)
+          argosy=$(mktemp -d)
+          git clone -q --depth 1 --filter=blob:none --no-checkout https://github.com/rommapp/argosy-launcher "$argosy"
+          theirs=$(git -C "$argosy" ls-tree HEAD sigil | awk '$2=="commit"{print $3}')
+          test -n "$ours"   || { echo "::error::no argosy-sigil line in vendor/PINNED"; exit 1; }
+          test -n "$theirs" || { echo "::error::Argosy no longer pins sigil as a submodule at 'sigil'; check how it vendors it now"; exit 1; }
+          echo "romm-desktop: $ours"
+          echo "Argosy main:  $theirs"
+          if [ "$ours" != "$theirs" ]; then
+            echo "::error::vendored sigil ($ours) differs from Argosy's pin ($theirs). Run: crates/sigil-sys/scripts/update-vendor.sh $theirs"
+            exit 1
+          fi
