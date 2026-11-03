@@ -53,7 +53,9 @@ jobs:
   # Each driver is its own step so one failure does not hide the others; logs are uploaded on failure.
   e2e:
     needs: test
-    runs-on: ubuntu-22.04
+    # 24.04, not 22.04: drive_choices.py needs Python >= 3.11 (tomllib; 22.04 has 3.10), and this is the release the
+    # drivers were verified on. On 22.04, drive_versions.py also timed out waiting for its first screenshot.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
