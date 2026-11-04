@@ -17,6 +17,7 @@ thiserror = "2"
 md-5 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 walkdir = "2"
 directories = "5"
 futures-util = "0.3"

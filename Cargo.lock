@@ -3021,6 +3021,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "directories",
+ "flate2",
  "futures-util",
  "hex",
  "md-5",

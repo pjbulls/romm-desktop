@@ -15,6 +15,7 @@ thiserror.workspace = true
 md-5.workspace = true
 hex.workspace = true
 zip.workspace = true
+flate2.workspace = true
 walkdir.workspace = true
 directories.workspace = true
 futures-util.workspace = true

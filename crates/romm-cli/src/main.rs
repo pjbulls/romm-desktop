@@ -14,7 +14,7 @@ use romm_core::resolve::Resolver;
 use romm_core::state::State;
 use romm_core::sync::{ConflictPolicy, EmuEnv, SyncReport, Syncer};
 use romm_core::states::{self, StateOptions, StateReport, StateStatus};
-use romm_core::{library, profiles, retroarch, session};
+use romm_core::{library, profiles, retroarch, session, unit, xbox};
 
 /// Scopes a token needs for everything this app does.
 const REQUIRED_SCOPES: &[&str] = &[
@@ -59,7 +59,30 @@ impl From<OnConflict> for ConflictPolicy {
 }
 
 #[derive(Subcommand)]
+enum XboxCmd {
+    /// List the title folders (E:\\UDATA\\<id>) on an xemu hard-disk image
+    Titles {
+        /// The xemu HDD image (a .qcow2). Close xemu first: the image is read without any lock
+        image: PathBuf,
+    },
+    /// Write one title's save as Argosy's zip (<ID>/...), the same bytes RomM would store
+    Export {
+        image: PathBuf,
+        /// Eight hex digits, e.g. 4D530004
+        title: String,
+        /// Where to write the zip (default: <ID>.zip here)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
+    /// Inspect saves inside an xemu disk image (read-only)
+    Xbox {
+        #[command(subcommand)]
+        cmd: XboxCmd,
+    },
     /// Connect to a RomM server (use the 8-digit pairing code from RomM's web UI, or a token)
     Login {
         #[arg(long)]
@@ -248,12 +271,47 @@ fn print_state_report(r: &StateReport) {
     }
 }
 
+fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
+    let image = match &cmd {
+        XboxCmd::Titles { image } | XboxCmd::Export { image, .. } => image,
+    };
+    let mut hdd = xbox::FileHdd::open(image).with_context(|| format!("reading {}", image.display()))?;
+    if hdd.device().is_dirty() {
+        eprintln!("warning: QEMU marked this image dirty (not closed cleanly, or xemu is running it); what follows may be mid-update");
+    }
+    match cmd {
+        XboxCmd::Titles { .. } => {
+            let titles = hdd.titles()?;
+            for t in &titles {
+                let files = hdd.export_zip(&t.save_id).ok().flatten().map(|z| z.len());
+                match files {
+                    Some(n) => println!("{}  UDATA\\{}  (zip {n} bytes)", t.save_id, t.dir_name),
+                    None => println!("{}  UDATA\\{}  (no files, or unreadable)", t.save_id, t.dir_name),
+                }
+            }
+            println!("{} title folder(s)", titles.len());
+        }
+        XboxCmd::Export { title, output, .. } => {
+            let id = title.to_ascii_uppercase();
+            let zip = hdd.export_zip(&id)?.ok_or_else(|| anyhow!("{id} has no save files on this disk"))?;
+            let out = output.unwrap_or_else(|| PathBuf::from(format!("{id}.zip")));
+            std::fs::write(&out, &zip).with_context(|| format!("writing {}", out.display()))?;
+            println!("{}  {} bytes  content_hash {}", out.display(), zip.len(), unit::content_hash(&zip));
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::Xbox { cmd } = cli.cmd {
+        return xbox_cmd(cmd);
+    }
     let mut app = App::load()?;
 
     match cli.cmd {
+        Cmd::Xbox { .. } => unreachable!("handled before the app config is loaded"),
         Cmd::Login { server, code, token, insecure, device_name } => {
             let (raw, scopes) = match (code, token) {
                 (Some(code), None) => {

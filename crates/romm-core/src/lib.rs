@@ -22,5 +22,6 @@ pub mod states;
 pub mod sync;
 pub mod unit;
 pub mod versions;
+pub mod xbox;
 
 pub use error::{Error, Result};

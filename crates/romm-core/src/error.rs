@@ -16,6 +16,8 @@ pub enum Error {
     Toml(#[from] toml::de::Error),
     #[error("zip error: {0}")]
     Zip(#[from] zip::result::ZipError),
+    #[error("Xbox save: {0}")]
+    Xbox(#[from] crate::xbox::XboxError),
     #[error("{0}")]
     Msg(String),
 }
