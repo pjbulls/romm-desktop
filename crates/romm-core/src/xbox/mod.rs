@@ -16,7 +16,7 @@ pub mod qcow2;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use zip::write::SimpleFileOptions;
@@ -68,6 +68,25 @@ impl BlockRead for MemDisk {
         let Some(end) = end else { return Err(XboxError::Fatx("read past the end of the disk".into())) };
         buf.copy_from_slice(&self.0[off as usize..end as usize]);
         Ok(())
+    }
+}
+
+/// File name of the hard-disk image xemu's own downloads and first-run setup use.
+pub const DEFAULT_HDD_NAME: &str = "xbox_hdd.qcow2";
+
+/// Where xemu keeps its hard-disk image: `hdd_path` under `[sys.files]` in the `xemu.toml` inside
+/// `data_root`, else `xbox_hdd.qcow2` beside it. xemu resolves a relative path against that same
+/// folder (portable installs write bare file names), so that is what is done here. The file need
+/// not exist; whoever opens it reports that.
+pub fn xemu_hdd_path(data_root: &Path) -> PathBuf {
+    let configured = std::fs::read_to_string(data_root.join("xemu.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|t| t.get("sys")?.get("files")?.get("hdd_path")?.as_str().map(str::to_owned))
+        .filter(|p| !p.trim().is_empty());
+    match configured {
+        Some(p) => data_root.join(p),
+        None => data_root.join(DEFAULT_HDD_NAME),
     }
 }
 

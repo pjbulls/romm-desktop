@@ -20,6 +20,7 @@ use crate::route::{self, Kind, Plan};
 use crate::saves::{self, SLOT};
 use crate::state::{save_key, LocalRom, SaveRecord, State};
 use crate::unit::{self, Identity};
+use crate::xbox;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +76,9 @@ pub fn identity_for(state: &mut State, rom: &LocalRom) -> Identity {
     id
 }
 
+/// Why a save RomM holds is never put back into xemu: nothing writes to its disk image yet.
+const XEMU_UPLOAD_ONLY: &str = "restoring a save into xemu's hard disk isn't supported yet, so the server's copy was not applied";
+
 /// What a game's local save is made of.
 #[derive(Debug, Clone)]
 pub enum LocalKind {
@@ -82,6 +86,9 @@ pub enum LocalKind {
     Raw(PathBuf),
     /// A unit Sigil collected from the emulator's files.
     Unit(unit::Unit),
+    /// Bytes read out of something that is not a file of its own (a folder in xemu's disk image).
+    /// Never restored from here, so nothing local is ever overwritten or deleted on its account.
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +114,7 @@ impl LocalUnit {
         match &self.kind {
             LocalKind::Raw(p) => Ok(std::fs::read(p)?),
             LocalKind::Unit(u) => Ok(u.data.clone()),
+            LocalKind::Bytes(b) => Ok(b.clone()),
         }
     }
 
@@ -142,6 +150,40 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                 changed: last != Some(hash.as_str()),
                 hash,
                 kind: LocalKind::Raw(path.clone()),
+            }))
+        }
+        Kind::Xbox { image, save_id } => {
+            if !xbox::is_title_id(save_id) {
+                return Err(Error::msg(format!(
+                    "can't tell which game \"{}\" is: no Xbox title id could be read from the ROM, so its save can't be found in xemu's disk image. \
+                     The ROM needs to be an XISO (or a bare default.xbe)",
+                    rom.stem
+                )));
+            }
+            let mut hdd = xbox::FileHdd::open(image)
+                .map_err(|e| Error::msg(format!("reading xemu's hard disk image {}: {e}", image.display())))?;
+            // Not closed cleanly, or xemu still has it open: what is on it may be half-written, and
+            // an upload of that could replace a good save on the server.
+            if hdd.device().is_dirty() {
+                return Err(Error::msg(format!(
+                    "xemu's hard disk image {} is marked as in use (xemu is running, or it did not close cleanly), so its saves were not read. \
+                     Close xemu (if it crashed, start it and close it once) and sync again",
+                    image.display()
+                )));
+            }
+            let Some(data) = hdd.export_zip(save_id)? else { return Ok(None) };
+            let hash = unit::content_hash(&data);
+            Ok(Some(LocalUnit {
+                emulator: plan.label.clone(),
+                slot: SLOT.into(),
+                file_name: upload_name(&rom.stem, "zip"),
+                size: data.len() as u64,
+                // The disk image's own timestamp: the folder's are not read. A save that has not
+                // changed is reported with the server's timestamp anyway (see `reported`).
+                modified: std::fs::metadata(image)?.modified()?,
+                changed: last != Some(hash.as_str()),
+                hash,
+                kind: LocalKind::Bytes(data),
             }))
         }
         Kind::Unit(route) => {
@@ -236,7 +278,7 @@ pub fn saves_overview(env: &EmuEnv, rom: &LocalRom, db: &State) -> Result<Vec<Sa
     let rec = db.saves.get(&save_key(rom.rom_id, &plan.label));
     let blob = match &plan.kind {
         Kind::Unit(r) => db.sigil_state(&r.state_key()),
-        Kind::Raw { .. } => None,
+        Kind::Raw { .. } | Kind::Xbox { .. } => None,
     };
     let Some(local) = gather(rom, &id, &plan, rec, blob.as_deref())? else { return Ok(vec![]) };
     let status = match rec.and_then(|r| r.last_hash.as_deref()) {
@@ -310,7 +352,7 @@ impl<'a> Syncer<'a> {
                 let rec = self.state.saves.get(&save_key(rom.rom_id, &p.label));
                 let blob = match &p.kind {
                     Kind::Unit(r) => self.state.sigil_state(&r.state_key()),
-                    Kind::Raw { .. } => None,
+                    Kind::Raw { .. } | Kind::Xbox { .. } => None,
                 };
                 match gather(rom, &id, p, rec, blob.as_deref()) {
                     Ok(l) => (l, None),
@@ -440,6 +482,8 @@ impl<'a> Syncer<'a> {
                                 self.state.set_sigil_state(&r.state_key(), &[]);
                             }
                         }
+                        // Read out of a disk image: nothing of ours to remove, only to stop tracking.
+                        LocalKind::Bytes(_) => {}
                     }
                     self.state.saves.remove(&save_key(cx.rom.rom_id, &l.emulator));
                 }
@@ -488,12 +532,17 @@ impl<'a> Syncer<'a> {
 
     async fn download(&mut self, cx: &Cx<'_>, save_id: i64, server_updated_at: Option<String>, report: &mut SyncReport) -> Result<()> {
         let plan = cx.plan.ok_or_else(|| Error::msg("this emulator has no save rule"))?;
+        if matches!(plan.kind, Kind::Xbox { .. }) {
+            return Err(Error::msg(XEMU_UPLOAD_ONLY));
+        }
         let bytes = self.client.download_save(save_id, self.device_id, cx.session_id).await?;
         let hash = unit::content_hash(&bytes);
         let stamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
         let backup = self.backup_dir.join(&stamp).join(&plan.label);
 
         let name = match &plan.kind {
+            // Refused above, before anything was downloaded; kept so nothing here can write to it.
+            Kind::Xbox { .. } => return Err(Error::msg(XEMU_UPLOAD_ONLY)),
             Kind::Raw { path, exists } => {
                 if saves::is_zip(&bytes) {
                     return Err(Error::msg(format!(
@@ -592,6 +641,19 @@ impl<'a> Syncer<'a> {
             // Nothing local to protect: just take the server's.
             return self.download(cx, server_id, op.server_updated_at.clone(), report).await;
         };
+        // Both of these end by taking the server's save, which can't be applied to xemu's disk. Stop
+        // before the first half (keeping both would archive another copy on the server every sync).
+        if matches!(cx.plan, Some(Plan { kind: Kind::Xbox { .. }, .. }))
+            && matches!(self.policy, ConflictPolicy::KeepBoth | ConflictPolicy::ServerWins)
+        {
+            report.conflicts.push(PendingConflict {
+                rom_id: cx.rom.rom_id,
+                file_name: local.file_name.clone(),
+                server_updated_at: op.server_updated_at.clone(),
+                reason: Some(format!("{XEMU_UPLOAD_ONLY}. Choose \"device wins\" to replace the server's copy with the one on this disk")),
+            });
+            return Ok(());
+        }
         match self.policy {
             ConflictPolicy::Ask => {
                 report.conflicts.push(PendingConflict {

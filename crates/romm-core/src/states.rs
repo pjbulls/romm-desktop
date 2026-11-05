@@ -126,6 +126,8 @@ impl EmuEnv {
         match rule.mode {
             SaveMode::Stem => self.retroarch.as_ref().map(|l| l.states.clone()),
             SaveMode::Diff => rule.dir.as_ref().map(|d| self.data_root.join(d)),
+            // A save-only mode: no emulator has a state rule like it.
+            SaveMode::Hdd => None,
         }
     }
 
@@ -173,6 +175,7 @@ pub fn local_states(env: &EmuEnv, rom: &LocalRom, db: &State) -> BTreeMap<String
             };
             names.iter().filter(|n| dir.join(n).is_file()).map(|n| (n.clone(), dir.join(n))).collect()
         }
+        SaveMode::Hdd => BTreeMap::new(),
     }
 }
 

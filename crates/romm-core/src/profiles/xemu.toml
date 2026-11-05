@@ -27,11 +27,19 @@ windows = [
   "{appdata}/xemu/xemu",
 ]
 
-# Launch-only: there is intentionally no [saves], [states] or [bios] section.
+# Saves are the `E:\UDATA\<title id>` folders inside the virtual hard disk (`hdd_path` in
+# xemu.toml, usually xbox_hdd.qcow2), so they are read out of the image by title id rather than
+# found as files (see `xbox`). One game's save travels as `<TITLE ID>.zip`, as Argosy's does.
 #
-# * Saves AND xemu's snapshots live inside the virtual hard disk image
-#   (xbox_hdd.qcow2), not as individual files, so neither `diff` nor `stem` mode can
-#   see them. Syncing the whole multi-GB image as one unit would turn any conflict
-#   between two devices into a whole-disk conflict.
+# UPLOAD ONLY, for now: nothing here writes to the image, so a save RomM holds is never put
+# back into xemu. Rewriting a multi-GB disk that the emulator also writes needs its own care.
+[saves]
+mode = "hdd"
+
+# There is intentionally no [states] or [bios] section.
+#
+# * xemu's snapshots live inside the same disk image, so neither `diff` nor `stem` mode can see
+#   them. Syncing the whole image as one unit would turn any conflict between two devices into
+#   a whole-disk conflict.
 # * xemu takes its BIOS, boot ROM and HDD image from paths configured inside xemu
 #   itself, so there is no BIOS folder to install into.

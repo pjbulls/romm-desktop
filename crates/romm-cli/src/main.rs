@@ -283,10 +283,10 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
         XboxCmd::Titles { .. } => {
             let titles = hdd.titles()?;
             for t in &titles {
-                let files = hdd.export_zip(&t.save_id).ok().flatten().map(|z| z.len());
-                match files {
-                    Some(n) => println!("{}  UDATA\\{}  (zip {n} bytes)", t.save_id, t.dir_name),
-                    None => println!("{}  UDATA\\{}  (no files, or unreadable)", t.save_id, t.dir_name),
+                match hdd.export_zip(&t.save_id) {
+                    Ok(Some(zip)) => println!("{}  UDATA\\{}  (zip {} bytes)", t.save_id, t.dir_name, zip.len()),
+                    Ok(None) => println!("{}  UDATA\\{}  (no save files)", t.save_id, t.dir_name),
+                    Err(e) => println!("{}  UDATA\\{}  (unreadable: {e})", t.save_id, t.dir_name),
                 }
             }
             println!("{} title folder(s)", titles.len());

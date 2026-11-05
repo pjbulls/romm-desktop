@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use romm_core::saves::md5_bytes;
 use romm_core::unit::content_hash;
 use romm_core::xbox::qcow2::Qcow2;
-use romm_core::xbox::{BlockRead, FileHdd, MemDisk, TitleDir, XboxError, XboxHdd, XboxResult, E_OFFSET};
+use romm_core::xbox::{xemu_hdd_path, BlockRead, FileHdd, MemDisk, TitleDir, XboxError, XboxHdd, XboxResult, E_OFFSET};
 use serde_json::Value;
 
 fn fixture(name: &str) -> PathBuf {
@@ -367,4 +367,29 @@ fn not_a_fatx_volume() {
     let mut head = [0u8; 4];
     f.read_exact(&mut head).unwrap();
     assert_eq!(&head, b"QFI\xfb", "sanity: the fixtures really are qcow2");
+}
+
+// ---- where xemu keeps its disk -----------------------------------------------------------
+
+#[test]
+fn xemu_hdd_path_follows_xemu_toml_and_falls_back_to_the_stock_name() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let stock = root.join("xbox_hdd.qcow2");
+    let set = |toml: &str| std::fs::write(root.join("xemu.toml"), toml).unwrap();
+
+    // No config, an empty one, one without the key, an empty value, and one that is not TOML.
+    assert_eq!(xemu_hdd_path(root), stock);
+    for text in ["", "[sys.files]\nbootrom_path = 'x'\n", "[sys.files]\nhdd_path = ''\n", "[sys.files\nhdd_path = ", "sys = 3\n"] {
+        set(text);
+        assert_eq!(xemu_hdd_path(root), stock, "{text:?}");
+    }
+
+    // Relative paths are relative to xemu's folder (portable installs write bare names); absolute
+    // ones are taken as they are, and a Windows-style literal string survives as written.
+    set("[sys.files]\nhdd_path = 'disks/mine.qcow2'\n");
+    assert_eq!(xemu_hdd_path(root), root.join("disks/mine.qcow2"));
+    let abs = t.path().join("elsewhere").join("hdd.qcow2");
+    set(&format!("[sys.files]\nhdd_path = '{}'\n", abs.display()));
+    assert_eq!(xemu_hdd_path(root), abs);
 }

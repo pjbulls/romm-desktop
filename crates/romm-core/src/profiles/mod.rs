@@ -71,6 +71,9 @@ pub enum SaveMode {
     /// A standalone emulator with its own save layout (shared cards, per-title folders). Saves are
     /// found by game id (`unit`, via Sigil); save *states* are attributed by diffing a folder.
     Diff,
+    /// Saves live inside a virtual hard-disk image (xemu): read out of it by title id, one zip per
+    /// game (`xbox`). Only meaningful as a *save* rule; there is no such thing for states.
+    Hdd,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,9 +153,12 @@ pub fn get(id: &str) -> Option<Profile> {
 mod tests {
     use super::*;
 
-    /// Emulators that can be launched but not synced: xemu keeps saves and snapshots
-    /// inside its virtual hard disk image, which file-level sync cannot handle safely.
-    const LAUNCH_ONLY: &[&str] = &["xemu"];
+    /// Emulators that can be launched but not synced. None at the moment.
+    const LAUNCH_ONLY: &[&str] = &[];
+
+    /// Emulators whose saves can be read (and uploaded) but that have no save-state or BIOS rule:
+    /// xemu keeps both inside its virtual hard disk image.
+    const SAVES_ONLY: &[&str] = &["xemu"];
 
     #[test]
     fn all_builtin_profiles_parse_and_are_complete() {
@@ -167,6 +173,9 @@ mod tests {
                     "{} is listed as launch-only but declares save/state/bios rules; remove it from LAUNCH_ONLY",
                     p.id
                 );
+            } else if SAVES_ONLY.contains(&p.id.as_str()) {
+                assert!(p.saves.is_some(), "{} has no save rule", p.id);
+                assert!(p.states.is_none() && p.bios.is_none(), "{} is listed as saves-only but has state/bios rules", p.id);
             } else {
                 assert!(p.saves.is_some(), "{} has no save rule", p.id);
                 assert!(p.states.is_some(), "{} has no state rule", p.id);
@@ -221,10 +230,11 @@ mod azahar_xemu_tests {
     }
 
     #[test]
-    fn xemu_is_original_xbox_only_and_launch_only() {
+    fn xemu_is_original_xbox_only_with_saves_read_from_the_disk_image() {
         let p = get("xemu").unwrap();
         assert_eq!(p.platforms, ["xbox"]);
         assert_eq!(p.launch.args, ["-dvd_path", "{rom}"]);
-        assert!(p.saves.is_none() && p.states.is_none() && p.bios.is_none());
+        assert_eq!(p.saves.unwrap().mode, SaveMode::Hdd);
+        assert!(p.states.is_none() && p.bios.is_none());
     }
 }

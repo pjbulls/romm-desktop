@@ -17,10 +17,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::paths::PathCtx;
+use crate::profiles::SaveMode;
 use crate::retroarch;
 use crate::state::LocalRom;
 use crate::sync::EmuEnv;
 use crate::unit::{self, Identity, Route};
+use crate::xbox;
 
 #[derive(Debug, Clone)]
 pub enum Kind {
@@ -28,6 +30,13 @@ pub enum Kind {
     Unit(Route),
     /// One file, as the core wrote it.
     Raw { path: PathBuf, exists: bool },
+    /// The `E:\UDATA\<title id>` folder inside an xemu hard-disk image, read out as a zip.
+    /// Read-only: nothing is ever written back to the image.
+    Xbox {
+        image: PathBuf,
+        /// Eight hex digits, from the ROM's XBE; empty when the ROM could not be read.
+        save_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +76,26 @@ pub fn plan(env: &EmuEnv, rom: &LocalRom, id: &Identity) -> Option<Plan> {
     if env.profile.id == "retroarch" {
         return retroarch_plan(env, rom, id, content_name);
     }
+    if env.profile.saves.as_ref().is_some_and(|r| r.mode == SaveMode::Hdd) {
+        return xbox_plan(env, rom, id, content_name);
+    }
     let route = standalone_route(env, rom)?;
     Some(Plan { label: env.profile.id.clone(), kind: Kind::Unit(route), content_name })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Emulators with a virtual hard disk (xemu)
+// ---------------------------------------------------------------------------------------------
+
+/// The save of an original Xbox game is its `UDATA` folder on the emulator's disk image. Which
+/// folder is the game's comes from the title id in its XBE, which Sigil reads (`save_id`, the
+/// 8-digit hex the console names the folder after).
+fn xbox_plan(env: &EmuEnv, rom: &LocalRom, id: &Identity, content_name: String) -> Option<Plan> {
+    if unit::platform_slug(&rom.platform_slug) != "xbox" {
+        return None;
+    }
+    let kind = Kind::Xbox { image: xbox::xemu_hdd_path(&env.data_root), save_id: id.save_id.to_ascii_uppercase() };
+    Some(Plan { label: env.profile.id.clone(), kind, content_name })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -252,8 +279,34 @@ mod tests {
     fn an_emulator_is_not_routed_for_a_platform_it_does_not_play() {
         let t = tempfile::tempdir().unwrap();
         assert!(plan(&env("ppsspp", t.path()), &rom("g", "ps2"), &Identity::default()).is_none());
-        // xemu is launch-only: no save rule at all.
-        assert!(plan(&env("xemu", t.path()), &rom("g", "xbox"), &Identity::default()).is_none());
+        // xemu only has saves for the original Xbox.
+        assert!(plan(&env("xemu", t.path()), &rom("g", "ps2"), &Identity::default()).is_none());
+    }
+
+    #[test]
+    fn xemu_reads_the_game_s_udata_folder_from_the_disk_image_xemu_is_set_up_with() {
+        let t = tempfile::tempdir().unwrap();
+        let id = Identity { save_id: "4d530004".into(), ..Default::default() };
+
+        // No xemu.toml: the image xemu's own setup names, beside it.
+        let p = plan(&env("xemu", t.path()), &rom("g", "xbox"), &id).unwrap();
+        assert_eq!(p.label, "xemu");
+        match &p.kind {
+            Kind::Xbox { image, save_id } => {
+                assert_eq!(image, &t.path().join("xbox_hdd.qcow2"));
+                assert_eq!(save_id, "4D530004", "the title id is upper-case, as the zip's root folder is");
+            }
+            other => panic!("expected an Xbox save, got {other:?}"),
+        }
+
+        // A configured path wins, and a relative one is relative to xemu's folder.
+        std::fs::write(t.path().join("xemu.toml"), "[sys.files]\nhdd_path = 'disks/mine.qcow2'\n").unwrap();
+        let p = plan(&env("xemu", t.path()), &rom("g", "xbox"), &id).unwrap();
+        assert!(matches!(&p.kind, Kind::Xbox { image, .. } if image == &t.path().join("disks/mine.qcow2")), "{p:?}");
+
+        // A ROM Sigil could not read still gets a plan; reading the save then says why it can't.
+        let p = plan(&env("xemu", t.path()), &rom("g", "xbox"), &Identity::default()).unwrap();
+        assert!(matches!(&p.kind, Kind::Xbox { save_id, .. } if save_id.is_empty()));
     }
 
     #[test]

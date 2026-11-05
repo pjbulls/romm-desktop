@@ -16,7 +16,7 @@ use romm_core::profiles;
 use romm_core::retroarch;
 use romm_core::saves;
 use romm_core::state::{save_key, LocalRom, State};
-use romm_core::sync::{ConflictPolicy, EmuEnv, Syncer};
+use romm_core::sync::{saves_overview, ConflictPolicy, EmuEnv, SaveStatus, Syncer};
 use romm_core::unit::{self, Identity, Route};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex};
@@ -963,4 +963,304 @@ async fn emulator_that_fails_to_start_is_an_error() {
         .await
         .unwrap_err();
     assert!(err.to_string().to_lowercase().contains("launch") || err.to_string().to_lowercase().contains("start") || !err.to_string().is_empty());
+}
+
+// ============================================================================================
+// xemu: saves are folders inside a virtual hard disk, read out of it and uploaded (never restored)
+// ============================================================================================
+
+fn xbox_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/xbox").join(name)
+}
+
+/// RomM's `content_hash` of one title's save, worked out from the fixture manifest alone (libfatx
+/// re-read the volume to write it), so it checks the bytes uploaded rather than repeating our code.
+fn xbox_expected_hash(id: &str) -> String {
+    let m: Value = serde_json::from_slice(&std::fs::read(xbox_fixture("manifest.json")).unwrap()).unwrap();
+    let mut lines: Vec<String> = m["e"]["titles"][id]["files"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(p, f)| format!("{id}/{p}:{}", f["md5"].as_str().unwrap()))
+        .collect();
+    lines.sort();
+    saves::md5_bytes(lines.join("\n").as_bytes())
+}
+
+struct Xemu {
+    env: EmuEnv,
+    rom: LocalRom,
+    st: State,
+    image: PathBuf,
+}
+
+/// An xemu data folder holding a copy of the reference disk image, and an Xbox game whose XBE
+/// carries `save_id` (as if it had been synced before, so no ISO is needed).
+fn xemu_setup(dir: &Path, save_id: &str) -> Xemu {
+    let root = dir.join("xemu");
+    std::fs::create_dir_all(&root).unwrap();
+    let image = root.join("xbox_hdd.qcow2");
+    std::fs::copy(xbox_fixture("hdd-v3.qcow2"), &image).unwrap();
+    let rom = rom("Halo", "xbox");
+    let mut st = State::default();
+    with_identity(&mut st, &rom, Identity { platform: "xbox".into(), save_id: save_id.into(), ..Default::default() });
+    Xemu { env: standalone_env("xemu", &root), rom, st, image }
+}
+
+async fn mock_save_upload(server: &MockServer, hash: &str) {
+    Mock::given(method("POST"))
+        .and(path("/api/saves"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(stored_json(11, "Halo.zip", hash)))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn xemu_uploads_the_games_udata_folder_from_the_disk_image() {
+    let server = MockServer::start().await;
+    let want = xbox_expected_hash("4D530004");
+    mock_negotiate(&server, vec![op("upload", None, "Halo.zip")]).await;
+    mock_save_upload(&server, &want).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "4D530004");
+    let before = std::fs::read(&x.image).unwrap();
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(rep.uploaded, ["Halo.zip"]);
+
+    // What was announced and what was sent: one save, labelled xemu, the zip libfatx says it is.
+    let neg: Value = reqs(&server, "POST", "/api/sync/negotiate").await[0].body_json().unwrap();
+    assert_eq!(neg["saves"][0]["emulator"], "xemu");
+    assert_eq!(neg["saves"][0]["slot"], "autosave");
+    assert_eq!(neg["saves"][0]["file_name"], "Halo.zip");
+    assert_eq!(neg["saves"][0]["content_hash"], want.as_str());
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert_eq!(query(up)["emulator"], "xemu");
+    assert_eq!(query(up)["content_hash"], want);
+    assert!(body_text(up).contains("4D530004/"), "the zip is rooted at the upper-case title id");
+
+    // Remembered, and the disk was only read.
+    assert_eq!(x.st.saves[&save_key(7, "xemu")].last_hash.as_deref(), Some(want.as_str()));
+    assert_eq!(std::fs::read(&x.image).unwrap(), before, "the disk image must not be touched");
+}
+
+#[tokio::test]
+async fn xemu_save_that_has_not_changed_is_not_uploaded_again() {
+    let server = MockServer::start().await;
+    let want = xbox_expected_hash("4D530004");
+    mock_negotiate_once(&server, vec![op("upload", None, "Halo.zip")]).await;
+    mock_negotiate(&server, vec![op("no_op", Some(11), "Halo.zip")]).await;
+    mock_save_upload(&server, &want).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "4D530004");
+    let c = client(&server);
+    syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert_eq!(saves_overview(&x.env, &x.rom, &x.st).unwrap()[0].status, SaveStatus::Synced);
+
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert_eq!(reqs(&server, "POST", "/api/saves").await.len(), 1);
+}
+
+#[tokio::test]
+async fn xemu_never_writes_a_server_save_into_the_disk_image() {
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("download", Some(99), "Halo.zip")]).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    // A title whose folder has no files: this machine has nothing, the server has a save.
+    let mut x = xemu_setup(t.path(), "55550001");
+    let before = std::fs::read(&x.image).unwrap();
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+    assert!(rep.downloaded.is_empty(), "{rep:?}");
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].contains("isn't supported yet"), "{rep:?}");
+    assert!(reqs(&server, "GET", "/api/saves/99/content").await.is_empty(), "nothing is downloaded for a save that can't be applied");
+    assert_eq!(std::fs::read(&x.image).unwrap(), before);
+}
+
+#[tokio::test]
+async fn xemu_conflict_is_never_settled_by_taking_the_servers_save() {
+    for policy in [ConflictPolicy::KeepBoth, ConflictPolicy::ServerWins, ConflictPolicy::Ask] {
+        let server = MockServer::start().await;
+        mock_negotiate(&server, vec![op("conflict", Some(5), "Halo.zip")]).await;
+        mock_complete(&server).await;
+        let t = tempfile::tempdir().unwrap();
+        let mut x = xemu_setup(t.path(), "4D530004");
+        let before = std::fs::read(&x.image).unwrap();
+        let c = client(&server);
+        let rep = syncer(&c, &mut x.st, &t.path().join("bak"), policy).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+        assert_eq!(rep.conflicts.len(), 1, "{policy:?}: {rep:?}");
+        assert!(rep.failed.is_empty() && rep.downloaded.is_empty() && rep.archived.is_empty(), "{policy:?}: {rep:?}");
+        // Keeping both would archive a copy on the server at every sync; none of these may upload.
+        assert!(reqs(&server, "POST", "/api/saves").await.is_empty(), "{policy:?}");
+        assert!(reqs(&server, "PUT", "/api/saves/5").await.is_empty(), "{policy:?}");
+        assert!(reqs(&server, "GET", "/api/saves/5/content").await.is_empty(), "{policy:?}");
+        assert_eq!(std::fs::read(&x.image).unwrap(), before, "{policy:?}");
+    }
+}
+
+#[tokio::test]
+async fn xemu_conflict_can_still_be_settled_in_favour_of_the_disk() {
+    let server = MockServer::start().await;
+    let want = xbox_expected_hash("4D530004");
+    mock_negotiate(&server, vec![op("conflict", Some(5), "Halo.zip")]).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/saves/5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(stored_json(5, "Halo.zip", &want)))
+        .mount(&server)
+        .await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "4D530004");
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::DeviceWins).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert_eq!(rep.uploaded, ["Halo.zip"], "{rep:?}");
+    assert_eq!(query(&reqs(&server, "PUT", "/api/saves/5").await[0])["content_hash"], want);
+}
+
+#[tokio::test]
+async fn xemu_game_with_no_save_folder_has_nothing_to_upload() {
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    mock_complete(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    for id in ["FFFFFFFF", "55550001"] {
+        let mut x = xemu_setup(t.path(), id);
+        let c = client(&server);
+        let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+        assert!(rep.is_clean(), "{id}: {rep:?}");
+        assert!(saves_overview(&x.env, &x.rom, &x.st).unwrap().is_empty(), "{id}");
+    }
+    let neg: Value = reqs(&server, "POST", "/api/sync/negotiate").await[0].body_json().unwrap();
+    assert_eq!(neg["saves"], json!([]));
+}
+
+#[tokio::test]
+async fn xemu_follows_the_disk_image_path_in_xemu_toml() {
+    let server = MockServer::start().await;
+    let want = xbox_expected_hash("4D530004");
+    mock_negotiate(&server, vec![op("upload", None, "Halo.zip")]).await;
+    mock_save_upload(&server, &want).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "4D530004");
+    // The image lives elsewhere, as xemu's own settings say; the default name no longer exists.
+    let moved = t.path().join("disks/hdd.qcow2");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&x.image, &moved).unwrap();
+    std::fs::write(x.env.data_root.join("xemu.toml"), format!("[sys.files]\nhdd_path = '{}'\n", moved.display())).unwrap();
+
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert_eq!(rep.uploaded, ["Halo.zip"], "{rep:?}");
+}
+
+#[tokio::test]
+async fn xemu_without_a_readable_disk_syncs_nothing_and_says_why() {
+    let t = tempfile::tempdir().unwrap();
+    let c_and = |server: &MockServer| client(server);
+
+    // 1. No disk image where xemu says it is.
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    mock_complete(&server).await;
+    let mut x = xemu_setup(t.path(), "4D530004");
+    std::fs::remove_file(&x.image).unwrap();
+    let c = c_and(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].contains("hard disk image") && rep.failed[0].contains("xbox_hdd.qcow2"), "{rep:?}");
+    let neg: Value = reqs(&server, "POST", "/api/sync/negotiate").await[0].body_json().unwrap();
+    assert_eq!((neg["saves"].clone(), neg["rom_ids"].clone()), (json!([]), json!([])), "an unreadable save must not look like \"no save\"");
+
+    // 2. A disk xemu has open (QEMU's dirty flag, bit 0 of the incompatible features): half-written
+    //    data must not be uploaded over a good save.
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    mock_complete(&server).await;
+    let mut x = xemu_setup(t.path(), "4D530004");
+    let mut img = std::fs::read(&x.image).unwrap();
+    assert_eq!(&img[4..8], &3u32.to_be_bytes(), "the fixture is a v3 image");
+    img[79] |= 1;
+    std::fs::write(&x.image, img).unwrap();
+    let c = c_and(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.failed[0].contains("in use") && rep.failed[0].contains("Close xemu"), "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty());
+
+    // 3. A ROM whose title id could not be read.
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    mock_complete(&server).await;
+    let mut x = xemu_setup(t.path(), "");
+    x.st = State::default();
+    let c = c_and(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.failed[0].contains("title id") && rep.failed[0].contains("XISO"), "{rep:?}");
+}
+
+/// The smallest XISO Sigil accepts: a volume descriptor at the trimmed-image position, a root
+/// directory holding only `default.xbe`, and an XBE whose certificate carries `title_id`.
+fn minimal_xiso(title_id: u32) -> Vec<u8> {
+    const SECTOR: usize = 2048;
+    let (root_sector, xbe_sector) = (33usize, 34usize);
+    let mut img = vec![0u8; xbe_sector * SECTOR + 0x400];
+
+    let vd = 32 * SECTOR;
+    img[vd..vd + 20].copy_from_slice(b"MICROSOFT*XBOX*MEDIA");
+    img[vd + 0x14..vd + 0x18].copy_from_slice(&(root_sector as u32).to_le_bytes());
+    img[vd + 0x18..vd + 0x1C].copy_from_slice(&(SECTOR as u32).to_le_bytes());
+    img[vd + 0x7EC..vd + 0x7EC + 20].copy_from_slice(b"MICROSOFT*XBOX*MEDIA");
+
+    // One directory node: no left/right child, the file's sector and size, attribute 0x20, name.
+    let dir = root_sector * SECTOR;
+    img[dir + 4..dir + 8].copy_from_slice(&(xbe_sector as u32).to_le_bytes());
+    img[dir + 8..dir + 12].copy_from_slice(&0x400u32.to_le_bytes());
+    img[dir + 12] = 0x20;
+    img[dir + 13] = "default.xbe".len() as u8;
+    img[dir + 14..dir + 14 + 11].copy_from_slice(b"default.xbe");
+
+    // XBE: image base 0x10000, certificate at virtual address 0x10200 (file offset 0x200).
+    let xbe = xbe_sector * SECTOR;
+    img[xbe..xbe + 4].copy_from_slice(b"XBEH");
+    img[xbe + 0x104..xbe + 0x108].copy_from_slice(&0x10000u32.to_le_bytes());
+    img[xbe + 0x118..xbe + 0x11C].copy_from_slice(&0x10200u32.to_le_bytes());
+    img[xbe + 0x200..xbe + 0x204].copy_from_slice(&0x1D0u32.to_le_bytes());
+    img[xbe + 0x208..xbe + 0x20C].copy_from_slice(&title_id.to_le_bytes());
+    img
+}
+
+#[tokio::test]
+async fn xemu_finds_the_title_id_by_reading_the_xbe_inside_the_xiso() {
+    let server = MockServer::start().await;
+    let want = xbox_expected_hash("4D530004");
+    mock_negotiate(&server, vec![op("upload", None, "Halo.zip")]).await;
+    mock_save_upload(&server, &want).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    // No cached identity: Sigil has to read it from the disc image itself (0x4D530004 is "MS-004").
+    let mut x = xemu_setup(t.path(), "");
+    x.st = State::default();
+    x.rom = rom_disc(&t.path().join("roms"), "Halo.iso", "xbox", &minimal_xiso(0x4D53_0004));
+    x.st.roms.insert(x.rom.rom_id, x.rom.clone()); // an installed game, as the app has it
+
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(rep.uploaded, ["Halo.zip"]);
+    assert_eq!(x.st.roms[&7].identity.as_ref().unwrap().save_id, "4D530004");
+    assert_eq!(query(&reqs(&server, "POST", "/api/saves").await[0])["content_hash"], want);
 }
