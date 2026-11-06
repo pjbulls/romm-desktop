@@ -25,7 +25,7 @@ use std::path::Path;
 use super::{XboxError, XboxResult};
 
 fn in_use_error(path: &Path, how: &str) -> XboxError {
-    XboxError::Fatx(format!("the disk image {} is open in another program (most likely xemu): {how}", path.display()))
+    XboxError::Fatx(format!("the disk image {} is open in another program: {how}", path.display()))
 }
 
 #[cfg(target_os = "linux")]
@@ -98,7 +98,7 @@ pub fn in_use(path: &Path) -> Option<String> {
 fn in_use_here(path: &Path) -> Option<String> {
     let f = File::open(path).ok()?;
     match sys::another_writer(&f) {
-        Ok(true) => Some("another program (most likely xemu) has it open for writing".into()),
+        Ok(true) => Some("another program has it open".into()),
         _ => None,
     }
 }
@@ -108,7 +108,7 @@ fn in_use_here(path: &Path) -> Option<String> {
     // Asking for write access is refused while a program that shares the file only for reading, as
     // QEMU does, has it open. Nothing is written.
     match OpenOptions::new().read(true).write(true).open(path) {
-        Err(e) if sharing_violation(&e) => Some("another program (most likely xemu) has it open".into()),
+        Err(e) if sharing_violation(&e) => Some("another program has it open".into()),
         _ => None,
     }
 }

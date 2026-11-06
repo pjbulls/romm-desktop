@@ -289,17 +289,17 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
         let bytes = std::fs::read(zip).with_context(|| format!("reading {}", zip.display()))?;
         let id = match title {
             Some(t) => t.to_ascii_uppercase(),
-            None => xbox::zip_title_id(&bytes).ok_or_else(|| anyhow!("can't tell which game this zip is for; its root folder is not a title id. Pass --title"))?,
+            None => xbox::zip_title_id(&bytes).ok_or_else(|| anyhow!("can't tell which game this zip is for, provide --title"))?,
         };
         let s = xbox::import_save(image, &id, &bytes).with_context(|| format!("importing into {}", image.display()))?;
-        println!("{id}: {} file(s), {} folder(s), {} bytes written; verified by reading them back", s.files, s.dirs, s.bytes);
+        println!("{id}: {} file(s), {} folder(s), {} bytes written", s.files, s.dirs, s.bytes);
         return Ok(());
     }
     if let XboxCmd::Status { image } = &cmd {
         println!("image: {}", image.display());
         match xbox::image_in_use(image) {
             Some(why) => println!("open elsewhere:  YES, {why}"),
-            None => println!("open elsewhere:  no (nothing holds it open that this platform can see)"),
+            None => println!("open elsewhere:  no"),
         }
         match xbox::check_writable(image) {
             Ok(()) => println!("can be written:  yes"),
@@ -313,11 +313,11 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
         XboxCmd::Import { .. } | XboxCmd::Status { .. } => unreachable!("handled above"),
     };
     if let Some(why) = xbox::image_in_use(image) {
-        eprintln!("warning: the image is in use ({why}); what is read from it now may be half-made. Close xemu first");
+        eprintln!("warning: the image is in use ({why}). Close xemu first");
     }
     let mut hdd = xbox::FileHdd::open(image).with_context(|| format!("reading {}", image.display()))?;
     if hdd.device().is_dirty() {
-        eprintln!("warning: QEMU marked this image dirty (not closed cleanly, or xemu is running it); what follows may be mid-update");
+        eprintln!("warning: QEMU marked this image dirty (not closed cleanly, or xemu is running it)");
     }
     match cmd {
         XboxCmd::Titles { .. } => {
@@ -434,7 +434,7 @@ async fn main() -> Result<()> {
                 .find(|p| p.slug == platform)
                 .ok_or_else(|| anyhow!("no platform with slug '{platform}'"))?;
             if plat.firmware.is_empty() {
-                bail!("RomM has no BIOS files for {} (add them under the platform's bios folder and rescan)", plat.title());
+                bail!("RomM has no BIOS files for {}", plat.title());
             }
             let emu_id = app.emulator_for(&platform)?;
             let (env, _) = app.emu_env(&emu_id)?;
@@ -463,11 +463,11 @@ async fn main() -> Result<()> {
                         println!("✓ {:<12} {how}\n    data: {}", p.name, env.data_root.display());
                         if let Some(l) = &env.retroarch {
                             if l.sort_saves_by_core || l.sort_saves_by_content {
-                                println!("    note: RetroArch sorts saves into subfolders; romm will still find them");
+                                println!("    note: RetroArch sorts saves into subfolders");
                             }
                         }
                     }
-                    Err(_) => println!("✗ {:<12} not found (set it with `romm emulator-set {} <path>`)", p.name, p.id),
+                    Err(_) => println!("✗ {:<12} not found, set it with `romm emulator-set {} <path>`", p.name, p.id),
                 }
                 let claims: Vec<_> = p.platforms.iter().map(String::as_str).collect();
                 if !claims.is_empty() {
@@ -487,7 +487,7 @@ async fn main() -> Result<()> {
             }
             app.cfg.emulator_paths.insert(id.clone(), path);
             app.cfg.save(&app.dirs)?;
-            println!("Saved. Run `romm emulators` to check.");
+            println!("Saved, run `romm emulators` to check.");
         }
 
         Cmd::Play { rom_id, on_conflict, no_states } => {
@@ -498,7 +498,7 @@ async fn main() -> Result<()> {
                 .roms
                 .get(&rom_id)
                 .cloned()
-                .ok_or_else(|| anyhow!("game {rom_id} isn't installed; run `romm install {rom_id}`"))?;
+                .ok_or_else(|| anyhow!("game {rom_id} isn't installed, run `romm install {rom_id}`"))?;
             let prepared = app.resolver().prepare(&rom)?;
             let (env, cmd) = (prepared.env, prepared.command);
 
@@ -516,7 +516,7 @@ async fn main() -> Result<()> {
             }
             println!("Played for {}s", out.elapsed.as_secs());
             if let Some(e) = &out.push_error {
-                println!("Couldn't upload saves ({e}). They're tracked and will upload on the next `romm sync`.");
+                println!("Couldn't sync saves ({e}), will try again on the next `romm sync`.");
             } else if let Some(r) = &out.push {
                 print_report(r);
             }
@@ -524,7 +524,7 @@ async fn main() -> Result<()> {
                 print_state_report(r);
             }
             if let Some(e) = &out.state_error {
-                println!("Save states weren't synced ({e}). They'll be picked up on the next `romm sync`.");
+                println!("Couldn't syunc save states ({e}), will try again on the next `romm sync`.");
             }
         }
 

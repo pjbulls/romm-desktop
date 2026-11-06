@@ -377,7 +377,7 @@ pub fn recover_journal(image: &Path) -> XboxResult<bool> {
     f.read_exact(&mut header)?;
     if header[..] != data[16..head] || f.metadata()?.len() < orig_len {
         return Err(err(format!(
-            "{} is left over from another image; the image was not changed. Delete it if you are sure it is stale",
+            "{} is left over from another image; the image was not changed. Delete it only if you are sure it is stale",
             jp.display()
         )));
     }
