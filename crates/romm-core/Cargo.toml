@@ -25,6 +25,10 @@ tokio-util.workspace = true
 base64.workspace = true
 sigil-sys = { path = "../sigil-sys" }
 
+# QEMU (and so xemu) guards its disk images with byte-range locks on Linux; see `xbox::lock`.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"

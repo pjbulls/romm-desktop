@@ -318,7 +318,7 @@ fn a_crash_during_an_import_is_undone_when_the_image_is_next_opened() {
     let mut hdd = XboxHdd::open_e(Qcow2::new(OpenOptions::new().read(true).write(true).open(&img).unwrap()).unwrap()).unwrap();
     hdd.device_mut().begin(Some(&journal_path(&img))).unwrap();
     hdd.import_zip("4D530004", &sample_save("4D530004")).unwrap();
-    std::mem::forget(hdd);
+    drop(hdd);
     assert_ne!(std::fs::read(&img).unwrap(), original);
 
     // Reading the image (what the next sync does) puts it right first: the half-made save is never seen.

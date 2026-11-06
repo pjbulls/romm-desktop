@@ -366,7 +366,13 @@ pub fn recover_journal(image: &Path) -> XboxResult<bool> {
         return Ok(false);
     }
     let orig_len = u64::from_le_bytes(data[8..16].try_into().unwrap());
-    let mut f = OpenOptions::new().read(true).write(true).open(image)?;
+    if let Some(why) = super::lock::in_use(image) {
+        return Err(err(format!(
+            "an interrupted write to {} has to be undone first, but the image is in use: {why}. Close it and try again",
+            image.display()
+        )));
+    }
+    let mut f = super::lock::open_exclusive(image)?;
     let mut header = [0u8; JOURNAL_HEADER_ID];
     f.read_exact(&mut header)?;
     if header[..] != data[16..head] || f.metadata()?.len() < orig_len {

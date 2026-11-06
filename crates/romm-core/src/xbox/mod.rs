@@ -13,10 +13,11 @@
 //! callers must only open an image xemu is not running.
 
 pub mod fatx;
+pub mod lock;
 pub mod qcow2;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -503,9 +504,18 @@ impl<D: BlockRead + BlockWrite> XboxHdd<D> {
     }
 }
 
+/// Whether another program (xemu, most likely) seems to have the image open right now. Reading an
+/// image in that state can show half-made changes, so callers should not trust what they read.
+pub fn image_in_use(image: &Path) -> Option<String> {
+    lock::in_use(image)
+}
+
 /// Whether [`import_save`] could write to `image` right now: not in use, and nothing in it that
 /// the writer can't handle. Cheap, and changes nothing (except undoing an interrupted write).
 pub fn check_writable(image: &Path) -> XboxResult<()> {
+    if let Some(why) = lock::in_use(image) {
+        return Err(XboxError::Fatx(format!("the disk image is in use: {why}")));
+    }
     let hdd = FileHdd::open(image)?;
     match hdd.device().write_blocker() {
         Some(why) => Err(XboxError::Fatx(format!("the disk image {why}"))),
@@ -526,7 +536,9 @@ pub fn zip_title_id(zip: &[u8]) -> Option<String> {
 /// does a crash (the next open of the image undoes it). The image must not be open in xemu.
 pub fn import_save(image: &Path, save_id: &str, zip: &[u8]) -> XboxResult<ImportSummary> {
     qcow2::recover_journal(image)?;
-    let file = OpenOptions::new().read(true).write(true).open(image)?;
+    // Held for the whole write: xemu is refused the image meanwhile, and this is refused it if
+    // xemu already has it.
+    let file = lock::open_exclusive(image)?;
     let mut hdd = XboxHdd::open_e(Qcow2::new(file)?)?;
     hdd.device_mut().begin(Some(&qcow2::journal_path(image)))?;
     match hdd.import_zip(save_id, zip) {

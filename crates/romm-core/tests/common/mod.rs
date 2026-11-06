@@ -402,3 +402,51 @@ impl romm_core::xbox::qcow2::BackingFile for Flaky {
         self.f.sync_all()
     }
 }
+
+/// A real QEMU process (`qemu-io`) holding an image open read-write, as xemu does while it runs.
+/// Linux only: that is where a QEMU can be had here, and where its locks can be seen.
+#[cfg(target_os = "linux")]
+pub struct QemuHolder(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl QemuHolder {
+    /// `None` if `qemu-io` is not installed. Returns once the image is visibly in use.
+    pub fn start(img: &Path) -> Option<QemuHolder> {
+        let child = std::process::Command::new("qemu-io")
+            .args(["-c", "sleep 120000"])
+            .arg(img)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let h = QemuHolder(child);
+        for _ in 0..100 {
+            if romm_core::xbox::image_in_use(img).is_some() {
+                return Some(h);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("qemu-io never took the image's locks");
+    }
+
+    /// Ends it and waits until the image is free again.
+    pub fn stop(mut self, img: &Path) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+        for _ in 0..100 {
+            if romm_core::xbox::image_in_use(img).is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the image stayed locked after qemu-io exited");
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for QemuHolder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}

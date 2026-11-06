@@ -157,6 +157,13 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                     rom.stem
                 )));
             }
+            // Another program (xemu) with the image open can be mid-write, and so can what it shows.
+            if let Some(why) = xbox::image_in_use(image) {
+                return Err(Error::msg(format!(
+                    "xemu's hard disk image {} is in use ({why}), so its saves were not read. Close xemu and sync again",
+                    image.display()
+                )));
+            }
             let mut hdd = xbox::FileHdd::open(image)
                 .map_err(|e| Error::msg(format!("reading xemu's hard disk image {}: {e}", image.display())))?;
             // Not closed cleanly, or xemu still has it open: what is on it may be half-written, and

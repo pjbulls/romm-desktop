@@ -74,6 +74,8 @@ enum XboxCmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Say whether an image can be read and written right now (is xemu holding it open?)
+    Status { image: PathBuf },
     /// Put a save zip (<ID>/..., as `export` writes) into the image, replacing that game's UDATA folder.
     /// All or nothing: a failure, or a crash, leaves the image exactly as it was. Close xemu first,
     /// and keep a copy of the image if it matters: this changes it
@@ -293,10 +295,26 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
         println!("{id}: {} file(s), {} folder(s), {} bytes written; verified by reading them back", s.files, s.dirs, s.bytes);
         return Ok(());
     }
+    if let XboxCmd::Status { image } = &cmd {
+        println!("image: {}", image.display());
+        match xbox::image_in_use(image) {
+            Some(why) => println!("open elsewhere:  YES, {why}"),
+            None => println!("open elsewhere:  no (nothing holds it open that this platform can see)"),
+        }
+        match xbox::check_writable(image) {
+            Ok(()) => println!("can be written:  yes"),
+            Err(e) => println!("can be written:  NO, {e}"),
+        }
+        println!("interrupted write pending: {}", if xbox::qcow2::journal_path(image).exists() { "YES, it is undone the next time the image is opened" } else { "no" });
+        return Ok(());
+    }
     let image = match &cmd {
         XboxCmd::Titles { image } | XboxCmd::Export { image, .. } => image,
-        XboxCmd::Import { .. } => unreachable!("handled above"),
+        XboxCmd::Import { .. } | XboxCmd::Status { .. } => unreachable!("handled above"),
     };
+    if let Some(why) = xbox::image_in_use(image) {
+        eprintln!("warning: the image is in use ({why}); what is read from it now may be half-made. Close xemu first");
+    }
     let mut hdd = xbox::FileHdd::open(image).with_context(|| format!("reading {}", image.display()))?;
     if hdd.device().is_dirty() {
         eprintln!("warning: QEMU marked this image dirty (not closed cleanly, or xemu is running it); what follows may be mid-update");
@@ -320,7 +338,7 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
             std::fs::write(&out, &zip).with_context(|| format!("writing {}", out.display()))?;
             println!("{}  {} bytes  content_hash {}", out.display(), zip.len(), unit::content_hash(&zip));
         }
-        XboxCmd::Import { .. } => unreachable!("handled above"),
+        XboxCmd::Import { .. } | XboxCmd::Status { .. } => unreachable!("handled above"),
     }
     Ok(())
 }

@@ -1376,3 +1376,42 @@ async fn xemu_finds_the_title_id_by_reading_the_xbe_inside_the_xiso() {
     assert_eq!(x.st.roms[&7].identity.as_ref().unwrap().save_id, "4D530004");
     assert_eq!(query(&reqs(&server, "POST", "/api/saves").await[0])["content_hash"], want);
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn xemu_open_in_a_running_qemu_is_neither_read_nor_written_until_it_is_closed() {
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "4D530004");
+    let original = std::fs::read(&x.image).unwrap();
+    let Some(qemu) = common::QemuHolder::start(&x.image) else {
+        eprintln!("SKIPPED: qemu-io is not installed");
+        return;
+    };
+
+    // The server has a different save, so this sync would both read the disk and want to restore.
+    let server = MockServer::start().await;
+    let theirs = xbox_save_zip("4D530004", 5);
+    mock_negotiate(&server, vec![op("conflict", Some(5), "Halo.zip")]).await;
+    mock_save_content(&server, 5, theirs.clone()).await;
+    mock_save_upload(&server, "h").await;
+    mock_complete(&server).await;
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+    assert!(!rep.failed.is_empty() && rep.failed.iter().all(|f| f.contains("Close xemu")), "{rep:?}");
+    assert!(rep.uploaded.is_empty() && rep.downloaded.is_empty() && rep.archived.is_empty(), "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty() && reqs(&server, "GET", "/api/saves/5/content").await.is_empty());
+    assert_eq!(std::fs::read(&x.image).unwrap(), original, "QEMU's image was not touched");
+
+    // xemu closed: the very same sync now goes through and puts the server's save on the disk.
+    qemu.stop(&x.image);
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("conflict", Some(5), "Halo.zip")]).await;
+    mock_save_content(&server, 5, theirs.clone()).await;
+    mock_save_upload(&server, "h").await;
+    mock_complete(&server).await;
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::ServerWins).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean() && rep.downloaded == ["Halo.zip"], "{rep:?}");
+    assert_eq!(unit::content_hash(&xemu_export(&x.image, "4D530004").unwrap()), unit::content_hash(&theirs));
+}

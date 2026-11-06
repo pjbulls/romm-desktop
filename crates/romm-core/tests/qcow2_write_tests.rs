@@ -158,8 +158,8 @@ fn a_crash_midway_is_undone_the_next_time_the_image_is_opened() {
             let (off, data) = random_write(&mut rng, size, cs);
             disk.write_at(off, &data).unwrap();
         }
-        // The process dies here: no commit, no rollback, nothing runs.
-        std::mem::forget(disk);
+        // The process dies here: no commit, no rollback, nothing runs (a dropped Qcow2 does neither).
+        drop(disk);
         assert!(journal_path(&img).exists());
         assert_ne!(file_bytes(&img), before);
 
@@ -230,7 +230,7 @@ fn an_image_that_is_in_use_or_not_ours_is_refused() {
     let mut d = open_rw(&other);
     d.begin(Some(&journal_path(&other))).unwrap();
     d.write_at(0x1000, b"x").unwrap();
-    std::mem::forget(d);
+    drop(d);
     let mine = t.path().join("mine.qcow2");
     std::fs::copy(fixture("hdd-v3.qcow2"), &mine).unwrap();
     std::fs::rename(journal_path(&other), journal_path(&mine)).unwrap();

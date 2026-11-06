@@ -33,7 +33,8 @@ windows = [
 #
 # Restoring a save replaces that one folder inside the image. The write is journaled (a failure or
 # a crash puts the image back exactly), confined to that folder, and read back before it is made
-# permanent. It needs xemu closed: the image is refused while QEMU flags it as in use.
+# permanent. It needs xemu closed: an image another program has open is neither read nor written,
+# and is held while it is being written so that xemu cannot open it mid-restore (see `xbox::lock`).
 [saves]
 mode = "hdd"
 
