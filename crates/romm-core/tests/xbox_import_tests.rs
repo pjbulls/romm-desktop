@@ -504,3 +504,115 @@ fn deleted_slots_are_reused_before_the_directory_grows() {
     let order: Vec<String> = hdd.titles().unwrap().into_iter().map(|t| t.save_id).collect();
     assert_eq!(order, ["00000002", "00000004", "00000003"]);
 }
+
+// ---- the age of a save --------------------------------------------------------------------------
+
+type When = (u16, u8, u8, u8, u8, u8);
+
+fn timed_zip(root: &str, files: &[(&str, Vec<u8>, Option<When>)]) -> Vec<u8> {
+    let mut z = ZipWriter::new(Cursor::new(Vec::new()));
+    for (p, data, when) in files {
+        let mut o = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        if let Some((y, mo, d, h, mi, s)) = when {
+            o = o.last_modified_time(zip::DateTime::from_date_and_time(*y, *mo, *d, *h, *mi, *s).unwrap());
+        }
+        z.start_file(format!("{root}/{p}"), o).unwrap();
+        z.write_all(data).unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
+fn local(w: When) -> std::time::SystemTime {
+    use chrono::TimeZone;
+    let naive = chrono::NaiveDate::from_ymd_opt(w.0 as i32, w.1 as u32, w.2 as u32).unwrap().and_hms_opt(w.3 as u32, w.4 as u32, w.5 as u32).unwrap();
+    chrono::Local.from_local_datetime(&naive).earliest().unwrap().into()
+}
+
+fn entry_times(zip: &[u8]) -> BTreeMap<String, (u16, u8, u8, u8, u8, u8)> {
+    let mut z = zip::ZipArchive::new(Cursor::new(zip)).unwrap();
+    (0..z.len())
+        .filter_map(|i| {
+            let f = z.by_index(i).unwrap();
+            if f.is_dir() {
+                return None;
+            }
+            let t = f.last_modified().unwrap();
+            Some((f.name().to_string(), (t.year(), t.month(), t.day(), t.hour(), t.minute(), t.second())))
+        })
+        .collect()
+}
+
+#[test]
+fn a_save_keeps_the_time_of_every_file_through_a_restore_and_an_export() {
+    let t = tempfile::tempdir().unwrap();
+    let img = copy_fixture(t.path(), "hdd-v3.qcow2");
+    let a: When = (2019, 1, 2, 3, 4, 6);
+    let b: When = (2021, 12, 31, 23, 59, 58); // the newest
+    let c: When = (2020, 3, 4, 5, 6, 8);
+    let zip = timed_zip("4D530004", &[("a.bin", blob(1, 100), Some(a)), ("d/b.bin", blob(2, 40_000), Some(b)), ("c.bin", blob(3, 5), Some(c))]);
+    import_save(&img, "4D530004", &zip).unwrap();
+
+    let save = FileHdd::open(&img).unwrap().export_save("4D530004").unwrap().unwrap();
+    assert_eq!(save.modified, Some(local(b)), "the save is as old as its newest file");
+    assert_eq!(
+        entry_times(&save.zip),
+        BTreeMap::from([("4D530004/a.bin".to_string(), a), ("4D530004/c.bin".to_string(), c), ("4D530004/d/b.bin".to_string(), b)]),
+        "every file comes back out with the time it went in with"
+    );
+    // The times are not part of what RomM compares, so the same save still hashes the same.
+    assert_eq!(content_hash(&save.zip), content_hash(&zip));
+    check_qemu(&img);
+}
+
+#[test]
+fn the_age_of_a_save_does_not_depend_on_the_disk_image_file() {
+    let t = tempfile::tempdir().unwrap();
+    let img = copy_fixture(t.path(), "hdd-v3.qcow2");
+    let w: When = (2020, 3, 4, 12, 0, 0);
+    import_save(&img, "4D530004", &timed_zip("4D530004", &[("a.bin", blob(1, 10), Some(w))])).unwrap();
+    let age = |p: &Path| FileHdd::open(p).unwrap().export_save("4D530004").unwrap().unwrap().modified;
+    let before = age(&img);
+
+    // Touched today, and copied (which is what a fresh disk image is): the save is as old as ever.
+    std::fs::OpenOptions::new().write(true).open(&img).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+    let copy = t.path().join("copy.qcow2");
+    std::fs::copy(&img, &copy).unwrap();
+    assert_eq!(before, Some(local(w)));
+    assert_eq!(age(&img), before);
+    assert_eq!(age(&copy), before);
+}
+
+#[test]
+fn a_zip_without_times_gives_the_files_the_time_of_the_restore_and_never_1980() {
+    let t = tempfile::tempdir().unwrap();
+    let img = copy_fixture(t.path(), "hdd-v3.qcow2");
+    // No time at all (the zip format's default is 1980), as zips from before times were kept have.
+    import_save(&img, "4D530004", &timed_zip("4D530004", &[("a.bin", blob(1, 10), None)])).unwrap();
+    let m = FileHdd::open(&img).unwrap().export_save("4D530004").unwrap().unwrap().modified.expect("a real time was written");
+    let age = std::time::SystemTime::now().duration_since(m).unwrap_or_default();
+    assert!(age < std::time::Duration::from_secs(300), "stamped with about now, not {age:?} ago");
+}
+
+#[test]
+fn a_console_clock_that_ran_ahead_never_makes_a_save_newer_than_now() {
+    let t = tempfile::tempdir().unwrap();
+    let img = copy_fixture(t.path(), "hdd-v3.qcow2");
+    import_save(&img, "4D530004", &timed_zip("4D530004", &[("a.bin", blob(1, 10), Some((2099, 6, 7, 8, 9, 10)))])).unwrap();
+    let m = FileHdd::open(&img).unwrap().export_save("4D530004").unwrap().unwrap().modified.unwrap();
+    assert!(m <= std::time::SystemTime::now(), "nothing written by a console can be from the future");
+}
+
+#[test]
+fn console_times_decode_only_when_they_are_real_dates() {
+    use romm_core::xbox::fatx::FatxTime;
+    // Round trips, including the extremes of a day; seconds are kept to the nearest 2.
+    for p in [(2000, 1, 1, 0, 0, 0), (2020, 3, 4, 5, 6, 8), (2026, 11, 6, 23, 59, 58), (2127, 12, 31, 23, 59, 58), (2024, 2, 29, 12, 0, 0)] {
+        assert_eq!(FatxTime::new(p.0, p.1, p.2, p.3, p.4, p.5).parts(), Some(p), "{p:?}");
+    }
+    assert_eq!(FatxTime::new(2020, 3, 4, 5, 6, 9).parts().unwrap().5, 8, "odd seconds round down");
+    // A disk that never had a clock, or damaged words, is not a date.
+    for (time, date) in [(0u16, 0u16), (0, 0xFFFF), (0xFFFF, 0), (0xFFFF, 0xFFFF), (0, (20 << 9) | (13 << 5) | 1), (0, (20 << 9) | (2 << 5) | 31), ((24 << 11), (20 << 9) | (1 << 5) | 1)] {
+        assert_eq!((FatxTime { date, time }).parts(), None, "date {date:#06x} time {time:#06x}");
+    }
+    assert_eq!(FatxTime { date: 0, time: 0 }.to_system_time(), None);
+}

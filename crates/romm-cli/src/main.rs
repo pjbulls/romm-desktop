@@ -323,8 +323,11 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
         XboxCmd::Titles { .. } => {
             let titles = hdd.titles()?;
             for t in &titles {
-                match hdd.export_zip(&t.save_id) {
-                    Ok(Some(zip)) => println!("{}  UDATA\\{}  (zip {} bytes)", t.save_id, t.dir_name, zip.len()),
+                match hdd.export_save(&t.save_id) {
+                    Ok(Some(save)) => {
+                        let age = save.modified.map_or("no usable date".to_string(), |m| format!("saved {}", chrono::DateTime::<chrono::Local>::from(m).format("%Y-%m-%d %H:%M")));
+                        println!("{}  UDATA\\{}  (zip {} bytes, {age})", t.save_id, t.dir_name, save.zip.len());
+                    }
                     Ok(None) => println!("{}  UDATA\\{}  (no save files)", t.save_id, t.dir_name),
                     Err(e) => println!("{}  UDATA\\{}  (unreadable: {e})", t.save_id, t.dir_name),
                 }

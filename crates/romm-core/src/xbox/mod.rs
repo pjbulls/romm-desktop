@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use thiserror::Error;
 use zip::write::SimpleFileOptions;
@@ -232,6 +233,12 @@ impl<D: BlockRead> XboxHdd<D> {
     /// `UDATA\<save id>`. `None` when the title has no folder or no files, as Argosy refuses an
     /// empty archive too. TDATA is not included (Argosy's unit does not carry it either).
     pub fn export_zip(&mut self, save_id: &str) -> XboxResult<Option<Vec<u8>>> {
+        Ok(self.export_save(save_id)?.map(|s| s.zip))
+    }
+
+    /// The same, with how old the save is: the newest write time of any file in it, which is a
+    /// property of the save and not of whichever disk image or copy of one holds it.
+    pub fn export_save(&mut self, save_id: &str) -> XboxResult<Option<SaveExport>> {
         if !is_title_id(save_id) {
             return Err(XboxError::Fatx(format!("{save_id:?} is not an 8-digit title id")));
         }
@@ -247,18 +254,28 @@ impl<D: BlockRead> XboxHdd<D> {
             return Ok(None);
         }
 
-        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        // Nothing written by a console can be from the future; a clock that says so was wrong.
+        let now = SystemTime::now();
+        let modified = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::File(_, _, t) => t.to_system_time(),
+                Node::Dir(..) => None,
+            })
+            .max()
+            .map(|t| t.min(now));
+
         let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
         for node in nodes {
             match node {
-                Node::Dir(path) => zw.add_directory(path, opts)?,
-                Node::File(path, data) => {
-                    zw.start_file(path, opts)?;
+                Node::Dir(path, t) => zw.add_directory(path, zip_options(t))?,
+                Node::File(path, data, t) => {
+                    zw.start_file(path, zip_options(t))?;
                     zw.write_all(&data)?;
                 }
             }
         }
-        Ok(Some(zw.finish()?.into_inner()))
+        Ok(Some(SaveExport { zip: zw.finish()?.into_inner(), modified }))
     }
 
     fn collect(
@@ -284,23 +301,53 @@ impl<D: BlockRead> XboxHdd<D> {
                 if !seen.insert(e.first_cluster) {
                     return Err(XboxError::Fatx("folder structure loops back on itself".into()));
                 }
-                out.push(Node::Dir(path.clone()));
+                out.push(Node::Dir(path.clone(), e.modified));
                 self.collect(e.first_cluster, &path, depth + 1, seen, out, budget)?;
             } else {
                 *budget = budget
                     .checked_sub(e.size as u64)
                     .ok_or_else(|| XboxError::Fatx(format!("save is larger than {} MiB", MAX_EXPORT_BYTES >> 20)))?;
                 let data = self.fs.read_file(&e)?;
-                out.push(Node::File(path, data));
+                out.push(Node::File(path, data, e.modified));
             }
         }
         Ok(())
     }
 }
 
+/// A save read out of the disk.
+pub struct SaveExport {
+    /// The zip, Argosy's shape. Its entries carry the times the console wrote them.
+    pub zip: Vec<u8>,
+    /// The newest write time of any file in it, if the disk's clock held anything usable.
+    pub modified: Option<SystemTime>,
+}
+
+/// Zip entry options carrying `t` as the entry's time, when it is a real one.
+fn zip_options(t: FatxTime) -> SimpleFileOptions {
+    let base = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let dt = t.parts().and_then(|(y, mo, d, h, mi, s)| {
+        zip::DateTime::from_date_and_time(u16::try_from(y).ok()?, mo as u8, d as u8, h as u8, mi as u8, s as u8).ok()
+    });
+    match dt {
+        Some(dt) => base.last_modified_time(dt),
+        None => base,
+    }
+}
+
+/// The console time for a zip entry's time. Zips that carry no time hold the format's earliest
+/// (1980); that, and anything before the console existed, means "unknown", not a date.
+fn fatx_time_from_zip(dt: Option<zip::DateTime>) -> Option<FatxTime> {
+    let dt = dt?;
+    if !(2001..=2127).contains(&dt.year()) {
+        return None;
+    }
+    Some(FatxTime::new(dt.year() as i32, dt.month() as u32, dt.day() as u32, dt.hour() as u32, dt.minute() as u32, dt.second() as u32))
+}
+
 enum Node {
-    Dir(String),
-    File(String, Vec<u8>),
+    Dir(String, FatxTime),
+    File(String, Vec<u8>, FatxTime),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -324,6 +371,8 @@ struct SaveNode {
     rel: String,
     /// `None` for a folder.
     data: Option<Vec<u8>>,
+    /// The time the zip records for it, when it records a real one.
+    modified: Option<FatxTime>,
 }
 
 /// Reads and vets a save zip (Argosy's shape: everything under `<TITLE ID>/`) before anything is
@@ -368,7 +417,7 @@ fn parse_save_zip(save_id: &str, bytes: &[u8]) -> XboxResult<Vec<SaveNode>> {
                 Some(SaveNode { data: Some(_), .. }) => return Err(bad(format!("{raw:?} is inside a file"))),
                 Some(_) => {}
                 None => {
-                    nodes.insert(key(n), SaveNode { rel: rel_comps[..n].join("/"), data: None });
+                    nodes.insert(key(n), SaveNode { rel: rel_comps[..n].join("/"), data: None, modified: None });
                 }
             }
         }
@@ -378,7 +427,7 @@ fn parse_save_zip(save_id: &str, bytes: &[u8]) -> XboxResult<Vec<SaveNode>> {
                 Some(SaveNode { data: Some(_), .. }) => return Err(bad(format!("{raw:?} is both a file and a folder"))),
                 Some(_) => {}
                 None => {
-                    nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: None });
+                    nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: None, modified: fatx_time_from_zip(f.last_modified()) });
                 }
             }
         } else {
@@ -394,7 +443,7 @@ fn parse_save_zip(save_id: &str, bytes: &[u8]) -> XboxResult<Vec<SaveNode>> {
                 return Err(bad(format!("it is larger than {} MiB", MAX_EXPORT_BYTES >> 20)));
             }
             budget -= data.len() as u64;
-            nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: Some(data) });
+            nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: Some(data), modified: fatx_time_from_zip(f.last_modified()) });
         }
     }
     if !nodes.values().any(|n| n.data.is_some()) {
@@ -470,12 +519,12 @@ impl<D: BlockRead + BlockWrite> XboxHdd<D> {
             let parent_first = dirs[&parent.to_ascii_lowercase()];
             match &n.data {
                 None => {
-                    let c = self.fs.create_dir(parent_first, name, ts)?;
+                    let c = self.fs.create_dir(parent_first, name, n.modified.unwrap_or(ts))?;
                     dirs.insert(n.rel.to_ascii_lowercase(), c);
                     folders += 1;
                 }
                 Some(d) => {
-                    self.fs.create_file(parent_first, name, d, ts)?;
+                    self.fs.create_file(parent_first, name, d, n.modified.unwrap_or(ts))?;
                     files += 1;
                     bytes += d.len() as u64;
                 }
@@ -491,8 +540,8 @@ impl<D: BlockRead + BlockWrite> XboxHdd<D> {
         let got: HashMap<String, Option<Vec<u8>>> = got
             .into_iter()
             .map(|n| match n {
-                Node::Dir(p) => (p, None),
-                Node::File(p, d) => (p, Some(d)),
+                Node::Dir(p, _) => (p, None),
+                Node::File(p, d, _) => (p, Some(d)),
             })
             .collect();
         let want: HashMap<String, Option<Vec<u8>>> =

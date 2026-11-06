@@ -1415,3 +1415,75 @@ async fn xemu_open_in_a_running_qemu_is_neither_read_nor_written_until_it_is_clo
     assert!(rep.is_clean() && rep.downloaded == ["Halo.zip"], "{rep:?}");
     assert_eq!(unit::content_hash(&xemu_export(&x.image, "4D530004").unwrap()), unit::content_hash(&theirs));
 }
+
+// ---- how old a save is: the save's own age, never the disk image's ----------------------------
+
+/// A save zip for `root` whose files carry the time `(y, m, d)` at noon, as the console stamps them.
+fn xbox_save_zip_at(root: &str, marker: u8, (y, m, d): (u16, u8, u8)) -> Vec<u8> {
+    use std::io::Write as _;
+    let o = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::from_date_and_time(y, m, d, 12, 0, 0).unwrap());
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    z.start_file(format!("{root}/TitleMeta.xbx"), o).unwrap();
+    z.write_all(&vec![marker; 700]).unwrap();
+    z.start_file(format!("{root}/SaveMeta.xbx"), o).unwrap();
+    z.write_all(&vec![marker ^ 0x55; 5000]).unwrap();
+    z.finish().unwrap().into_inner()
+}
+
+/// Noon local time on that date, as RomM would be told it (UTC), whatever zone this runs in.
+fn noon_iso((y, m, d): (i32, u32, u32)) -> String {
+    use chrono::TimeZone;
+    let naive = chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(12, 0, 0).unwrap();
+    saves::iso(chrono::Local.from_local_datetime(&naive).earliest().unwrap().into())
+}
+
+#[tokio::test]
+async fn an_old_save_in_a_freshly_made_disk_image_is_not_reported_as_new() {
+    // The scenario: this machine last exchanged a NEWER save with the server (record below). xemu is
+    // now pointed at a different copy of the disk, one made today, that holds an OLDER save. The
+    // copy's own file time is "now"; the save's is March 2020.
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "4D530004");
+    romm_core::xbox::import_save(&x.image, "4D530004", &xbox_save_zip_at("4D530004", 1, (2020, 3, 4))).unwrap();
+    // Make sure the image really looks brand new, however fast this ran.
+    std::fs::OpenOptions::new().write(true).open(&x.image).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+    x.st.saves.insert(
+        save_key(7, "xemu"),
+        romm_core::state::SaveRecord { last_hash: Some("HASH-OF-THE-NEWER-SAVE".into()), server_save_id: Some(5), server_updated_at: Some(SERVER_TIME.into()), ..Default::default() },
+    );
+
+    let c = client(&server);
+    syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+    let neg: Value = reqs(&server, "POST", "/api/sync/negotiate").await[0].body_json().unwrap();
+    let told = neg["saves"][0]["updated_at"].as_str().unwrap().to_string();
+    assert_eq!(told, noon_iso((2020, 3, 4)), "the server must be told how old the SAVE is");
+    assert!(told.as_str() < SERVER_TIME, "an old save must not look newer than the server's: {told} vs {SERVER_TIME}");
+    assert_ne!(neg["saves"][0]["content_hash"], "HASH-OF-THE-NEWER-SAVE", "it is a different save, and says so");
+}
+
+#[tokio::test]
+async fn a_save_keeps_its_age_when_it_is_restored_and_reported_again() {
+    // Device 1 holds a March 2020 save. It is restored onto another disk; that disk must then report
+    // March 2020 too, not the day of the restore.
+    let t = tempfile::tempdir().unwrap();
+    let theirs = xbox_save_zip_at("55550001", 9, (2020, 3, 4));
+    let server = MockServer::start().await;
+    mock_negotiate_once(&server, vec![op("download", Some(99), "Halo.zip")]).await;
+    mock_negotiate(&server, vec![]).await;
+    mock_save_content(&server, 99, theirs).await;
+    mock_complete(&server).await;
+    let mut x = xemu_setup(t.path(), "55550001");
+    let c = client(&server);
+    syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+    let aged = romm_core::xbox::FileHdd::open(&x.image).unwrap().export_save("55550001").unwrap().unwrap();
+    let got = chrono::DateTime::<chrono::Utc>::from(aged.modified.unwrap()).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    assert_eq!(got, noon_iso((2020, 3, 4)), "restored files keep the time the save has, to the second the console can store");
+}

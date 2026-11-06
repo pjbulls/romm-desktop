@@ -175,16 +175,22 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                     image.display()
                 )));
             }
-            let Some(data) = hdd.export_zip(save_id)? else { return Ok(None) };
+            let Some(save) = hdd.export_save(save_id)? else { return Ok(None) };
+            let data = save.zip;
             let hash = unit::content_hash(&data);
             Ok(Some(LocalUnit {
                 emulator: plan.label.clone(),
                 slot: SLOT.into(),
                 file_name: upload_name(&rom.stem, "zip"),
                 size: data.len() as u64,
-                // The disk image's own timestamp: the folder's are not read. A save that has not
-                // changed is reported with the server's timestamp anyway (see `reported`).
-                modified: std::fs::metadata(image)?.modified()?,
+                // How old the save is: the newest time the console stamped on one of its files. NOT
+                // the disk image's own timestamp, which changes whenever xemu runs or the image is
+                // copied, and would make an old save in a fresh copy look newer than the server's.
+                // Only a disk whose clock holds nothing usable falls back to the image's time.
+                modified: match save.modified {
+                    Some(t) => t,
+                    None => std::fs::metadata(image)?.modified()?,
+                },
                 changed: last != Some(hash.as_str()),
                 hash,
                 kind: LocalKind::Bytes(data),

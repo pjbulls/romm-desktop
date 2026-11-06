@@ -46,6 +46,8 @@ pub struct DirEntry {
     pub attributes: u8,
     pub first_cluster: u32,
     pub size: u32,
+    /// When the console last wrote it (its own clock, local time).
+    pub modified: FatxTime,
 }
 
 impl DirEntry {
@@ -214,6 +216,7 @@ impl<D: BlockRead> Fatx<D> {
                             attributes: raw[1],
                             first_cluster: u32::from_le_bytes(raw[44..48].try_into().unwrap()),
                             size: u32::from_le_bytes(raw[48..52].try_into().unwrap()),
+                            modified: FatxTime::from_entry(raw),
                         });
                     }
                 }
@@ -265,6 +268,36 @@ impl FatxTime {
             date: (y << 9) | ((month as u16 & 0xF) << 5) | (day as u16 & 0x1F),
             time: ((hour as u16 & 0x1F) << 11) | ((minute as u16 & 0x3F) << 5) | ((second as u16 / 2) & 0x1F),
         }
+    }
+
+    /// The last-write time of a raw 64-byte directory entry (time at 56, date at 58).
+    pub fn from_entry(raw: &[u8]) -> Self {
+        FatxTime {
+            time: u16::from_le_bytes([raw[56], raw[57]]),
+            date: u16::from_le_bytes([raw[58], raw[59]]),
+        }
+    }
+
+    /// (year, month, day, hour, minute, second), if the words hold a real date and time. A disk
+    /// that was never given a clock, or a damaged entry, holds nonsense; that is not guessed at.
+    pub fn parts(&self) -> Option<(i32, u32, u32, u32, u32, u32)> {
+        let year = 2000 + (self.date >> 9) as i32;
+        let month = ((self.date >> 5) & 0xF) as u32;
+        let day = (self.date & 0x1F) as u32;
+        let hour = (self.time >> 11) as u32;
+        let minute = ((self.time >> 5) & 0x3F) as u32;
+        let second = ((self.time & 0x1F) * 2) as u32;
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+        Some((year, month, day, hour, minute, second))
+    }
+
+    /// As a point in time, reading the console's clock as this machine's local time (xemu keeps
+    /// the guest on the host's clock).
+    pub fn to_system_time(&self) -> Option<std::time::SystemTime> {
+        use chrono::TimeZone;
+        let (y, mo, d, h, mi, s) = self.parts()?;
+        let naive = chrono::NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
+        Some(Local.from_local_datetime(&naive).earliest()?.into())
     }
 
     /// Local time, as the console's clock is.
@@ -401,6 +434,7 @@ impl<D: BlockRead + BlockWrite> Fatx<D> {
                                 attributes: raw[1],
                                 first_cluster: u32::from_le_bytes(raw[44..48].try_into().unwrap()),
                                 size: u32::from_le_bytes(raw[48..52].try_into().unwrap()),
+                                modified: FatxTime::from_entry(raw),
                             },
                         });
                     }
