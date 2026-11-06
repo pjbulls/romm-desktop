@@ -74,11 +74,22 @@ enum XboxCmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Put a save zip (<ID>/..., as `export` writes) into the image, replacing that game's UDATA folder.
+    /// All or nothing: a failure, or a crash, leaves the image exactly as it was. Close xemu first,
+    /// and keep a copy of the image if it matters: this changes it
+    Import {
+        image: PathBuf,
+        /// The save zip
+        zip: PathBuf,
+        /// The title id it is for (default: the zip's root folder)
+        #[arg(long)]
+        title: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Inspect saves inside an xemu disk image (read-only)
+    /// Inspect saves inside an xemu disk image, or put one back
     Xbox {
         #[command(subcommand)]
         cmd: XboxCmd,
@@ -272,8 +283,19 @@ fn print_state_report(r: &StateReport) {
 }
 
 fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
+    if let XboxCmd::Import { image, zip, title } = &cmd {
+        let bytes = std::fs::read(zip).with_context(|| format!("reading {}", zip.display()))?;
+        let id = match title {
+            Some(t) => t.to_ascii_uppercase(),
+            None => xbox::zip_title_id(&bytes).ok_or_else(|| anyhow!("can't tell which game this zip is for; its root folder is not a title id. Pass --title"))?,
+        };
+        let s = xbox::import_save(image, &id, &bytes).with_context(|| format!("importing into {}", image.display()))?;
+        println!("{id}: {} file(s), {} folder(s), {} bytes written; verified by reading them back", s.files, s.dirs, s.bytes);
+        return Ok(());
+    }
     let image = match &cmd {
         XboxCmd::Titles { image } | XboxCmd::Export { image, .. } => image,
+        XboxCmd::Import { .. } => unreachable!("handled above"),
     };
     let mut hdd = xbox::FileHdd::open(image).with_context(|| format!("reading {}", image.display()))?;
     if hdd.device().is_dirty() {
@@ -298,6 +320,7 @@ fn xbox_cmd(cmd: XboxCmd) -> Result<()> {
             std::fs::write(&out, &zip).with_context(|| format!("writing {}", out.display()))?;
             println!("{}  {} bytes  content_hash {}", out.display(), zip.len(), unit::content_hash(&zip));
         }
+        XboxCmd::Import { .. } => unreachable!("handled above"),
     }
     Ok(())
 }

@@ -18,6 +18,7 @@ code it shares nothing with:
 | `hdd-v2.qcow2` | legacy v2 (`compat=0.10`) |
 | `hdd-compressed.qcow2` | zlib-compressed clusters (`-c`) |
 | `hdd-4k.qcow2` | 4 KiB clusters, so many L2 tables |
+| `hdd-snapshot.qcow2` | `hdd-v3` plus an internal snapshot (`qemu-img snapshot -c`), so every cluster and L2 table is shared |
 | `small-fat16.qcow2` | a 32 MiB FAT16 partition at offset `0x100000` (E: is always FAT32) |
 
 Partition E sits where a retail disk puts it (`0xABE80000`, `0x1312D6000` long), 16 KiB clusters.

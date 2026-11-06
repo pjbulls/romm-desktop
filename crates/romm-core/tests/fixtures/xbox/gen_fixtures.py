@@ -10,7 +10,7 @@ Nothing here ships in romm-desktop; it exists so the Rust qcow2/FATX code is tes
 implementations it shares no code with. Needs: pip install pyfatx; qemu-img on PATH.
 Regenerate:  python3 gen_fixtures.py   (writes next to this script)
 """
-import hashlib, json, os, subprocess, sys, tempfile
+import hashlib, json, os, shutil, subprocess, sys, tempfile
 import pyfatx
 from pyfatx import Fatx, pyfatx_open_helper, fatx_disk_format_partition
 
@@ -237,6 +237,11 @@ def build_all(tmp):
     }
     for name, opts in variants.items():
         qemu(raw, os.path.join(HERE, name), *opts)
+    # An internal snapshot, as xemu's Machine > Snapshots makes: afterwards every cluster and L2
+    # table is shared between the snapshot and the running disk, so none may be written in place.
+    snap = os.path.join(HERE, "hdd-snapshot.qcow2")
+    shutil.copy(os.path.join(HERE, "hdd-v3.qcow2"), snap)
+    subprocess.run(["qemu-img", "snapshot", "-c", "before-save", snap], check=True)
 
     sraw = os.path.join(tmp, "s.img")
     def small(fs):

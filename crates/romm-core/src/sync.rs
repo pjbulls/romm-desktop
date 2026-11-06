@@ -76,9 +76,6 @@ pub fn identity_for(state: &mut State, rom: &LocalRom) -> Identity {
     id
 }
 
-/// Why a save RomM holds is never put back into xemu: nothing writes to its disk image yet.
-const XEMU_UPLOAD_ONLY: &str = "restoring a save into xemu's hard disk isn't supported yet, so the server's copy was not applied";
-
 /// What a game's local save is made of.
 #[derive(Debug, Clone)]
 pub enum LocalKind {
@@ -87,7 +84,7 @@ pub enum LocalKind {
     /// A unit Sigil collected from the emulator's files.
     Unit(unit::Unit),
     /// Bytes read out of something that is not a file of its own (a folder in xemu's disk image).
-    /// Never restored from here, so nothing local is ever overwritten or deleted on its account.
+    /// Put back with `xbox::import_save`, never by writing a file.
     Bytes(Vec<u8>),
 }
 
@@ -532,8 +529,9 @@ impl<'a> Syncer<'a> {
 
     async fn download(&mut self, cx: &Cx<'_>, save_id: i64, server_updated_at: Option<String>, report: &mut SyncReport) -> Result<()> {
         let plan = cx.plan.ok_or_else(|| Error::msg("this emulator has no save rule"))?;
-        if matches!(plan.kind, Kind::Xbox { .. }) {
-            return Err(Error::msg(XEMU_UPLOAD_ONLY));
+        // Find out before downloading anything whether the disk can take it.
+        if let Kind::Xbox { image, .. } = &plan.kind {
+            xbox::check_writable(image).map_err(|e| Error::msg(format!("the server's save was not applied: {e}. Close xemu and sync again")))?;
         }
         let bytes = self.client.download_save(save_id, self.device_id, cx.session_id).await?;
         let hash = unit::content_hash(&bytes);
@@ -541,8 +539,20 @@ impl<'a> Syncer<'a> {
         let backup = self.backup_dir.join(&stamp).join(&plan.label);
 
         let name = match &plan.kind {
-            // Refused above, before anything was downloaded; kept so nothing here can write to it.
-            Kind::Xbox { .. } => return Err(Error::msg(XEMU_UPLOAD_ONLY)),
+            Kind::Xbox { image, save_id: title } => {
+                if !saves::is_zip(&bytes) {
+                    return Err(Error::msg("the server's save for this game isn't a zip of its UDATA folder, so it wasn't applied to xemu"));
+                }
+                // Keep what is there, in the form that would have been uploaded.
+                if let Some(LocalUnit { kind: LocalKind::Bytes(b), file_name, .. }) = cx.local {
+                    std::fs::create_dir_all(&backup)?;
+                    std::fs::write(backup.join(file_name), b)?;
+                }
+                // All or nothing, verified by reading it back; a failure leaves the disk as it was.
+                xbox::import_save(image, title, &bytes)?;
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                upload_name(&cx.rom.stem, "zip")
+            }
             Kind::Raw { path, exists } => {
                 if saves::is_zip(&bytes) {
                     return Err(Error::msg(format!(
@@ -641,18 +651,13 @@ impl<'a> Syncer<'a> {
             // Nothing local to protect: just take the server's.
             return self.download(cx, server_id, op.server_updated_at.clone(), report).await;
         };
-        // Both of these end by taking the server's save, which can't be applied to xemu's disk. Stop
-        // before the first half (keeping both would archive another copy on the server every sync).
-        if matches!(cx.plan, Some(Plan { kind: Kind::Xbox { .. }, .. }))
-            && matches!(self.policy, ConflictPolicy::KeepBoth | ConflictPolicy::ServerWins)
-        {
-            report.conflicts.push(PendingConflict {
-                rom_id: cx.rom.rom_id,
-                file_name: local.file_name.clone(),
-                server_updated_at: op.server_updated_at.clone(),
-                reason: Some(format!("{XEMU_UPLOAD_ONLY}. Choose \"device wins\" to replace the server's copy with the one on this disk")),
-            });
-            return Ok(());
+        // Both of these end by writing the server's save to xemu's disk. If it can't be written right
+        // now, find out before the first half: keeping both would otherwise archive another copy of the
+        // local save on the server at every sync while the restore keeps failing.
+        if let Some(Plan { kind: Kind::Xbox { image, .. }, .. }) = cx.plan {
+            if matches!(self.policy, ConflictPolicy::KeepBoth | ConflictPolicy::ServerWins) {
+                xbox::check_writable(image).map_err(|e| Error::msg(format!("the conflict was not settled: {e}. Close xemu and sync again")))?;
+            }
         }
         match self.policy {
             ConflictPolicy::Ask => {

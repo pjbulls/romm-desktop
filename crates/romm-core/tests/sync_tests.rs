@@ -1067,45 +1067,157 @@ async fn xemu_save_that_has_not_changed_is_not_uploaded_again() {
     assert_eq!(reqs(&server, "POST", "/api/saves").await.len(), 1);
 }
 
-#[tokio::test]
-async fn xemu_never_writes_a_server_save_into_the_disk_image() {
-    let server = MockServer::start().await;
-    mock_negotiate(&server, vec![op("download", Some(99), "Halo.zip")]).await;
-    mock_complete(&server).await;
+/// A save zip in Argosy's shape for `root`, as another device would have uploaded it.
+fn xbox_save_zip(root: &str, marker: u8) -> Vec<u8> {
+    use std::io::Write as _;
+    let o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    z.add_directory(format!("{root}/slot0"), o).unwrap();
+    z.start_file(format!("{root}/TitleMeta.xbx"), o).unwrap();
+    z.write_all(&vec![marker; 700]).unwrap();
+    z.start_file(format!("{root}/slot0/SaveMeta.xbx"), o).unwrap();
+    z.write_all(&(0..40_000u32).map(|i| (i as u8) ^ marker).collect::<Vec<u8>>()).unwrap();
+    z.finish().unwrap().into_inner()
+}
 
-    let t = tempfile::tempdir().unwrap();
-    // A title whose folder has no files: this machine has nothing, the server has a save.
-    let mut x = xemu_setup(t.path(), "55550001");
-    let before = std::fs::read(&x.image).unwrap();
-    let c = client(&server);
-    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+async fn mock_save_content(server: &MockServer, id: i64, bytes: Vec<u8>) {
+    Mock::given(method("GET")).and(path(format!("/api/saves/{id}/content"))).respond_with(ResponseTemplate::new(200).set_body_bytes(bytes)).mount(server).await;
+}
 
-    assert!(rep.downloaded.is_empty(), "{rep:?}");
-    assert_eq!(rep.failed.len(), 1, "{rep:?}");
-    assert!(rep.failed[0].contains("isn't supported yet"), "{rep:?}");
-    assert!(reqs(&server, "GET", "/api/saves/99/content").await.is_empty(), "nothing is downloaded for a save that can't be applied");
-    assert_eq!(std::fs::read(&x.image).unwrap(), before);
+fn xemu_export(image: &Path, id: &str) -> Option<Vec<u8>> {
+    romm_core::xbox::FileHdd::open(image).unwrap().export_zip(id).unwrap()
 }
 
 #[tokio::test]
-async fn xemu_conflict_is_never_settled_by_taking_the_servers_save() {
+async fn xemu_restores_a_server_save_into_the_disk_image_and_then_agrees_with_the_server() {
+    let server = MockServer::start().await;
+    let theirs = xbox_save_zip("55550001", 7);
+    let want = unit::content_hash(&theirs);
+    // A title whose folder has no files: this machine has nothing, the server has a save.
+    mock_negotiate_once(&server, vec![op("download", Some(99), "Halo.zip")]).await;
+    mock_negotiate(&server, vec![op("no_op", Some(99), "Halo.zip")]).await;
+    mock_save_content(&server, 99, theirs.clone()).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "55550001");
+    let others_before: Vec<_> = ["4D530004", "41430001", "54430003"].map(|id| xemu_export(&x.image, id)).to_vec();
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(rep.downloaded, ["Halo.zip"]);
+    assert_eq!(unit::content_hash(&xemu_export(&x.image, "55550001").unwrap()), want, "the disk now holds exactly the server's save");
+    let after: Vec<_> = ["4D530004", "41430001", "54430003"].map(|id| xemu_export(&x.image, id)).to_vec();
+    assert_eq!(after, others_before, "no other game's save may change");
+    assert_eq!(x.st.saves[&save_key(7, "xemu")].last_hash.as_deref(), Some(want.as_str()));
+    assert!(!romm_core::xbox::qcow2::journal_path(&x.image).exists());
+    if common::qemu::available() {
+        common::qemu::check(&x.image).unwrap();
+    }
+
+    // Next sync: what is on the disk is what the server has, so nothing moves in either direction.
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.downloaded.is_empty() && rep.unchanged == 1, "{rep:?}");
+    let neg: Value = reqs(&server, "POST", "/api/sync/negotiate").await[1].body_json().unwrap();
+    assert_eq!(neg["saves"][0]["content_hash"], want.as_str(), "the disk reports the very hash the server holds");
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty());
+}
+
+#[tokio::test]
+async fn xemu_conflict_policies_each_do_what_they_say() {
     for policy in [ConflictPolicy::KeepBoth, ConflictPolicy::ServerWins, ConflictPolicy::Ask] {
         let server = MockServer::start().await;
+        let theirs = xbox_save_zip("4D530004", 3);
         mock_negotiate(&server, vec![op("conflict", Some(5), "Halo.zip")]).await;
+        mock_save_content(&server, 5, theirs.clone()).await;
+        Mock::given(method("POST"))
+            .and(path("/api/saves"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(stored_json(12, "archived", "h")))
+            .mount(&server)
+            .await;
+        mock_complete(&server).await;
+
+        let t = tempfile::tempdir().unwrap();
+        let mut x = xemu_setup(t.path(), "4D530004");
+        let mine = xemu_export(&x.image, "4D530004").unwrap();
+        let bak = t.path().join("bak");
+        let c = client(&server);
+        let rep = syncer(&c, &mut x.st, &bak, policy).sync_rom(&x.rom, &x.env, None).await.unwrap();
+        let on_disk = xemu_export(&x.image, "4D530004").unwrap();
+        let uploads = reqs(&server, "POST", "/api/saves").await.len();
+
+        match policy {
+            ConflictPolicy::Ask => {
+                assert_eq!(rep.conflicts.len(), 1, "{rep:?}");
+                assert_eq!(on_disk, mine, "asking changes nothing");
+                assert_eq!(uploads, 0);
+            }
+            ConflictPolicy::KeepBoth => {
+                assert!(rep.is_clean() && rep.downloaded == ["Halo.zip"] && rep.archived.len() == 1, "{rep:?}");
+                assert_eq!(unit::content_hash(&on_disk), unit::content_hash(&theirs));
+                assert_eq!(uploads, 1, "the local save went to the server as an archive first");
+                // ...and a copy of it stays on this machine, in the form that would have been uploaded.
+                let kept = std::fs::read(walk(&bak).into_iter().find(|p| p.ends_with("Halo.zip")).expect("a backup of the replaced save")).unwrap();
+                assert_eq!(unit::content_hash(&kept), unit::content_hash(&mine));
+            }
+            _ => {
+                assert!(rep.is_clean() && rep.downloaded == ["Halo.zip"], "{rep:?}");
+                assert_eq!(unit::content_hash(&on_disk), unit::content_hash(&theirs));
+                assert_eq!(uploads, 0, "server wins: nothing is archived");
+                assert!(walk(&bak).iter().any(|p| p.ends_with("Halo.zip")), "even then, what was replaced is kept");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn xemu_checks_the_disk_can_be_written_before_it_downloads_or_archives_anything() {
+    for op_kind in ["download", "conflict"] {
+        let server = MockServer::start().await;
+        mock_negotiate(&server, vec![op(op_kind, Some(5), "Halo.zip")]).await;
+        mock_save_content(&server, 5, xbox_save_zip("4D530004", 3)).await;
+        Mock::given(method("POST")).and(path("/api/saves")).respond_with(ResponseTemplate::new(201).set_body_json(stored_json(12, "archived", "h"))).mount(&server).await;
+        mock_complete(&server).await;
+
+        let t = tempfile::tempdir().unwrap();
+        let mut x = xemu_setup(t.path(), "4D530004");
+        let mut img = std::fs::read(&x.image).unwrap();
+        img[79] |= 1; // QEMU's "in use" flag: xemu has the disk open
+        std::fs::write(&x.image, &img).unwrap();
+        let c = client(&server);
+        let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+
+        // However many ways it is reported, each says what to do, and nothing moved.
+        assert!(!rep.failed.is_empty() && rep.failed.iter().all(|f| f.contains("Close xemu")), "{op_kind}: {rep:?}");
+        assert!(rep.failed.iter().all(|f| !f.contains("image it ")), "{op_kind}: {rep:?}");
+        assert!(rep.downloaded.is_empty() && rep.archived.is_empty() && rep.uploaded.is_empty(), "{op_kind}: {rep:?}");
+        assert!(reqs(&server, "GET", "/api/saves/5/content").await.is_empty(), "{op_kind}: nothing downloaded");
+        assert!(reqs(&server, "POST", "/api/saves").await.is_empty(), "{op_kind}: no archive copy uploaded for a restore that cannot happen");
+        assert_eq!(std::fs::read(&x.image).unwrap(), img, "{op_kind}: the disk is untouched");
+    }
+}
+
+#[tokio::test]
+async fn xemu_refuses_a_server_save_that_is_not_this_games_and_leaves_the_disk_alone() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("another game's folder", xbox_save_zip("11111111", 1)),
+        ("not a zip", b"just some bytes".to_vec()),
+    ];
+    for (what, bytes) in cases {
+        let server = MockServer::start().await;
+        mock_negotiate(&server, vec![op("download", Some(99), "Halo.zip")]).await;
+        mock_save_content(&server, 99, bytes).await;
         mock_complete(&server).await;
         let t = tempfile::tempdir().unwrap();
         let mut x = xemu_setup(t.path(), "4D530004");
         let before = std::fs::read(&x.image).unwrap();
         let c = client(&server);
-        let rep = syncer(&c, &mut x.st, &t.path().join("bak"), policy).sync_rom(&x.rom, &x.env, None).await.unwrap();
-
-        assert_eq!(rep.conflicts.len(), 1, "{policy:?}: {rep:?}");
-        assert!(rep.failed.is_empty() && rep.downloaded.is_empty() && rep.archived.is_empty(), "{policy:?}: {rep:?}");
-        // Keeping both would archive a copy on the server at every sync; none of these may upload.
-        assert!(reqs(&server, "POST", "/api/saves").await.is_empty(), "{policy:?}");
-        assert!(reqs(&server, "PUT", "/api/saves/5").await.is_empty(), "{policy:?}");
-        assert!(reqs(&server, "GET", "/api/saves/5/content").await.is_empty(), "{policy:?}");
-        assert_eq!(std::fs::read(&x.image).unwrap(), before, "{policy:?}");
+        let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+        assert_eq!(rep.failed.len(), 1, "{what}: {rep:?}");
+        assert!(rep.downloaded.is_empty(), "{what}");
+        assert_eq!(std::fs::read(&x.image).unwrap(), before, "{what}: the disk must be byte-for-byte as it was");
+        assert!(!x.st.saves.contains_key(&save_key(7, "xemu")) || x.st.saves[&save_key(7, "xemu")].last_hash.is_none(), "{what}: nothing is recorded as synced");
     }
 }
 

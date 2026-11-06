@@ -315,3 +315,90 @@ pub fn vmu_with_both() -> Vec<u8> {
 pub fn vmu_before_play() -> Vec<u8> {
     vmu(&[("OTHER_SAV", &[9u8; 512])])
 }
+
+// ---------------------------------------------------------------------------------------------
+// QEMU as the referee for xemu disk images. The tests that need it skip (loudly) where
+// `qemu-img` is not installed; where it is, it judges the image independently of this crate.
+// ---------------------------------------------------------------------------------------------
+
+pub mod qemu {
+    use std::path::Path;
+    use std::process::Command;
+
+    pub fn available() -> bool {
+        Command::new("qemu-img").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    /// `qemu-img check`: every refcount, L1 and L2 entry consistent, nothing leaked or corrupt.
+    pub fn check(img: &Path) -> Result<(), String> {
+        let out = Command::new("qemu-img").args(["check", "-f", "qcow2"]).arg(img).output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        if out.status.success() && text.contains("No errors were found") {
+            Ok(())
+        } else {
+            Err(format!("qemu-img check ({}):\n{text}", out.status))
+        }
+    }
+
+    /// The guest disk as a sparse raw file, read by QEMU.
+    pub fn to_raw(img: &Path, raw: &Path) {
+        let st = Command::new("qemu-img").args(["convert", "-f", "qcow2", "-O", "raw"]).arg(img).arg(raw).status().unwrap();
+        assert!(st.success(), "qemu-img convert failed");
+    }
+
+    /// Whether QEMU reads the two disks as identical (a raw model against a qcow2 image).
+    pub fn same_disk(raw: &Path, img: &Path) -> Result<(), String> {
+        let out = Command::new("qemu-img").args(["compare", "-f", "raw", "-F", "qcow2"]).arg(raw).arg(img).output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!("qemu-img compare ({}): {}", out.status, String::from_utf8_lossy(&out.stdout)))
+        }
+    }
+}
+
+/// A file that starts failing after a set number of writes, to stop a transaction at every point.
+pub struct Flaky {
+    pub f: std::fs::File,
+    pub left: std::rc::Rc<std::cell::Cell<i64>>,
+}
+impl Flaky {
+    fn spend(&self) -> std::io::Result<()> {
+        let n = self.left.get();
+        if n == 0 {
+            return Err(std::io::Error::other("injected failure"));
+        }
+        if n > 0 {
+            self.left.set(n - 1);
+        }
+        Ok(())
+    }
+}
+impl std::io::Read for Flaky {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        self.f.read(b)
+    }
+}
+impl std::io::Write for Flaky {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.spend()?;
+        self.f.write(b)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.f.flush()
+    }
+}
+impl std::io::Seek for Flaky {
+    fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.f.seek(p)
+    }
+}
+impl romm_core::xbox::qcow2::BackingFile for Flaky {
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.spend()?;
+        self.f.set_len(len)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.f.sync_all()
+    }
+}

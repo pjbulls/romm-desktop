@@ -31,8 +31,9 @@ windows = [
 # xemu.toml, usually xbox_hdd.qcow2), so they are read out of the image by title id rather than
 # found as files (see `xbox`). One game's save travels as `<TITLE ID>.zip`, as Argosy's does.
 #
-# UPLOAD ONLY, for now: nothing here writes to the image, so a save RomM holds is never put
-# back into xemu. Rewriting a multi-GB disk that the emulator also writes needs its own care.
+# Restoring a save replaces that one folder inside the image. The write is journaled (a failure or
+# a crash puts the image back exactly), confined to that folder, and read back before it is made
+# permanent. It needs xemu closed: the image is refused while QEMU flags it as in use.
 [saves]
 mode = "hdd"
 

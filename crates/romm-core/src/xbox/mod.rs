@@ -7,22 +7,24 @@
 //! (what Sigil calls `save_id`), UDATA only. RomM's `content_hash` of a zip covers entry names and
 //! contents and nothing else, which is why two clients can agree on a save they stored differently.
 //!
-//! Reading only, for now. Nothing in this module writes to the image, and it takes no lock, so
+//! Reading is the default. Writing a save back ([`import_save`]) is journaled end to end (see
+//! `qcow2`), touches nothing but `UDATA\<title id>` and the bookkeeping it needs, and reads the
+//! folder back and compares it with the zip before it is made permanent. Nothing takes a lock, so
 //! callers must only open an image xemu is not running.
 
 pub mod fatx;
 pub mod qcow2;
 
-use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufReader, Cursor, Write};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
+use zip::{ZipArchive, ZipWriter};
 
-use fatx::{DirEntry, Fatx};
+use fatx::{DirEntry, Fatx, FatxTime};
 use qcow2::Qcow2;
 
 pub type XboxResult<T> = std::result::Result<T, XboxError>;
@@ -56,6 +58,17 @@ impl<T: BlockRead + ?Sized> BlockRead for &mut T {
     }
 }
 
+/// A disk that can also be written (qcow2 with a transaction open, or memory in tests).
+pub trait BlockWrite: BlockRead {
+    fn write_at(&mut self, off: u64, data: &[u8]) -> XboxResult<()>;
+}
+
+impl<T: BlockWrite + ?Sized> BlockWrite for &mut T {
+    fn write_at(&mut self, off: u64, data: &[u8]) -> XboxResult<()> {
+        (**self).write_at(off, data)
+    }
+}
+
 /// A disk held in memory, for tests and tools.
 pub struct MemDisk(pub Vec<u8>);
 
@@ -67,6 +80,15 @@ impl BlockRead for MemDisk {
         let end = off.checked_add(buf.len() as u64).filter(|&e| e <= self.0.len() as u64);
         let Some(end) = end else { return Err(XboxError::Fatx("read past the end of the disk".into())) };
         buf.copy_from_slice(&self.0[off as usize..end as usize]);
+        Ok(())
+    }
+}
+
+impl BlockWrite for MemDisk {
+    fn write_at(&mut self, off: u64, data: &[u8]) -> XboxResult<()> {
+        let end = off.checked_add(data.len() as u64).filter(|&e| e <= self.0.len() as u64);
+        let Some(end) = end else { return Err(XboxError::Fatx("write past the end of the disk".into())) };
+        self.0[off as usize..end as usize].copy_from_slice(data);
         Ok(())
     }
 }
@@ -122,6 +144,9 @@ pub type FileHdd = XboxHdd<Qcow2<BufReader<File>>>;
 impl FileHdd {
     /// Opens an xemu qcow2 image and its E: partition.
     pub fn open(path: &Path) -> XboxResult<Self> {
+        // An interrupted write is undone before anything is read: its half-written folder must
+        // never be mistaken for a save.
+        qcow2::recover_journal(path)?;
         let disk = Qcow2::new(BufReader::new(File::open(path)?))?;
         Self::open_e(disk)
     }
@@ -163,6 +188,11 @@ impl<D: BlockRead> XboxHdd<D> {
         Err(last_err.unwrap_or_else(|| XboxError::Fatx("no usable E: partition".into())))
     }
 
+    /// A partition at an explicit place on an already opened disk (non-retail layouts, test images).
+    pub fn with_region(disk: D, offset: u64, size: u64) -> XboxResult<Self> {
+        Ok(XboxHdd { fs: Fatx::open(disk, offset, size)? })
+    }
+
     pub fn fatx(&mut self) -> &mut Fatx<D> {
         &mut self.fs
     }
@@ -170,6 +200,14 @@ impl<D: BlockRead> XboxHdd<D> {
     /// The disk underneath (for its own state, such as qcow2's dirty flag).
     pub fn device(&self) -> &D {
         self.fs.device()
+    }
+
+    pub fn device_mut(&mut self) -> &mut D {
+        self.fs.device_mut()
+    }
+
+    pub fn into_device(self) -> D {
+        self.fs.into_device()
     }
 
     fn udata(&mut self) -> XboxResult<Option<DirEntry>> {
@@ -262,4 +300,245 @@ impl<D: BlockRead> XboxHdd<D> {
 enum Node {
     Dir(String),
     File(String, Vec<u8>),
+}
+
+// ---------------------------------------------------------------------------------------------
+// Putting a save back
+// ---------------------------------------------------------------------------------------------
+
+/// Most entries a save zip may hold; no real save has more than a few dozen.
+const MAX_ZIP_ENTRIES: usize = 20_000;
+
+/// What an import did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub files: usize,
+    pub dirs: usize,
+    pub bytes: u64,
+}
+
+/// One entry of a save zip, below the title folder.
+struct SaveNode {
+    /// Path under the title folder, `/`-separated.
+    rel: String,
+    /// `None` for a folder.
+    data: Option<Vec<u8>>,
+}
+
+/// Reads and vets a save zip (Argosy's shape: everything under `<TITLE ID>/`) before anything is
+/// written. Anything the console could not hold, or that tries to reach outside the title folder,
+/// is refused outright. Parents come before the things in them.
+fn parse_save_zip(save_id: &str, bytes: &[u8]) -> XboxResult<Vec<SaveNode>> {
+    let bad = |m: String| XboxError::Fatx(format!("the save zip can't be restored: {m}"));
+    let mut z = ZipArchive::new(Cursor::new(bytes))?;
+    if z.len() > MAX_ZIP_ENTRIES {
+        return Err(bad(format!("it has {} entries", z.len())));
+    }
+    let mut nodes: BTreeMap<String, SaveNode> = BTreeMap::new();
+    let mut budget = MAX_EXPORT_BYTES;
+    for i in 0..z.len() {
+        let mut f = z.by_index(i)?;
+        let raw = f.name().to_string();
+        if raw.contains('\\') || raw.starts_with('/') || raw.contains('\0') {
+            return Err(bad(format!("entry {raw:?} has an unsafe path")));
+        }
+        let is_dir = f.is_dir() || raw.ends_with('/');
+        let comps: Vec<&str> = raw.trim_end_matches('/').split('/').collect();
+        if !comps[0].eq_ignore_ascii_case(save_id) {
+            return Err(bad(format!("entry {raw:?} is not inside the folder {}", save_id.to_ascii_uppercase())));
+        }
+        if comps.len() == 1 {
+            if !is_dir {
+                return Err(bad(format!("{raw:?} is a file where the title folder should be")));
+            }
+            continue;
+        }
+        let rel_comps = &comps[1..];
+        if rel_comps.len() > MAX_DEPTH {
+            return Err(bad(format!("{raw:?} is nested too deeply")));
+        }
+        for c in rel_comps {
+            fatx::check_name(c).map_err(|e| bad(e.to_string()))?;
+        }
+        let key = |n: usize| rel_comps[..n].join("/").to_ascii_lowercase();
+        // The folders above it exist whether or not the zip lists them.
+        for n in 1..rel_comps.len() {
+            match nodes.get(&key(n)) {
+                Some(SaveNode { data: Some(_), .. }) => return Err(bad(format!("{raw:?} is inside a file"))),
+                Some(_) => {}
+                None => {
+                    nodes.insert(key(n), SaveNode { rel: rel_comps[..n].join("/"), data: None });
+                }
+            }
+        }
+        let k = key(rel_comps.len());
+        if is_dir {
+            match nodes.get(&k) {
+                Some(SaveNode { data: Some(_), .. }) => return Err(bad(format!("{raw:?} is both a file and a folder"))),
+                Some(_) => {}
+                None => {
+                    nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: None });
+                }
+            }
+        } else {
+            if nodes.contains_key(&k) {
+                return Err(bad(format!("{raw:?} appears twice (names are not case-sensitive)")));
+            }
+            if f.size() > budget || f.size() > u32::MAX as u64 {
+                return Err(bad(format!("it is larger than {} MiB", MAX_EXPORT_BYTES >> 20)));
+            }
+            let mut data = Vec::with_capacity(f.size() as usize);
+            f.by_ref().take(budget + 1).read_to_end(&mut data)?;
+            if data.len() as u64 > budget {
+                return Err(bad(format!("it is larger than {} MiB", MAX_EXPORT_BYTES >> 20)));
+            }
+            budget -= data.len() as u64;
+            nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: Some(data) });
+        }
+    }
+    if !nodes.values().any(|n| n.data.is_some()) {
+        return Err(bad("it holds no files".into()));
+    }
+    Ok(nodes.into_values().collect())
+}
+
+impl<D: BlockRead + BlockWrite> XboxHdd<D> {
+    /// Replaces `E:\UDATA\<save id>` with the contents of `zip` (Argosy's shape). The folder and
+    /// everything in it is swapped as one: what the zip does not hold is removed. It then reads the
+    /// result back, and fails if it is not exactly the zip. Nothing is permanent until the caller
+    /// commits the disk's transaction, so a failure here is for the caller to roll back.
+    pub fn import_zip(&mut self, save_id: &str, zip: &[u8]) -> XboxResult<ImportSummary> {
+        if !is_title_id(save_id) {
+            return Err(XboxError::Fatx(format!("{save_id:?} is not an 8-digit title id")));
+        }
+        let nodes = parse_save_zip(save_id, zip)?;
+        let bpc = self.fs.bytes_per_cluster();
+        let per_dir = bpc / 64;
+
+        // Room, counting what the folder being replaced gives back. Directory growth is allowed for.
+        let udata_existing = self.udata()?;
+        let existing = match &udata_existing {
+            Some(u) => self.fs.find(u.first_cluster, save_id)?,
+            None => None,
+        };
+        let freed = match &existing {
+            Some(e) => self.fs.clusters_used(e)?,
+            None => 0,
+        };
+        let mut children: HashMap<String, u64> = HashMap::new();
+        let mut need = 2u64; // the title folder and UDATA, if it must be made
+        for n in &nodes {
+            let parent = n.rel.rsplit_once('/').map_or("", |(p, _)| p).to_ascii_lowercase();
+            *children.entry(parent).or_default() += 1;
+            need += match &n.data {
+                None => 1,
+                Some(d) => (d.len() as u64).div_ceil(bpc).max(1),
+            };
+        }
+        need += children.values().map(|&c| c.div_ceil(per_dir).saturating_sub(1)).sum::<u64>();
+        self.fs.begin_write()?;
+        let free = self.fs.free_clusters()? + freed;
+        if free < need {
+            return Err(XboxError::Fatx(format!(
+                "not enough free space on the Xbox hard disk: the save needs {} KiB and {} KiB is free",
+                need * bpc / 1024,
+                free * bpc / 1024
+            )));
+        }
+
+        let ts = FatxTime::now();
+        let root = self.fs.root_cluster();
+        let udata = match udata_existing {
+            Some(u) => u.first_cluster,
+            None => self.fs.create_dir(root, "UDATA", ts)?,
+        };
+        // Keep the name the folder has; a new one is named as the console names them.
+        let dir_name = match &existing {
+            Some(e) => e.name.clone(),
+            None => save_id.to_ascii_lowercase(),
+        };
+        if existing.is_some() {
+            self.fs.remove(udata, &dir_name)?;
+        }
+        let title = self.fs.create_dir(udata, &dir_name, ts)?;
+
+        let mut dirs: HashMap<String, u32> = HashMap::from([(String::new(), title)]);
+        let (mut files, mut folders, mut bytes) = (0, 0, 0u64);
+        for n in &nodes {
+            let (parent, name) = n.rel.rsplit_once('/').unwrap_or(("", &n.rel));
+            let parent_first = dirs[&parent.to_ascii_lowercase()];
+            match &n.data {
+                None => {
+                    let c = self.fs.create_dir(parent_first, name, ts)?;
+                    dirs.insert(n.rel.to_ascii_lowercase(), c);
+                    folders += 1;
+                }
+                Some(d) => {
+                    self.fs.create_file(parent_first, name, d, ts)?;
+                    files += 1;
+                    bytes += d.len() as u64;
+                }
+            }
+        }
+        self.fs.flush_fat()?;
+
+        // Trust nothing: read it back and compare, name for name and byte for byte.
+        let root_name = save_id.to_ascii_uppercase();
+        let mut got = Vec::new();
+        let mut budget = MAX_EXPORT_BYTES;
+        self.collect(title, &root_name, 0, &mut HashSet::from([title]), &mut got, &mut budget)?;
+        let got: HashMap<String, Option<Vec<u8>>> = got
+            .into_iter()
+            .map(|n| match n {
+                Node::Dir(p) => (p, None),
+                Node::File(p, d) => (p, Some(d)),
+            })
+            .collect();
+        let want: HashMap<String, Option<Vec<u8>>> =
+            nodes.into_iter().map(|n| (format!("{root_name}/{}", n.rel), n.data)).collect();
+        if got != want {
+            return Err(XboxError::Fatx("what was written does not read back as the save it was given".into()));
+        }
+        Ok(ImportSummary { files, dirs: folders, bytes })
+    }
+}
+
+/// Whether [`import_save`] could write to `image` right now: not in use, and nothing in it that
+/// the writer can't handle. Cheap, and changes nothing (except undoing an interrupted write).
+pub fn check_writable(image: &Path) -> XboxResult<()> {
+    let hdd = FileHdd::open(image)?;
+    match hdd.device().write_blocker() {
+        Some(why) => Err(XboxError::Fatx(format!("the disk image {why}"))),
+        None => Ok(()),
+    }
+}
+
+/// The title id a save zip is for: its root folder, when that is eight hex digits (upper-cased).
+pub fn zip_title_id(zip: &[u8]) -> Option<String> {
+    let mut z = ZipArchive::new(Cursor::new(zip)).ok()?;
+    let name = z.by_index(0).ok()?.name().to_string();
+    let root = name.split('/').next()?;
+    is_title_id(root).then(|| root.to_ascii_uppercase())
+}
+
+/// Puts `zip` (a save in Argosy's shape) into the E: partition of the xemu image at `image`, as the
+/// folder `UDATA\<save id>`. All or nothing: a failure leaves the image exactly as it was, and so
+/// does a crash (the next open of the image undoes it). The image must not be open in xemu.
+pub fn import_save(image: &Path, save_id: &str, zip: &[u8]) -> XboxResult<ImportSummary> {
+    qcow2::recover_journal(image)?;
+    let file = OpenOptions::new().read(true).write(true).open(image)?;
+    let mut hdd = XboxHdd::open_e(Qcow2::new(file)?)?;
+    hdd.device_mut().begin(Some(&qcow2::journal_path(image)))?;
+    match hdd.import_zip(save_id, zip) {
+        Ok(summary) => {
+            hdd.device_mut().commit()?;
+            Ok(summary)
+        }
+        Err(e) => match hdd.device_mut().rollback() {
+            Ok(()) => Err(e),
+            Err(r) => Err(XboxError::Fatx(format!(
+                "{e}; and undoing it failed too ({r}). The image will be put back the next time it is opened"
+            ))),
+        },
+    }
 }
