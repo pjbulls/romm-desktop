@@ -74,6 +74,10 @@ pub enum SaveMode {
     /// Saves live inside a virtual hard-disk image (xemu): read out of it by title id, one zip per
     /// game (`xbox`). Only meaningful as a *save* rule; there is no such thing for states.
     Hdd,
+    /// A game's saves are a folder tree the emulator keeps under its own data folder (Xenia's
+    /// `content/<profile>/<title id>/00000001`), zipped as one unit per game (`xenia`). Only
+    /// meaningful as a *save* rule.
+    Folder,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +140,7 @@ const BUILTIN: &[&str] = &[
     include_str!("pcsx2.toml"),
     include_str!("azahar.toml"),
     include_str!("xemu.toml"),
+    include_str!("xenia.toml"),
 ];
 
 pub fn builtin() -> Vec<Profile> {
@@ -157,14 +162,14 @@ mod tests {
     const LAUNCH_ONLY: &[&str] = &[];
 
     /// Emulators whose saves can be read (and uploaded) but that have no save-state or BIOS rule:
-    /// xemu keeps both inside its virtual hard disk image.
-    const SAVES_ONLY: &[&str] = &["xemu"];
+    /// xemu keeps both inside its virtual hard disk image, and Xenia has neither feature.
+    const SAVES_ONLY: &[&str] = &["xemu", "xenia"];
 
     #[test]
     fn all_builtin_profiles_parse_and_are_complete() {
         let ps = builtin();
         let ids: Vec<_> = ps.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["retroarch", "dolphin", "ppsspp", "duckstation", "pcsx2", "azahar", "xemu"]);
+        assert_eq!(ids, ["retroarch", "dolphin", "ppsspp", "duckstation", "pcsx2", "azahar", "xemu", "xenia"]);
         for p in &ps {
             assert!(p.launch.args.iter().any(|a| a == "{rom}"), "{} launch has no {{rom}}", p.id);
             if LAUNCH_ONLY.contains(&p.id.as_str()) {
@@ -236,5 +241,40 @@ mod azahar_xemu_tests {
         assert_eq!(p.launch.args, ["-dvd_path", "{rom}"]);
         assert_eq!(p.saves.unwrap().mode, SaveMode::Hdd);
         assert!(p.states.is_none() && p.bios.is_none());
+    }
+}
+
+#[cfg(test)]
+mod xenia_tests {
+    use super::*;
+
+    #[test]
+    fn xenia_plays_xbox_360_only_and_leaves_the_original_xbox_to_xemu() {
+        let p = get("xenia").unwrap();
+        assert_eq!(p.platforms, ["xbox360"]);
+        assert!(!get("xemu").unwrap().platforms.contains(&"xbox360".to_string()));
+        assert!(!p.platforms.contains(&"xbox".to_string()));
+    }
+
+    /// `--` ends option parsing, so a ROM named `-weird.iso` cannot be read as a flag, and the
+    /// extra args (which launch.rs puts first) still land before it.
+    #[test]
+    fn the_game_is_a_positional_argument_after_double_dash() {
+        assert_eq!(get("xenia").unwrap().launch.args, ["--", "{rom}"]);
+    }
+
+    #[test]
+    fn xenia_syncs_saves_by_folder_and_has_no_states_or_bios() {
+        let p = get("xenia").unwrap();
+        assert_eq!(p.saves.unwrap().mode, SaveMode::Folder);
+        assert!(p.states.is_none(), "Xenia has no save states");
+        assert!(p.bios.is_none(), "Xenia needs no BIOS");
+    }
+
+    #[test]
+    fn there_is_no_flatpak_to_detect() {
+        let p = get("xenia").unwrap();
+        assert!(p.detect.flatpak_id.is_none());
+        assert!(p.data.flatpak.is_empty());
     }
 }

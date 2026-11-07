@@ -1,7 +1,7 @@
 id = "xemu"
 name = "xemu"
-# Original Xbox only. Xbox 360 (`xbox360`) is deliberately not claimed: its emulator
-# (Xenia) is effectively Windows-only.
+# Original Xbox only. Xbox 360 (`xbox360`) is a different console with a different emulator:
+# see xenia.toml.
 platforms = ["xbox"]
 
 [detect]

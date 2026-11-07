@@ -1,0 +1,53 @@
+id = "xenia"
+name = "Xenia Canary"
+platforms = ["xbox360"]
+
+[detect]
+# Canary's executable is `xenia_canary` (OUTPUT_NAME in src/xenia/app/CMakeLists.txt). The Linux
+# release is an AppImage (`xenia_canary_linux.AppImage` in Canary's Linux CI) or a tarball holding
+# the bare binary. There is no Flatpak, so `flatpak_id` is deliberately absent.
+linux_bins = ["xenia_canary", "xenia_canary.AppImage", "xenia_canary_linux.AppImage"]
+# Xenia ships as a zip, so there is no fixed install location: these are best guesses, and
+# anything else is found on PATH or via the per-emulator path override (Emulators screen).
+windows_exes = [
+  "{localappdata}/Programs/Xenia/xenia_canary.exe",
+  "{programfiles}/Xenia/xenia_canary.exe",
+]
+
+# The game is Xenia's positional `target` argument (.iso, .xex or .zar). `--` stops option
+# parsing (cxxopts honours it), so a file name that starts with `-` cannot be read as a flag.
+# Extra args (`--fullscreen`, `--gpu=vulkan`, ...) come first, ahead of the `--`.
+[launch]
+args = ["--", "{rom}"]
+
+# The data root is Xenia's *storage root*: it holds `xenia-canary.config.toml` and `content/`.
+# Canary (src/xenia/app/xenia_main.cc) picks it like this:
+#   * the executable's own folder if `portable.txt` is next to it, or in portable mode, which is
+#     the DEFAULT on Windows builds (the `portable` option defaults to true there);
+#   * otherwise `<user folder>/Xenia`: `Documents\Xenia` on Windows, `$XDG_DATA_HOME/Xenia`
+#     (default `~/.local/share/Xenia`) on Linux.
+# A Linux AppImage runs from a read-only mount, so it can never be portable.
+[data]
+linux = [
+  { path = "{exe_dir}", requires = "{exe_dir}/portable.txt" },
+  "{xdg_data}/Xenia",
+]
+windows = [
+  # Portable: an explicit marker, or the config file a portable run leaves next to the exe.
+  { path = "{exe_dir}", requires = "{exe_dir}/portable.txt" },
+  { path = "{exe_dir}", requires = "{exe_dir}/xenia-canary.config.toml" },
+  # Non-portable (`--portable=false`, or an older build).
+  "{documents}/Xenia",
+  # Never run yet: Canary on Windows will default to its own folder.
+  { path = "{exe_dir}", fallback = true },
+]
+
+# Xenia keeps a game's save as a plain folder tree, not inside a disk image:
+#   <data root>/content/<profile XUID>/<title id>/00000001/<package>/...
+# (`ContentManager::ResolvePackageRoot`). The folder is found by the game's title id, which Sigil
+# reads out of the ROM's default.xex, and zipped as Argosy zips it (see xenia.rs). The `content`
+# folder can be moved with `content_root` in the config; xenia.rs honours that.
+#
+# Xenia has no save states, and needs no BIOS, so neither section is present.
+[saves]
+mode = "folder"

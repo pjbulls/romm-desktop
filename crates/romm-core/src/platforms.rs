@@ -170,20 +170,22 @@ mod tests {
     }
 
     #[test]
-    fn maps_3ds_and_xbox_to_their_own_emulators() {
+    fn maps_3ds_and_both_xboxes_to_their_own_emulators() {
         let none = BTreeMap::new();
         assert_eq!(emulator_for("3ds", &none).unwrap(), "azahar");
         assert_eq!(emulator_for("new-nintendo-3ds", &none).unwrap(), "azahar");
         assert_eq!(emulator_for("xbox", &none).unwrap(), "xemu");
+        assert_eq!(emulator_for("xbox360", &none).unwrap(), "xenia");
     }
 
     #[test]
-    fn ds_stays_on_retroarch_and_xbox360_is_unclaimed() {
+    fn ds_stays_on_retroarch_and_the_two_xboxes_do_not_share_an_emulator() {
         let none = BTreeMap::new();
         // No standalone DS profile: save sync for DS goes through RetroArch's melonDS core.
         assert_eq!(emulator_for("nds", &none).unwrap(), "retroarch");
-        // xemu is original Xbox only.
-        assert!(emulator_for("xbox360", &none).is_none());
+        // xemu is original Xbox only and Xenia is Xbox 360 only; neither is offered for the other.
+        assert!(!can_play("xbox360", "xemu"));
+        assert!(!can_play("xbox", "xenia"));
     }
 
     #[test]
@@ -231,6 +233,7 @@ mod choice_tests {
         assert_eq!(values("3ds"), ["azahar"]);
         assert_eq!(values("new-nintendo-3ds"), ["azahar"]);
         assert_eq!(values("xbox"), ["xemu"]);
+        assert_eq!(values("xbox360"), ["xenia"]);
         assert_eq!(values("ps2"), ["pcsx2"]);
         assert_eq!(values("psp"), ["ppsspp"]);
         assert_eq!(values("ngc"), ["dolphin"]);
@@ -252,7 +255,6 @@ mod choice_tests {
     #[test]
     fn unsupported_platforms_offer_nothing() {
         assert!(choices_for("switch").is_empty());
-        assert!(choices_for("xbox360").is_empty());
         assert!(choices_for("not-a-platform").is_empty());
     }
 
@@ -356,6 +358,9 @@ mod choice_tests {
         let err = set_choice(&mut e, &mut k, "gb", Some("retroarch:mupen64plus_next")).unwrap_err();
         assert_eq!(err, "RetroArch · Mupen64Plus-Next can't play 'gb' games");
         assert!(set_choice(&mut e, &mut k, "xbox", Some("dolphin:gambatte")).is_err());
+        // Xenia is Xbox 360 only, and xemu is original Xbox only.
+        assert_eq!(set_choice(&mut e, &mut k, "xbox", Some("xenia")).unwrap_err(), "Xenia Canary can't play 'xbox' games");
+        assert_eq!(set_choice(&mut e, &mut k, "xbox360", Some("xemu")).unwrap_err(), "xemu can't play 'xbox360' games");
     }
 
     #[test]

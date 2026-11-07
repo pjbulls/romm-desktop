@@ -188,4 +188,34 @@ mod tests {
         let p = profiles::get("duckstation").unwrap();
         assert!(detect(&p, None, Os::Linux, &PathCtx::default(), None).is_none());
     }
+
+    #[test]
+    fn finds_xenia_canary_by_every_linux_release_name() {
+        let t = tempfile::tempdir().unwrap();
+        for name in ["xenia_canary", "xenia_canary.AppImage", "xenia_canary_linux.AppImage"] {
+            let dir = t.path().join(name);
+            touch(&dir.join(name));
+            let path = std::env::join_paths([&dir]).unwrap();
+            let got = detect(&profiles::get("xenia").unwrap(), None, Os::Linux, &PathCtx::default(), Some(&path))
+                .unwrap_or_else(|| panic!("{name} not found"));
+            assert_eq!(got.kind, InstallKind::Native(dir.join(name)));
+        }
+    }
+
+    #[test]
+    fn xenia_is_never_detected_as_a_flatpak() {
+        let t = tempfile::tempdir().unwrap();
+        let ctx = PathCtx { xdg_data: Some(t.path().join("share")), ..Default::default() };
+        std::fs::create_dir_all(t.path().join("share/flatpak/app/app.xemu.xemu")).unwrap();
+        assert!(detect(&profiles::get("xenia").unwrap(), None, Os::Linux, &ctx, None).is_none());
+    }
+
+    #[test]
+    fn windows_known_locations_for_xenia() {
+        let t = tempfile::tempdir().unwrap();
+        touch(&t.path().join("LA/Programs/Xenia/xenia_canary.exe"));
+        let ctx = PathCtx { localappdata: Some(t.path().join("LA")), ..Default::default() };
+        let got = detect(&profiles::get("xenia").unwrap(), None, Os::Windows, &ctx, None).unwrap();
+        assert_eq!(got.exe_dir().unwrap(), t.path().join("LA/Programs/Xenia"));
+    }
 }

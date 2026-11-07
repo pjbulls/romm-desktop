@@ -244,4 +244,44 @@ mod tests {
         let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
         assert_eq!((r.path, r.exists), (exe_dir.join("User"), false));
     }
+
+    /// Canary's storage root (xenia_main.cc): the exe folder when portable, else `<user folder>/Xenia`.
+    #[test]
+    fn xenia_data_roots_follow_canarys_storage_root_rules() {
+        let t = tempfile::tempdir().unwrap();
+        let p = profiles::get("xenia").unwrap();
+        let mut c = ctx(t.path());
+        c.appdata = Some(t.path().join("AppData"));
+        let exe_dir = t.path().join("xenia-win");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        c.exe_dir = Some(exe_dir.clone());
+
+        // Linux, not portable: $XDG_DATA_HOME/Xenia.
+        let r = resolve_data_root(&p, false, Os::Linux, &c).unwrap();
+        assert_eq!((r.path, r.exists), (t.path().join("home/.local/share/Xenia"), false));
+        // Linux with portable.txt beside the binary (the tarball build, never an AppImage).
+        std::fs::write(exe_dir.join("portable.txt"), "").unwrap();
+        let r = resolve_data_root(&p, false, Os::Linux, &c).unwrap();
+        assert_eq!((r.path, r.exists), (exe_dir.clone(), true));
+        std::fs::remove_file(exe_dir.join("portable.txt")).unwrap();
+
+        // Windows, never run: Canary defaults to portable, so its own folder.
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!((r.path, r.exists), (exe_dir.clone(), true));
+        // Windows, run with --portable=false: Documents\Xenia.
+        std::fs::create_dir_all(t.path().join("docs/Xenia")).unwrap();
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!(r.path, t.path().join("docs/Xenia"));
+        // Windows, a portable run left its config next to the exe: that wins over Documents.
+        std::fs::write(exe_dir.join("xenia-canary.config.toml"), "").unwrap();
+        let r = resolve_data_root(&p, false, Os::Windows, &c).unwrap();
+        assert_eq!(r.path, exe_dir);
+    }
+
+    #[test]
+    fn xenia_has_no_flatpak_data_root() {
+        let t = tempfile::tempdir().unwrap();
+        let p = profiles::get("xenia").unwrap();
+        assert!(resolve_data_root(&p, true, Os::Linux, &ctx(t.path())).is_none());
+    }
 }

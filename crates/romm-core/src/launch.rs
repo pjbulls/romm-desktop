@@ -108,4 +108,16 @@ mod tests {
         let c = build_command(&p, &i, Path::new("/g/-weird name.cue"), None, &[]).unwrap();
         assert_eq!(args_of(&c), ["-batch", "--", "/g/-weird name.cue"]);
     }
+
+    /// Extra flags come first and `--` guards the game, so a ROM named like a flag is still a game.
+    #[test]
+    fn xenia_takes_the_game_as_the_positional_target_after_double_dash() {
+        let p = profiles::get("xenia").unwrap();
+        let native = Installed { profile_id: "xenia".into(), kind: InstallKind::Native("/opt/xenia/xenia_canary".into()) };
+        let c = build_command(&p, &native, Path::new("/g/Halo 3.iso"), None, &[]).unwrap();
+        assert_eq!(c.as_std().get_program(), "/opt/xenia/xenia_canary");
+        assert_eq!(args_of(&c), ["--", "/g/Halo 3.iso"]);
+        let c = build_command(&p, &native, Path::new("/g/-odd.iso"), None, &["--fullscreen".into()]).unwrap();
+        assert_eq!(args_of(&c), ["--fullscreen", "--", "/g/-odd.iso"]);
+    }
 }
