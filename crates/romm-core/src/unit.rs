@@ -170,24 +170,37 @@ pub fn identify(rom: &Path, romm_platform: &str) -> Identity {
     id
 }
 
-/// A `.m3u` playlist names the discs of one game; identify from its first disc.
-fn resolve_playlist(p: &Path) -> PathBuf {
-    if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("m3u")) {
+/// Whether `p` is a `.m3u` playlist.
+pub fn is_playlist(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("m3u"))
+}
+
+/// A `.m3u` playlist names the discs of one game, in order; this is its first disc, when that file
+/// exists. Anything else (not a playlist, unreadable, empty, or naming a disc that is not there)
+/// comes back unchanged, so a caller can tell by comparing.
+///
+/// Playlists in the wild are not tidy: a byte-order mark, Windows line ends and `\` separators all
+/// occur, and a stray byte that is not UTF-8 (in a comment, say) must not discard the whole file.
+pub fn resolve_playlist(p: &Path) -> PathBuf {
+    if !is_playlist(p) {
         return p.to_path_buf();
     }
-    let Ok(text) = std::fs::read_to_string(p) else { return p.to_path_buf() };
-    let first = text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#'));
-    match first {
-        Some(l) => {
-            let candidate = p.parent().unwrap_or(Path::new("")).join(l);
-            if candidate.is_file() {
-                candidate
-            } else {
-                p.to_path_buf()
-            }
-        }
-        None => p.to_path_buf(),
+    let Ok(bytes) = std::fs::read(p) else { return p.to_path_buf() };
+    let text = String::from_utf8_lossy(&bytes);
+    let first = text.trim_start_matches('\u{feff}').lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#'));
+    let Some(line) = first else { return p.to_path_buf() };
+    let dir = p.parent().unwrap_or(Path::new(""));
+    let as_written = dir.join(line);
+    if as_written.is_file() {
+        return as_written;
     }
+    // A playlist made on Windows names `Sub\Disc 1.iso`; only convert when the name has no such
+    // character of its own (a backslash is legal in a Unix file name, so as-written wins above).
+    let portable = dir.join(line.replace('\\', "/"));
+    if portable.is_file() {
+        return portable;
+    }
+    p.to_path_buf()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -861,5 +874,55 @@ mod tests {
         // A playlist naming a missing disc falls back to the playlist itself.
         std::fs::write(t.path().join("bad.m3u"), "gone.chd\n").unwrap();
         assert_eq!(resolve_playlist(&t.path().join("bad.m3u")), t.path().join("bad.m3u"));
+    }
+
+    fn disc_dir(files: &[&str]) -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        for f in files {
+            let p = t.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        t
+    }
+
+    /// The playlist's own order decides which disc is first, not the file names' order.
+    #[test]
+    fn the_playlists_order_decides_the_first_disc() {
+        let t = disc_dir(&["MyGame (Disk 1).iso", "MyGame (Disk 2).iso"]);
+        std::fs::write(t.path().join("a.m3u"), "MyGame (Disk 2).iso\nMyGame (Disk 1).iso\n").unwrap();
+        assert_eq!(resolve_playlist(&t.path().join("a.m3u")), t.path().join("MyGame (Disk 2).iso"));
+    }
+
+    #[test]
+    fn untidy_playlists_still_resolve() {
+        let t = disc_dir(&["Disk 1.iso", "Sub/Disk 1.iso"]);
+        let m3u = t.path().join("g.m3u");
+        // A byte-order mark, Windows line ends, a comment and blank lines first.
+        std::fs::write(&m3u, "\u{feff}#EXTM3U\r\n\r\n# the first disc\r\nDisk 1.iso\r\nDisk 2.iso\r\n").unwrap();
+        assert_eq!(resolve_playlist(&m3u), t.path().join("Disk 1.iso"));
+        // A playlist made on Windows.
+        std::fs::write(&m3u, "Sub\\Disk 1.iso\r\n").unwrap();
+        assert_eq!(resolve_playlist(&m3u), t.path().join("Sub/Disk 1.iso"));
+        // A stray byte that is not UTF-8 in a comment does not discard the playlist.
+        std::fs::write(&m3u, b"# made by \xff\xfe\nDisk 1.iso\n").unwrap();
+        assert_eq!(resolve_playlist(&m3u), t.path().join("Disk 1.iso"));
+        // Names of the disc in another case, as written, are the file system's business: as-written wins.
+        std::fs::write(&m3u, "Disk 1.iso").unwrap();
+        assert_eq!(resolve_playlist(&m3u), t.path().join("Disk 1.iso"));
+    }
+
+    #[test]
+    fn a_playlist_that_names_nothing_usable_comes_back_unchanged() {
+        let t = disc_dir(&["Disk 1.iso"]);
+        let m3u = t.path().join("g.m3u");
+        for body in ["", "# only a comment\n", "gone.iso\n"] {
+            std::fs::write(&m3u, body).unwrap();
+            assert_eq!(resolve_playlist(&m3u), m3u, "{body:?}");
+        }
+        // And something that is not a playlist at all is left alone, even if it is a file.
+        assert_eq!(resolve_playlist(&t.path().join("Disk 1.iso")), t.path().join("Disk 1.iso"));
+        assert_eq!(resolve_playlist(&t.path().join("missing.m3u")), t.path().join("missing.m3u"));
+        assert!(is_playlist(Path::new("A.M3U")) && !is_playlist(Path::new("a.iso")));
     }
 }

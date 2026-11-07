@@ -19,6 +19,11 @@ windows_exes = [
 # Extra args (`--fullscreen`, `--gpu=vulkan`, ...) come first, ahead of the `--`.
 [launch]
 args = ["--", "{rom}"]
+# A multi-disc game is installed with its `.m3u` playlist as the launch file; Xenia would read that
+# as a disc image ("Failed to verify disc image header") and exit. It gets the first disc the
+# playlist lists instead. When the game wants the next disc, Xenia asks for it with its own file
+# picker (`XamSwapDisc` -> `Emulator::GetNewDiscPath`), so only the first disc is ever passed here.
+no_playlists = true
 
 # The data root is Xenia's *storage root*: it holds `xenia-canary.config.toml` and `content/`.
 # Canary (src/xenia/app/xenia_main.cc) picks it like this:

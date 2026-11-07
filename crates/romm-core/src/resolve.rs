@@ -133,4 +133,30 @@ mod tests {
         let msg = r.emu_env("pcsx2").err().unwrap().to_string();
         assert!(msg.contains("PCSX2 was not found") && msg.contains("Emulators"), "{msg}");
     }
+
+    /// The reported case, through the entry point the app and CLI use: a game installed before this
+    /// was handled has the playlist stored as its launch file, and Xenia must still get disc 1.
+    #[test]
+    fn a_multi_disc_xbox_360_game_installed_with_its_playlist_launches_on_disc_1() {
+        let t = tempfile::tempdir().unwrap();
+        let game = t.path().join("roms/xbox360/MyGame");
+        std::fs::create_dir_all(&game).unwrap();
+        for f in ["MyGame (Disk 1).iso", "MyGame (Disk 2).iso"] {
+            std::fs::write(game.join(f), "x").unwrap();
+        }
+        std::fs::write(game.join("MyGame.m3u"), "MyGame (Disk 1).iso\nMyGame (Disk 2).iso\n").unwrap();
+        let exe = t.path().join("xenia_canary");
+        std::fs::write(&exe, "").unwrap();
+        let mut cfg = Config::default();
+        cfg.emulator_paths.insert("xenia".into(), exe.clone());
+        let rom = LocalRom {
+            rom_id: 1, name: "MyGame".into(), platform_slug: "xbox360".into(), path: game.clone(),
+            launch_path: game.join("MyGame.m3u"), stem: "MyGame".into(), ..Default::default()
+        };
+        let r = Resolver { cfg: &cfg, os: Os::Linux, pctx: PathCtx { home: Some(t.path().into()), xdg_data: Some(t.path().join("share")), ..Default::default() } };
+        let p = r.prepare(&rom).unwrap();
+        let args: Vec<String> = p.command.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--", game.join("MyGame (Disk 1).iso").to_str().unwrap()]);
+        assert!(!args.iter().any(|a| a.ends_with(".m3u")), "{args:?}");
+    }
 }

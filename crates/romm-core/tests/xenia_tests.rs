@@ -528,3 +528,55 @@ fn xenia_only_plans_saves_for_xbox_360_games() {
     game.platform_slug = "xbox".into();
     assert!(route::plan(&e, &game, &id).is_none());
 }
+
+// ------------------------------------------------------------------------------------------
+// Multi-disc games (a playlist is the launch file)
+// ------------------------------------------------------------------------------------------
+
+/// `<dir>/MyGame/{MyGame (Disk 1).iso, MyGame (Disk 2).iso, MyGame.m3u}`, as RomM serves it and
+/// install_rom stores it: the playlist is the launch file, the folder is the install.
+fn multi_disc_game(dir: &Path, title: u32) -> LocalRom {
+    let root = dir.join("MyGame");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("MyGame (Disk 1).iso"), xbox360_disc(&xex(title))).unwrap();
+    std::fs::write(root.join("MyGame (Disk 2).iso"), xbox360_disc(&xex(title))).unwrap();
+    std::fs::write(root.join("MyGame.m3u"), "MyGame (Disk 1).iso\nMyGame (Disk 2).iso\n").unwrap();
+    LocalRom {
+        rom_id: 7,
+        name: "MyGame".into(),
+        platform_slug: "xbox360".into(),
+        path: root.clone(),
+        launch_path: root.join("MyGame.m3u"),
+        stem: "MyGame".into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_playlist_identifies_the_game_from_its_first_disc() {
+    let t = tempfile::tempdir().unwrap();
+    let game = multi_disc_game(t.path(), TITLE_ID);
+    let id = unit::identify(&game.launch_path, "xbox360");
+    assert_eq!(xenia::title_id_of(&id).as_deref(), Some(TITLE), "{id:?}");
+}
+
+/// The save side never needed the playlist resolved at install: Sigil follows it, so a multi-disc game
+/// syncs like any other and is named after its folder.
+#[tokio::test]
+async fn a_multi_disc_game_syncs_its_saves_through_the_playlist() {
+    let t = tempfile::tempdir().unwrap();
+    let storage = t.path().join("xenia");
+    save_file(&storage, "SAVE1/data.bin", b"DISC-2-PROGRESS");
+    let (_, expected) = archive_of(&[("SAVE1/data.bin", b"DISC-2-PROGRESS")]);
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", None, "MyGame.zip")]).await;
+    Mock::given(method("POST")).and(path("/api/saves")).respond_with(ResponseTemplate::new(201).set_body_json(stored_json(11, "MyGame.zip", &expected))).mount(&server).await;
+    mock_complete(&server).await;
+
+    let game = multi_disc_game(&t.path().join("roms"), TITLE_ID);
+    let c = client(&server);
+    let mut st = State::default();
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&game, &env(&storage), None).await.unwrap();
+    assert_eq!(rep.uploaded, ["MyGame.zip"], "{rep:?}");
+    assert!(rep.is_clean(), "{rep:?}");
+}
