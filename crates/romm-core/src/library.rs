@@ -14,21 +14,33 @@ use crate::state::LocalRom;
 
 /// Which file in an extracted multi-file ROM the emulator should be pointed at
 /// (lower = preferred): playlists and cue sheets before the raw data they reference.
+///
+/// `zar` (a Xenia archive) ranks with the disc images and a bare `xex` last. An extracted Xbox 360
+/// disc is a folder of loose files (many of them `.bin`/`.img` data), so `BOOT_FILE` is checked first.
 const LAUNCH_PRIORITY: &[&str] = &[
-    "m3u", "cue", "gdi", "chd", "cso", "iso", "rvz", "gcz", "wia", "wbfs", "pbp", "img", "bin", "ccd", "mds",
+    "m3u", "cue", "gdi", "chd", "cso", "iso", "zar", "rvz", "gcz", "wia", "wbfs", "pbp", "img", "bin", "ccd", "mds",
+    "xex",
 ];
 
+/// The boot module of an extracted Xbox 360 disc: what Xenia must be pointed at, whatever else the
+/// folder holds. No other platform has a file by this name.
+const BOOT_FILE: &str = "default.xex";
+
 pub fn find_launch_file(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<(usize, PathBuf)> = None;
+    // (0 for the boot module else 1, extension rank, depth of a boot module), then path: the smallest
+    // wins, so the boot module nearest the root is chosen.
+    let mut best: Option<((u8, usize, usize), PathBuf)> = None;
     for e in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
         let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
         let rank = LAUNCH_PRIORITY.iter().position(|x| *x == ext).unwrap_or(LAUNCH_PRIORITY.len());
+        let is_boot = e.file_name().to_str().is_some_and(|n| n.eq_ignore_ascii_case(BOOT_FILE));
+        let key = if is_boot { (0, rank, e.depth()) } else { (1, rank, 0) };
         let better = match &best {
             None => true,
-            Some((r, p)) => rank < *r || (rank == *r && e.path() < p.as_path()),
+            Some((k, p)) => key < *k || (key == *k && e.path() < p.as_path()),
         };
         if better {
-            best = Some((rank, e.into_path()));
+            best = Some((key, e.into_path()));
         }
     }
     best.map(|(_, p)| p)
@@ -167,5 +179,40 @@ mod tests {
         fs::remove_file(t.path().join("Game/Game.m3u")).unwrap();
         assert_eq!(find_launch_file(&t.path().join("Game")).unwrap(), t.path().join("Game/Game (Disc 1).cue"));
         assert!(find_launch_file(&t.path().join("nope")).is_none());
+    }
+
+
+    fn touch_all(root: &Path, files: &[&str]) {
+        for f in files {
+            let p = root.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "").unwrap();
+        }
+    }
+
+    /// An extracted Xbox 360 disc is loose files, plenty of them `.bin` data and several `.xex`.
+    #[test]
+    fn an_extracted_xbox_360_disc_launches_default_xex() {
+        let t = tempfile::tempdir().unwrap();
+        touch_all(t.path(), &["Game/Data/data0.bin", "Game/Data/data1.img", "Game/Mods/a.xex", "Game/default.xex", "Game/Zed/default.xex"]);
+        // `Zed/` sorts before `default.xex` by path, but the one at the root is the boot module.
+        assert_eq!(find_launch_file(&t.path().join("Game")).unwrap(), t.path().join("Game/default.xex"));
+        // The boot module is matched without regard to case, as on the disc's own filesystem.
+        let u = tempfile::tempdir().unwrap();
+        touch_all(u.path(), &["G/a.bin", "G/DEFAULT.XEX"]);
+        assert_eq!(find_launch_file(&u.path().join("G")).unwrap(), u.path().join("G/DEFAULT.XEX"));
+    }
+
+    #[test]
+    fn xbox_360_images_and_bare_xex_files_are_launchable_without_a_default_xex() {
+        let t = tempfile::tempdir().unwrap();
+        touch_all(t.path(), &["Img/readme.txt", "Img/Halo 3.zar", "Img/Halo 3.iso"]);
+        assert_eq!(find_launch_file(&t.path().join("Img")).unwrap(), t.path().join("Img/Halo 3.iso"));
+        fs::remove_file(t.path().join("Img/Halo 3.iso")).unwrap();
+        assert_eq!(find_launch_file(&t.path().join("Img")).unwrap(), t.path().join("Img/Halo 3.zar"));
+
+        let u = tempfile::tempdir().unwrap();
+        touch_all(u.path(), &["X/notes.txt", "X/game.xex"]);
+        assert_eq!(find_launch_file(&u.path().join("X")).unwrap(), u.path().join("X/game.xex"));
     }
 }
