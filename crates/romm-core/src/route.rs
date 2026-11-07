@@ -23,6 +23,7 @@ use crate::state::LocalRom;
 use crate::sync::EmuEnv;
 use crate::unit::{self, Identity, Route};
 use crate::xbox;
+use crate::xenia;
 
 #[derive(Debug, Clone)]
 pub enum Kind {
@@ -37,6 +38,9 @@ pub enum Kind {
         /// Eight hex digits, from the ROM's XBE; empty when the ROM could not be read.
         save_id: String,
     },
+    /// A folder the emulator keeps per game, zipped the way Argosy zips it (Xenia: `xenia.rs`).
+    /// `title_id` is empty when the ROM could not be identified, which `sync::gather` reports.
+    Folder { content: PathBuf, title_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +83,9 @@ pub fn plan(env: &EmuEnv, rom: &LocalRom, id: &Identity) -> Option<Plan> {
     if env.profile.saves.as_ref().is_some_and(|r| r.mode == SaveMode::Hdd) {
         return xbox_plan(env, rom, id, content_name);
     }
+    if env.profile.saves.as_ref().is_some_and(|r| r.mode == SaveMode::Folder) {
+        return xenia_plan(env, rom, id, content_name);
+    }
     let route = standalone_route(env, rom)?;
     Some(Plan { label: env.profile.id.clone(), kind: Kind::Unit(route), content_name })
 }
@@ -95,6 +102,21 @@ fn xbox_plan(env: &EmuEnv, rom: &LocalRom, id: &Identity, content_name: String) 
         return None;
     }
     let kind = Kind::Xbox { image: xbox::xemu_hdd_path(&env.data_root), save_id: id.save_id.to_ascii_uppercase() };
+    Some(Plan { label: env.profile.id.clone(), kind, content_name })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Emulators that keep a folder per game (Xenia)
+// ---------------------------------------------------------------------------------------------
+
+/// The saves of an Xbox 360 game are its `00000001` folder under Xenia's content root. Which folder
+/// is the game's comes from the title id in its `default.xex`, which Sigil reads; it is empty when
+/// the ROM could not be read, and `sync::gather` then says why.
+fn xenia_plan(env: &EmuEnv, rom: &LocalRom, id: &Identity, content_name: String) -> Option<Plan> {
+    if unit::platform_slug(&rom.platform_slug) != "xbox360" {
+        return None;
+    }
+    let kind = Kind::Folder { content: xenia::content_root(&env.data_root), title_id: xenia::title_id_of(id).unwrap_or_default() };
     Some(Plan { label: env.profile.id.clone(), kind, content_name })
 }
 

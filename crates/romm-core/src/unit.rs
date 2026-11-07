@@ -89,7 +89,7 @@ pub struct Identity {
 /// Systems whose saves Sigil finds by the game's id (a disc id, a title id): with no id there is no
 /// way to tell which of the emulator's files are this game's. Cartridge systems go by file name.
 pub fn needs_game_id(sigil_platform: &str) -> bool {
-    matches!(sigil_platform, "psp" | "psx" | "ps2" | "gamecube" | "wii" | "3ds" | "psvita" | "wiiu" | "ps3" | "switch")
+    matches!(sigil_platform, "psp" | "psx" | "ps2" | "gamecube" | "wii" | "3ds" | "psvita" | "wiiu" | "ps3" | "switch" | "xbox360")
 }
 
 impl Identity {
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn only_systems_that_find_saves_by_game_id_need_one() {
-        for p in ["psp", "psx", "ps2", "gamecube", "wii", "3ds"] {
+        for p in ["psp", "psx", "ps2", "gamecube", "wii", "3ds", "xbox360"] {
             assert!(needs_game_id(p), "{p}");
         }
         for p in ["gb", "gbc", "n64", "dreamcast", "segacd", "snes"] {

@@ -23,5 +23,6 @@ pub mod sync;
 pub mod unit;
 pub mod versions;
 pub mod xbox;
+pub mod xenia;
 
 pub use error::{Error, Result};

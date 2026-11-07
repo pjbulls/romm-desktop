@@ -450,3 +450,41 @@ impl Drop for QemuHolder {
         let _ = self.0.wait();
     }
 }
+
+/// A minimal XEX2: the magic, and one `0x00040006` (execution info) optional header whose title id
+/// is `title_id`. Enough for Sigil to read the game's id.
+pub fn xex(title_id: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 0x100];
+    b[0..4].copy_from_slice(b"XEX2");
+    b[0x14..0x18].copy_from_slice(&1u32.to_be_bytes()); // optional header count
+    b[0x18..0x1C].copy_from_slice(&0x0004_0006u32.to_be_bytes()); // key: execution info
+    b[0x1C..0x20].copy_from_slice(&0x40u32.to_be_bytes()); // value: offset from the XEX's start
+    b[0x4C..0x50].copy_from_slice(&title_id.to_be_bytes()); // title id sits 0x0C into that block
+    b
+}
+
+/// A trimmed Xbox 360 disc image (XDVDFS at offset 0) whose root holds `default.xex`.
+pub fn xbox360_disc(xex: &[u8]) -> Vec<u8> {
+    const SECTOR: usize = 2048;
+    const MAGIC: &[u8; 20] = b"MICROSOFT*XBOX*MEDIA";
+    let (root_sector, file_sector) = (33usize, 34usize);
+    let mut img = vec![0u8; file_sector * SECTOR + xex.len()];
+    let vd = 0x10000;
+    img[vd..vd + 20].copy_from_slice(MAGIC);
+    img[vd + 0x14..vd + 0x18].copy_from_slice(&(root_sector as u32).to_le_bytes());
+    img[vd + 0x18..vd + 0x1C].copy_from_slice(&(SECTOR as u32).to_le_bytes());
+    img[vd + 0x7EC..vd + 0x7EC + 20].copy_from_slice(MAGIC);
+    let table = root_sector * SECTOR;
+    img[table..table + SECTOR].fill(0xFF);
+    // One directory entry: no left/right subtree, the file's sector and size, "normal file", its name.
+    let name = b"default.xex";
+    let mut e = vec![0u8; 14 + name.len()];
+    e[4..8].copy_from_slice(&(file_sector as u32).to_le_bytes());
+    e[8..12].copy_from_slice(&(xex.len() as u32).to_le_bytes());
+    e[12] = 0x20;
+    e[13] = name.len() as u8;
+    e[14..].copy_from_slice(name);
+    img[table..table + e.len()].copy_from_slice(&e);
+    img[file_sector * SECTOR..].copy_from_slice(xex);
+    img
+}

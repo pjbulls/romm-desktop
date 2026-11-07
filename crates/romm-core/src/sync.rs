@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 use crate::profiles::{Profile, SaveMode};
 use crate::retroarch;
 use crate::route::{self, Kind, Plan};
+use crate::xenia;
 use crate::saves::{self, SLOT};
 use crate::state::{save_key, LocalRom, SaveRecord, State};
 use crate::unit::{self, Identity};
@@ -86,6 +87,8 @@ pub enum LocalKind {
     /// Bytes read out of something that is not a file of its own (a folder in xemu's disk image).
     /// Put back with `xbox::import_save`, never by writing a file.
     Bytes(Vec<u8>),
+    /// A game's saved-game folder, zipped by `xenia.rs`.
+    Folder(xenia::Collected),
 }
 
 #[derive(Debug, Clone)]
@@ -112,16 +115,22 @@ impl LocalUnit {
             LocalKind::Raw(p) => Ok(std::fs::read(p)?),
             LocalKind::Unit(u) => Ok(u.data.clone()),
             LocalKind::Bytes(b) => Ok(b.clone()),
+            LocalKind::Folder(c) => Ok(c.data.clone()),
         }
     }
 
     fn detail(&self) -> Option<String> {
-        let LocalKind::Unit(u) = &self.kind else { return None };
-        if u.shape == unit::Shape::Single {
-            return None;
-        }
-        let mut z = zip::ZipArchive::new(std::io::Cursor::new(&u.data)).ok()?;
-        let n = (0..z.len()).filter(|i| z.by_index(*i).is_ok_and(|f| !f.name().ends_with('/'))).count();
+        let n = match &self.kind {
+            LocalKind::Raw(_) | LocalKind::Bytes(_) => return None,
+            LocalKind::Folder(c) => c.files,
+            LocalKind::Unit(u) => {
+                if u.shape == unit::Shape::Single {
+                    return None;
+                }
+                let mut z = zip::ZipArchive::new(std::io::Cursor::new(&u.data)).ok()?;
+                (0..z.len()).filter(|i| z.by_index(*i).is_ok_and(|f| !f.name().ends_with('/'))).count()
+            }
+        };
         Some(format!("{n} file{}", if n == 1 { "" } else { "s" }))
     }
 }
@@ -211,6 +220,21 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                 kind: LocalKind::Unit(u),
             }))
         }
+        Kind::Folder { content, title_id } => {
+            let title_id = ensure_title_id(title_id, &name_base(rom, Some(plan)))?;
+            let Some(dir) = xenia::find_save_dir(content, title_id) else { return Ok(None) };
+            let Some(c) = xenia::collect(&dir)? else { return Ok(None) };
+            Ok(Some(LocalUnit {
+                emulator: plan.label.clone(),
+                slot: SLOT.into(),
+                file_name: upload_name(&name_base(rom, Some(plan)), "zip"),
+                size: c.data.len() as u64,
+                modified: c.modified,
+                changed: last != Some(c.content_hash.as_str()) || rec.is_some_and(|r| r.dirty),
+                hash: c.content_hash.clone(),
+                kind: LocalKind::Folder(c),
+            }))
+        }
     }
 }
 
@@ -234,6 +258,34 @@ fn ensure_identified(route: &unit::Route, id: &Identity, rom: &LocalRom) -> Resu
         )));
     }
     Ok(())
+}
+
+/// An Xbox 360 game's saves are in a folder named by its title id, which Sigil reads from the ROM's
+/// `default.xex` (or the same file inside a disc image or `.zar`). A package it can't open (Games on
+/// Demand, an STFS container) has none, and there is no file name to fall back on.
+fn ensure_title_id<'a>(title_id: &'a str, game: &str) -> Result<&'a str> {
+    if title_id.is_empty() {
+        return Err(Error::msg(format!(
+            "can't tell which Xbox 360 game \"{}\" is: its title id could not be read from the ROM, so its saves can't be located. \
+             Xenia's saves are found by title id, which is read from default.xex, an .xex file, a disc image (.iso) or a .zar; \
+             a Games on Demand or STFS package can't be identified",
+            game
+        )));
+    }
+    Ok(title_id)
+}
+
+/// What a game is called in a save's file name and in messages. Normally the launch file's stem (what
+/// RetroArch names its saves after). For a ROM extracted into its own folder whose save is kept as a
+/// folder it is that folder's name instead: an Xbox 360 disc's launch file is always `default.xex`,
+/// which would name every game's save `default.zip`.
+fn name_base(rom: &LocalRom, plan: Option<&Plan>) -> String {
+    if matches!(plan.map(|p| &p.kind), Some(Kind::Folder { .. })) && rom.path.is_dir() {
+        if let Some(n) = rom.path.file_name() {
+            return n.to_string_lossy().into_owned();
+        }
+    }
+    rom.stem.clone()
 }
 
 /// Argosy uploads as `<rom base name>.<extension of what it uploads>`.
@@ -288,7 +340,7 @@ pub fn saves_overview(env: &EmuEnv, rom: &LocalRom, db: &State) -> Result<Vec<Sa
     let rec = db.saves.get(&save_key(rom.rom_id, &plan.label));
     let blob = match &plan.kind {
         Kind::Unit(r) => db.sigil_state(&r.state_key()),
-        Kind::Raw { .. } | Kind::Xbox { .. } => None,
+        Kind::Raw { .. } | Kind::Xbox { .. } | Kind::Folder { .. } => None,
     };
     let Some(local) = gather(rom, &id, &plan, rec, blob.as_deref())? else { return Ok(vec![]) };
     let status = match rec.and_then(|r| r.last_hash.as_deref()) {
@@ -362,7 +414,7 @@ impl<'a> Syncer<'a> {
                 let rec = self.state.saves.get(&save_key(rom.rom_id, &p.label));
                 let blob = match &p.kind {
                     Kind::Unit(r) => self.state.sigil_state(&r.state_key()),
-                    Kind::Raw { .. } | Kind::Xbox { .. } => None,
+                    Kind::Raw { .. } | Kind::Xbox { .. } | Kind::Folder { .. } => None,
                 };
                 match gather(rom, &id, p, rec, blob.as_deref()) {
                     Ok(l) => (l, None),
@@ -371,7 +423,7 @@ impl<'a> Syncer<'a> {
             }
         };
         if let Some(e) = &unreadable {
-            report.failed.push(format!("{}: {e}", rom.stem));
+            report.failed.push(format!("{}: {e}", name_base(rom, plan.as_ref())));
         }
 
         let mut saves_list = Vec::new();
@@ -494,6 +546,8 @@ impl<'a> Syncer<'a> {
                         }
                         // Read out of a disk image: nothing of ours to remove, only to stop tracking.
                         LocalKind::Bytes(_) => {}
+                        // The folder is Xenia's own, like a card Sigil cut a unit out of: untracked, not deleted.
+                        LocalKind::Folder(_) => {}
                     }
                     self.state.saves.remove(&save_key(cx.rom.rom_id, &l.emulator));
                 }
@@ -598,6 +652,18 @@ impl<'a> Syncer<'a> {
                 self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
                 upload_name(&cx.rom.stem, &extension_of_unit(&bytes))
             }
+            Kind::Folder { content, title_id } => {
+                let title_id = ensure_title_id(title_id, &name_base(cx.rom, Some(plan)))?;
+                // Keep what is there, in the form that would have been uploaded.
+                if let Some(LocalUnit { kind: LocalKind::Folder(c), file_name, .. }) = cx.local {
+                    std::fs::create_dir_all(&backup)?;
+                    std::fs::write(backup.join(file_name), &c.data)?;
+                }
+                let restored = xenia::restore(content, title_id, &bytes)?;
+                tracing::debug!("restored {} file(s) into {}, {} header(s) written", restored.files, restored.dir.display(), restored.headers_written);
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                upload_name(&name_base(cx.rom, Some(plan)), "zip")
+            }
         };
         report.downloaded.push(name);
         Ok(())
@@ -686,7 +752,7 @@ impl<'a> Syncer<'a> {
             ConflictPolicy::KeepBoth => {
                 let stamp = Utc::now().format("%Y%m%dT%H%M%S");
                 let ext = Path::new(&local.file_name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-                let archive_name = upload_name(&format!("{}.conflict-{stamp}", cx.rom.stem), &ext);
+                let archive_name = upload_name(&format!("{}.conflict-{stamp}", name_base(cx.rom, cx.plan)), &ext);
                 // 1. preserve the local copy on the server as an archival save (no slot, never paired)
                 self.upload(cx, local, None, archive_name, report).await?;
                 // 2. then adopt the server's version; download() also backs the local save up on disk
