@@ -63,10 +63,11 @@ sudo apt install build-essential libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-
 cd app && npm install
 npm run tauri dev                 # development, hot reload
 npm run tauri build               # installers: .deb / .AppImage (Linux), .msi / .exe (Windows)
+npm run build:all                 # the same, plus the standalone CLI: target/release/romm (romm.exe on Windows)
 ```
-On Windows install Rust (MSVC toolchain) and Node; WebView2 is handled by the installer. The CLI builds with plain `cargo build --release -p romm-cli`.
+On Windows install Rust (MSVC toolchain) and Node; WebView2 is handled by the installer. The CLI is a separate crate, so `tauri build` does not make it; `npm run build:all` (or `cargo build --release -p romm-cli` after it) puts `romm.exe` in `target\release\`, next to `romm-desktop.exe`.
 
-A GitHub Actions workflow (`.github/workflows/build.yml`) builds both installers. **It hasn't been run yet.**
+A GitHub Actions workflow (`.github/workflows/build.yml`) builds both installers, and uploads the standalone CLI as a separate `romm-cli-<os>` artifact. **It hasn't been run yet.**
 
 ## First run
 

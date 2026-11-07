@@ -114,6 +114,10 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         with:
           projectPath: app
+      # The command-line client (`romm`, `romm.exe`) is its own workspace crate, so `tauri build` does not make it.
+      # Same target directory, so it reuses everything the app build already compiled.
+      - name: Build the standalone CLI
+        run: cargo build --release --locked -p romm-cli
       - uses: actions/upload-artifact@v4
         with:
           name: romm-desktop-${{ matrix.os }}
@@ -123,3 +127,10 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
           if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: romm-cli-${{ matrix.os }}
+          path: |
+            target/release/romm
+            target/release/romm.exe
+          if-no-files-found: error
