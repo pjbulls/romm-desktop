@@ -18,6 +18,11 @@ args = ["-batch", "--", "{rom}"]
 # (stored with its playlist as the launch file) is launched on the first disc it lists instead; the
 # other discs are swapped in from PCSX2's own Change Disc action.
 no_playlists = true
+# Nor does it read a .cue sheet: its reader has "TODO: When cue support is added" (CDVDisoReader.cpp),
+# though the file dialogs list *.cue. A multi-file bin/cue game is launched on the data track's .bin,
+# which PCSX2 does take (it sniffs the sector layout; Mode 2 raw, 2336 and 2048 images are
+# recognised). A disc dumped with audio tracks plays without them: only the one file is opened.
+no_cue_sheets = true
 
 [data]
 linux = ["{xdg_config}/PCSX2"]

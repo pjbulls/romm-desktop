@@ -404,3 +404,62 @@ fn only_systems_whose_saves_carry_no_game_id_have_unowned_saves() {
         assert!(!unit::has_unowned_saves(p), "{p}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// A PS2 CD image: what is launched and what is identified must be the same file
+// ---------------------------------------------------------------------------------------------
+
+/// Wraps 2048-byte sectors as raw 2352-byte CD sectors: sync, a header whose mode byte is at 15, an
+/// 8-byte subheader for Mode 2, the data, and padding.
+fn raw_cd(iso: &[u8], mode: u8) -> Vec<u8> {
+    let at = if mode == 1 { 16 } else { 24 };
+    iso.chunks(2048)
+        .flat_map(|s| {
+            let mut sec = vec![0u8; 2352];
+            sec[1..11].fill(0xFF);
+            sec[15] = mode;
+            sec[at..at + s.len()].copy_from_slice(s);
+            sec
+        })
+        .collect()
+}
+
+fn ps2_disc() -> Vec<u8> {
+    iso9660(&[("SYSTEM.CNF", b"BOOT2 = cdrom0:\\SLUS_203.70;1\nVER = 1.00\nVMODE = NTSC\n")])
+}
+
+/// Save sync reads the game's id from the same file the launch is pointed at, so a PS2 CD works
+/// whether it is installed as a `.cue` or as the `.bin` it names, in either raw mode.
+#[test]
+fn a_ps2_game_is_identified_from_its_raw_bin_and_from_its_cue_sheet() {
+    let t = tempfile::tempdir().unwrap();
+    for (name, bytes) in [("cooked.bin", ps2_disc()), ("mode2.bin", raw_cd(&ps2_disc(), 2)), ("mode1.bin", raw_cd(&ps2_disc(), 1))] {
+        std::fs::write(t.path().join(name), bytes).unwrap();
+        let id = unit::identify(&t.path().join(name), "ps2");
+        assert_eq!((id.title_id.as_str(), id.save_id.as_str()), ("SLUS-20370", "BASLUS-20370"), "{name}");
+    }
+    std::fs::write(t.path().join("mode2.cue"), "FILE \"mode2.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n").unwrap();
+    let id = unit::identify(&t.path().join("mode2.cue"), "ps2");
+    assert_eq!(id.save_id, "BASLUS-20370");
+}
+
+/// The cue parser in launch and Sigil's own (which identifies the game) must pick the same file, or a
+/// game could launch from one track and be identified from another. Leading audio is the hard case.
+#[test]
+fn launching_and_identifying_a_cue_sheet_use_the_same_data_track() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("Game (Track 1).bin"), vec![0u8; 2352 * 40]).unwrap(); // audio: no filesystem
+    std::fs::write(t.path().join("Game (Track 2).bin"), raw_cd(&ps2_disc(), 2)).unwrap();
+    let sheet = t.path().join("Game.cue");
+    std::fs::write(
+        &sheet,
+        "FILE \"Game (Track 1).bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\nFILE \"Game (Track 2).bin\" BINARY\n  TRACK 02 MODE2/2352\n    INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    let launched = unit::resolve_cue_sheet(&sheet);
+    assert_eq!(launched, t.path().join("Game (Track 2).bin"));
+    let from_sheet = unit::identify(&sheet, "ps2");
+    let from_launched = unit::identify(&launched, "ps2");
+    assert_eq!(from_sheet.save_id, "BASLUS-20370", "{from_sheet:?}");
+    assert_eq!(from_sheet.save_id, from_launched.save_id);
+}

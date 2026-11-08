@@ -181,4 +181,24 @@ mod tests {
         let args: Vec<String> = r.prepare(&rom).unwrap().command.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["-batch", "--", game.join("Game (Disc 1).iso").to_str().unwrap()]);
     }
+
+    #[test]
+    fn a_ps2_cd_installed_with_its_cue_sheet_launches_on_the_bin() {
+        let t = tempfile::tempdir().unwrap();
+        let game = t.path().join("roms/ps2/Game");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("Game.bin"), "x").unwrap();
+        std::fs::write(game.join("Game.cue"), "FILE \"Game.bin\" BINARY\n TRACK 01 MODE2/2352\n").unwrap();
+        let exe = t.path().join("pcsx2-qt");
+        std::fs::write(&exe, "").unwrap();
+        let mut cfg = Config::default();
+        cfg.emulator_paths.insert("pcsx2".into(), exe);
+        let rom = LocalRom {
+            rom_id: 1, name: "Game".into(), platform_slug: "ps2".into(), path: game.clone(),
+            launch_path: game.join("Game.cue"), stem: "Game".into(), ..Default::default()
+        };
+        let r = Resolver { cfg: &cfg, os: Os::Linux, pctx: PathCtx { home: Some(t.path().into()), xdg_config: Some(t.path().join("cfg")), ..Default::default() } };
+        let args: Vec<String> = r.prepare(&rom).unwrap().command.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["-batch", "--", game.join("Game.bin").to_str().unwrap()]);
+    }
 }

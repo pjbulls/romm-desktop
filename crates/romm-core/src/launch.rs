@@ -11,27 +11,42 @@ use crate::profiles::Profile;
 use crate::unit;
 
 /// What to hand the emulator for an installed game. Normally the stored launch file, as it is. A
-/// multi-disc game is installed with its `.m3u` playlist as that file, which an emulator that can't
-/// open playlists (`launch.no_playlists`) would read as a disc image and refuse; it gets the first
-/// disc the playlist lists instead. Done here, when launching, rather than once at install, so a
-/// game that is already installed is repaired too.
+/// multi-disc game is installed with its `.m3u` playlist as that file, and a CD image may be installed
+/// as its `.cue` sheet. An emulator that can't open one of those (`launch.no_playlists`,
+/// `launch.no_cue_sheets`) would read it as a disc image and refuse; it gets what it names instead:
+/// the first disc of a playlist, and the data track of a sheet (so a playlist of sheets resolves all
+/// the way to a track). Done here, when launching, rather than once at install, so a game that is
+/// already installed is repaired too.
 ///
 /// The other discs are the emulator's business: Xenia asks for them with a file picker when the game
 /// reaches them, and PCSX2 has a Change Disc action.
 pub fn playable<'a>(profile: &Profile, rom: &'a Path) -> Result<Cow<'a, Path>> {
-    if !profile.launch.no_playlists || !unit::is_playlist(rom) {
-        return Ok(Cow::Borrowed(rom));
+    let mut path = Cow::Borrowed(rom);
+    if profile.launch.no_playlists && unit::is_playlist(&path) {
+        let disc = unit::resolve_playlist(&path);
+        if disc == *path {
+            return Err(Error::msg(format!(
+                "{} can't open playlists, and {} doesn't name a first disc that exists next to it. \
+                 Re-install the game, or edit the playlist so its first line is the first disc's file name",
+                profile.name,
+                path.display()
+            )));
+        }
+        path = Cow::Owned(disc);
     }
-    let disc = unit::resolve_playlist(rom);
-    if disc == rom {
-        return Err(Error::msg(format!(
-            "{} can't open playlists, and {} doesn't name a first disc that exists next to it. \
-             Re-install the game, or edit the playlist so its first line is the first disc's file name",
-            profile.name,
-            rom.display()
-        )));
+    if profile.launch.no_cue_sheets && unit::is_cue_sheet(&path) {
+        let track = unit::resolve_cue_sheet(&path);
+        if track == *path {
+            return Err(Error::msg(format!(
+                "{} can't open cue sheets, and {} doesn't name a data track file that exists next to it. \
+                 Re-install the game, or point the sheet's FILE line at the .bin",
+                profile.name,
+                path.display()
+            )));
+        }
+        path = Cow::Owned(track);
     }
-    Ok(Cow::Owned(disc))
+    Ok(path)
 }
 
 pub fn build_command(
@@ -212,5 +227,52 @@ mod tests {
         // A single-disc game is untouched.
         let c = build_command(&p, &i, Path::new("/g/Daxter.iso"), None, &[]).unwrap();
         assert_eq!(args_of(&c), ["-batch", "--", "/g/Daxter.iso"]);
+    }
+
+    fn pcsx2() -> (Profile, Installed) {
+        (profiles::get("pcsx2").unwrap(), Installed { profile_id: "pcsx2".into(), kind: InstallKind::Native("/x/pcsx2-qt".into()) })
+    }
+
+    const CUE: &str = "FILE \"Game.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
+
+    /// PCSX2 has no cue support (its reader says so), but it does open the raw `.bin` the sheet names.
+    #[test]
+    fn pcsx2_is_given_the_data_track_not_the_cue_sheet() {
+        let t = game(&[("Game.bin", "x"), ("Game.cue", CUE)]);
+        let (p, i) = pcsx2();
+        let c = build_command(&p, &i, &t.path().join("Game.cue"), None, &["-fullscreen".into()]).unwrap();
+        assert_eq!(args_of(&c), ["-fullscreen", "-batch", "--", t.path().join("Game.bin").to_str().unwrap()]);
+    }
+
+    /// A multi-disc game whose discs are bin/cue: the playlist lists sheets, and the sheet names the track.
+    #[test]
+    fn a_playlist_of_cue_sheets_resolves_all_the_way_to_a_track() {
+        let cue2 = CUE.replace("Game.bin", "Game 2.bin");
+        let t = game(&[("Game.bin", "1"), ("Game.cue", CUE), ("Game 2.bin", "2"), ("Game 2.cue", &cue2), ("Game.m3u", "Game.cue\nGame 2.cue\n")]);
+        let (p, i) = pcsx2();
+        let c = build_command(&p, &i, &t.path().join("Game.m3u"), None, &[]).unwrap();
+        assert_eq!(args_of(&c), ["-batch", "--", t.path().join("Game.bin").to_str().unwrap()]);
+    }
+
+    #[test]
+    fn a_cue_sheet_that_names_no_data_file_is_an_error_that_says_what_to_do() {
+        let t = game(&[("Game.cue", CUE)]); // the .bin is not there
+        let (p, i) = pcsx2();
+        let e = build_command(&p, &i, &t.path().join("Game.cue"), None, &[]).unwrap_err().to_string();
+        assert!(e.contains("can't open cue sheets") && e.contains("Game.cue") && e.contains("FILE"), "{e}");
+    }
+
+    /// Only an emulator that says it can't read a sheet is changed.
+    #[test]
+    fn emulators_that_read_cue_sheets_still_get_the_sheet() {
+        let t = game(&[("Game.bin", "x"), ("Game.cue", CUE)]);
+        let sheet = t.path().join("Game.cue");
+        let ds = profiles::get("duckstation").unwrap();
+        let ds_i = Installed { profile_id: "duckstation".into(), kind: InstallKind::Native("/x/duckstation".into()) };
+        assert_eq!(args_of(&build_command(&ds, &ds_i, &sheet, None, &[]).unwrap()).last().unwrap(), sheet.to_str().unwrap());
+        let ra = profiles::get("retroarch").unwrap();
+        let ra_i = Installed { profile_id: "retroarch".into(), kind: InstallKind::Native("/x/retroarch".into()) };
+        let c = build_command(&ra, &ra_i, &sheet, Some(Path::new("/c/core.so")), &[]).unwrap();
+        assert!(args_of(&c).contains(&sheet.to_string_lossy().into_owned()));
     }
 }

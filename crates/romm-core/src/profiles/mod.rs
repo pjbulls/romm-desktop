@@ -55,6 +55,11 @@ pub struct Launch {
     /// DuckStation take playlists, so the default is that they are passed through.
     #[serde(default)]
     pub no_playlists: bool,
+    /// The emulator cannot open a `.cue` sheet (PCSX2 reads it as a disc image and fails). The sheet is
+    /// then replaced by the data track file it names. Checked after `no_playlists`, so a playlist
+    /// that lists sheets ends up at a track too.
+    #[serde(default)]
+    pub no_cue_sheets: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -177,6 +182,14 @@ mod tests {
     fn the_emulators_marked_as_unable_to_open_playlists() {
         let marked: Vec<String> = builtin().into_iter().filter(|p| p.launch.no_playlists).map(|p| p.id).collect();
         assert_eq!(marked, ["pcsx2", "xenia"]);
+    }
+
+    /// Likewise for `.cue` sheets. RetroArch and DuckStation read them; PCSX2's reader has a TODO for
+    /// cue support, and Xenia has no use for them.
+    #[test]
+    fn the_emulators_marked_as_unable_to_open_cue_sheets() {
+        let marked: Vec<String> = builtin().into_iter().filter(|p| p.launch.no_cue_sheets).map(|p| p.id).collect();
+        assert_eq!(marked, ["pcsx2"]);
     }
 
     #[test]

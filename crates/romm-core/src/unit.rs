@@ -203,6 +203,65 @@ pub fn resolve_playlist(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
+/// Whether `p` is a `.cue` sheet.
+pub fn is_cue_sheet(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+}
+
+/// The next whitespace-separated token of a cue line, or a `"quoted name"` (which may hold spaces).
+fn cue_token<'a>(rest: &mut &'a str) -> Option<&'a str> {
+    let s = rest.trim_start_matches([' ', '\t']);
+    let (tok, after) = if let Some(q) = s.strip_prefix('"') {
+        let end = q.find('"').unwrap_or(q.len());
+        (&q[..end], q.get(end + 1..).unwrap_or(""))
+    } else {
+        let end = s.find([' ', '\t']).unwrap_or(s.len());
+        (&s[..end], &s[end..])
+    };
+    *rest = after;
+    (!tok.is_empty()).then_some(tok)
+}
+
+/// The file of a `.cue` sheet that holds the disc's data: the first `FILE` that has a `TRACK n MODE…`
+/// under it, so leading audio tracks are skipped and, for a disc dumped one file per track, it is
+/// the first track. This is the file Sigil reads when it identifies the game from the sheet
+/// (`sigil_sheet_data_track`, which is internal to the C library, so it is mirrored here). Comes back
+/// unchanged when `p` is not a sheet, is unreadable, or names no such file that exists beside it.
+pub fn resolve_cue_sheet(p: &Path) -> PathBuf {
+    if !is_cue_sheet(p) {
+        return p.to_path_buf();
+    }
+    let Ok(bytes) = std::fs::read(p) else { return p.to_path_buf() };
+    // Sigil reads at most 64 KiB; a sheet is a few hundred bytes.
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]).into_owned();
+    let mut file: Option<String> = None;
+    let mut data: Option<String> = None;
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let mut rest = line;
+        let Some(word) = cue_token(&mut rest) else { continue };
+        if word.eq_ignore_ascii_case("FILE") {
+            file = cue_token(&mut rest).map(str::to_owned);
+        } else if word.eq_ignore_ascii_case("TRACK") && file.is_some() {
+            // TRACK <number> <type>: a data type starts with MODE (MODE1/2048, MODE2/2352, ...).
+            let _number = cue_token(&mut rest);
+            // Compared as bytes: slicing the text at 4 panics inside a multi-byte character.
+            if cue_token(&mut rest).is_some_and(|t| t.as_bytes().get(..4).is_some_and(|b| b.eq_ignore_ascii_case(b"MODE"))) {
+                data = file.clone();
+                break;
+            }
+        }
+    }
+    let Some(name) = data else { return p.to_path_buf() };
+    let dir = p.parent().unwrap_or(Path::new(""));
+    // As written first; a sheet made on Windows may use backslashes (see `resolve_playlist`).
+    for candidate in [dir.join(&name), dir.join(name.replace('\\', "/"))] {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    p.to_path_buf()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Routes and results
 // ---------------------------------------------------------------------------------------------
@@ -924,5 +983,83 @@ mod tests {
         assert_eq!(resolve_playlist(&t.path().join("Disk 1.iso")), t.path().join("Disk 1.iso"));
         assert_eq!(resolve_playlist(&t.path().join("missing.m3u")), t.path().join("missing.m3u"));
         assert!(is_playlist(Path::new("A.M3U")) && !is_playlist(Path::new("a.iso")));
+    }
+
+    fn cue(files: &[&str], body: &str) -> (tempfile::TempDir, PathBuf) {
+        let t = disc_dir(files);
+        let sheet = t.path().join("g.cue");
+        std::fs::write(&sheet, body).unwrap();
+        (t, sheet)
+    }
+
+    #[test]
+    fn a_cue_sheet_resolves_to_its_data_track_file() {
+        let (t, sheet) = cue(&["My Game.bin"], "FILE \"My Game.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+        assert_eq!(resolve_cue_sheet(&sheet), t.path().join("My Game.bin"), "a quoted name may hold spaces");
+        // Unquoted, lower case, indented, tabs, a byte-order mark and Windows line ends.
+        std::fs::write(&sheet, "\u{feff}REM GENRE x\r\n\tfile My.bin binary\r\n  track 01 mode2/2352\r\n").unwrap();
+        std::fs::write(t.path().join("My.bin"), "x").unwrap();
+        assert_eq!(resolve_cue_sheet(&sheet), t.path().join("My.bin"));
+    }
+
+    /// The same rule Sigil uses to identify the game from the sheet: the first FILE that has a data
+    /// track under it, so a disc with leading audio, or one file per track, resolves to track 1's data.
+    #[test]
+    fn a_cue_sheet_skips_audio_and_takes_the_first_data_file() {
+        let (t, sheet) = cue(
+            &["Track 01.bin", "Track 02.bin", "Track 03.bin"],
+            "FILE \"Track 01.bin\" BINARY\n TRACK 01 AUDIO\n FILE \"Track 02.bin\" BINARY\n TRACK 02 MODE2/2352\n FILE \"Track 03.bin\" BINARY\n TRACK 03 MODE2/2352\n",
+        );
+        assert_eq!(resolve_cue_sheet(&sheet), t.path().join("Track 02.bin"));
+        // The usual shape: data first, audio after.
+        std::fs::write(&sheet, "FILE \"Track 01.bin\" BINARY\n TRACK 01 MODE2/2352\n FILE \"Track 02.bin\" BINARY\n TRACK 02 AUDIO\n").unwrap();
+        assert_eq!(resolve_cue_sheet(&sheet), t.path().join("Track 01.bin"));
+    }
+
+    #[test]
+    fn a_cue_sheet_made_on_windows_resolves() {
+        let (t, sheet) = cue(&["Sub/Game.bin"], "FILE \"Sub\\Game.bin\" BINARY\r\nTRACK 01 MODE2/2352\r\n");
+        assert_eq!(resolve_cue_sheet(&sheet), t.path().join("Sub/Game.bin"));
+    }
+
+    #[test]
+    fn a_cue_sheet_that_names_no_usable_data_file_comes_back_unchanged() {
+        let (t, sheet) = cue(&["Game.bin", "Game.wav"], "");
+        for (what, body) in [
+            ("empty", ""),
+            ("the file is not there", "FILE \"gone.bin\" BINARY\n TRACK 01 MODE2/2352\n"),
+            ("audio only", "FILE \"Game.wav\" WAVE\n TRACK 01 AUDIO\n"),
+            ("no TRACK line", "FILE \"Game.bin\" BINARY\n"),
+            ("TRACK before any FILE", "TRACK 01 MODE2/2352\nFILE \"Game.bin\" BINARY\n"),
+            ("a FILE with no name", "FILE\n TRACK 01 MODE2/2352\n"),
+        ] {
+            std::fs::write(&sheet, body).unwrap();
+            assert_eq!(resolve_cue_sheet(&sheet), sheet, "{what}");
+        }
+        assert_eq!(resolve_cue_sheet(&t.path().join("Game.bin")), t.path().join("Game.bin"), "not a sheet");
+        assert_eq!(resolve_cue_sheet(&t.path().join("missing.cue")), t.path().join("missing.cue"));
+        assert!(is_cue_sheet(Path::new("A.CUE")) && !is_cue_sheet(Path::new("a.bin")));
+    }
+
+    /// A sheet is user-supplied text. Odd bytes in it must never be able to crash a launch: a track
+    /// type is sliced by byte, which panics when byte 4 is inside a multi-byte character.
+    #[test]
+    fn a_hostile_cue_sheet_cannot_panic_the_parser() {
+        let (_t, sheet) = cue(&["Game.bin"], "");
+        for body in [
+            "FILE \"Game.bin\" BINARY\n TRACK 01 A\u{d6}\u{d6}\n",          // byte 4 inside a 2-byte char
+            "FILE \"Game.bin\" BINARY\n TRACK 01 \u{1f4bf}\u{1f4bf}\n",      // 4-byte chars
+            "FILE \"Game.bin\n TRACK 01 MODE1\n",                           // unterminated quote
+            "FILE \"\" BINARY\n TRACK\n TRACK 01\n",                        // empty and truncated tokens
+            "\"\"\"\"\"\"\n\n   \n\t\n",
+        ] {
+            std::fs::write(&sheet, body).unwrap();
+            let _ = resolve_cue_sheet(&sheet); // must return, whatever it returns
+        }
+        std::fs::write(&sheet, b"\xff\xfe FILE \"Game.bin\" BINARY\n\xff TRACK 01 MODE2/2352\n").unwrap();
+        let _ = resolve_cue_sheet(&sheet);
+        // A huge sheet is read only as far as Sigil reads it.
+        std::fs::write(&sheet, "REM x\n".repeat(200_000)).unwrap();
+        assert_eq!(resolve_cue_sheet(&sheet), sheet);
     }
 }
