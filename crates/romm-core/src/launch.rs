@@ -16,7 +16,8 @@ use crate::unit;
 /// disc the playlist lists instead. Done here, when launching, rather than once at install, so a
 /// game that is already installed is repaired too.
 ///
-/// Xenia asks for the other discs itself, with a file picker, when the game reaches them.
+/// The other discs are the emulator's business: Xenia asks for them with a file picker when the game
+/// reaches them, and PCSX2 has a Change Disc action.
 pub fn playable<'a>(profile: &Profile, rom: &'a Path) -> Result<Cow<'a, Path>> {
     if !profile.launch.no_playlists || !unit::is_playlist(rom) {
         return Ok(Cow::Borrowed(rom));
@@ -196,5 +197,20 @@ mod tests {
         let ra_i = Installed { profile_id: "retroarch".into(), kind: InstallKind::Native("/x/retroarch".into()) };
         let c = build_command(&ra, &ra_i, &m3u, Some(Path::new("/c/core.so")), &[]).unwrap();
         assert!(args_of(&c).contains(&m3u.to_string_lossy().into_owned()));
+    }
+
+    /// PCSX2 reads any unrecognised file as a disc image, so a playlist fails with "Unable to identify
+    /// the ISO image type". It gets the first disc, in the playlist's order, with its usual flags.
+    #[test]
+    fn pcsx2_is_given_the_first_disc_not_the_playlist() {
+        let t = game(&[("Game (Disc 1).chd", "1"), ("Game (Disc 2).chd", "2"), ("Game.m3u", "Game (Disc 1).chd\nGame (Disc 2).chd\n")]);
+        let p = profiles::get("pcsx2").unwrap();
+        let i = Installed { profile_id: "pcsx2".into(), kind: InstallKind::Native("/x/pcsx2-qt".into()) };
+        let c = build_command(&p, &i, &t.path().join("Game.m3u"), None, &["-fullscreen".into()]).unwrap();
+        let disc = t.path().join("Game (Disc 1).chd");
+        assert_eq!(args_of(&c), ["-fullscreen", "-batch", "--", disc.to_str().unwrap()]);
+        // A single-disc game is untouched.
+        let c = build_command(&p, &i, Path::new("/g/Daxter.iso"), None, &[]).unwrap();
+        assert_eq!(args_of(&c), ["-batch", "--", "/g/Daxter.iso"]);
     }
 }

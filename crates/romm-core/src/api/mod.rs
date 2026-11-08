@@ -2,8 +2,9 @@
 
 pub mod types;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use reqwest::{multipart, Response, Url};
@@ -15,6 +16,12 @@ use crate::error::{Error, Result};
 use types::*;
 
 pub const CLIENT_SLUG: &str = "romm-desktop";
+
+/// How long to wait before each retry of a call that is safe to repeat (see `send_retrying`).
+const RETRY_WAITS_MS: [u64; 2] = [150, 450];
+
+/// The longest a request waits for another program's turn before going ahead regardless.
+const PROCESS_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Accepts `192.168.1.10:8080`, `http://host`, `https://host/` and so on.
 pub fn normalize_base_url(input: &str) -> Result<String> {
@@ -34,6 +41,11 @@ pub struct RommClient {
     token: Option<String>,
     /// Shared by every clone: API calls take turns until their response headers arrive. See `send`.
     gate: Arc<Mutex<()>>,
+    /// A file that every program using this app's token locks while it waits for headers, so the
+    /// desktop app and the CLI (one token, two processes) take turns as well. See `send`.
+    process_lock: Option<Arc<PathBuf>>,
+    /// How long to wait for that lock before going ahead without it.
+    lock_wait: Duration,
 }
 
 impl RommClient {
@@ -42,11 +54,26 @@ impl RommClient {
             .user_agent(format!("{CLIENT_SLUG}/{}", env!("CARGO_PKG_VERSION")))
             .danger_accept_invalid_certs(accept_invalid_certs)
             .build()?;
-        Ok(Self { http, base: normalize_base_url(base_url)?, token, gate: Arc::new(Mutex::new(())) })
+        Ok(Self { http, base: normalize_base_url(base_url)?, token, gate: Arc::new(Mutex::new(())), process_lock: None, lock_wait: PROCESS_LOCK_WAIT })
     }
 
     pub fn base_url(&self) -> &str {
         &self.base
+    }
+
+    /// Makes this client take turns, with every other program that uses the same lock file (the
+    /// desktop app and the CLI share a token), until each one's response headers arrive. Without it,
+    /// two programs can reach RomM's auth together and one of them gets a 500; the in-process lock
+    /// cannot help there. If the file can't be locked, requests simply go ahead.
+    pub fn with_process_lock(mut self, path: impl Into<PathBuf>) -> Self {
+        self.process_lock = Some(Arc::new(path.into()));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_process_lock_wait(mut self, wait: Duration) -> Self {
+        self.lock_wait = wait;
+        self
     }
 
     /// `{base}/api/{segments...}` with every segment percent-encoded.
@@ -84,7 +111,54 @@ impl RommClient {
     /// serialised. Not used for `/assets` (served by nginx, never reaches RomM's auth).
     async fn send(&self, rb: reqwest::RequestBuilder) -> Result<Response> {
         let _turn = self.gate.lock().await;
+        let _other_programs = self.process_turn().await;
         Ok(rb.send().await?)
+    }
+
+    /// The cross-program half of the turn-taking: an exclusive lock on the shared lock file, held
+    /// (by keeping the returned file) until the caller is done waiting for headers. The operating
+    /// system drops it if a program dies. It never makes a request wait for good: a lock that can't
+    /// be had within `lock_wait`, or a file that can't be locked at all, means going ahead without.
+    async fn process_turn(&self) -> Option<std::fs::File> {
+        let path = self.process_lock.as_ref()?;
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = std::fs::OpenOptions::new().create(true).read(true).write(true).truncate(false).open(path.as_path()).ok()?;
+        let give_up = std::time::Instant::now() + self.lock_wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Some(file),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < give_up => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// `send`, repeated (twice at most, after a short wait) when the server answers with an error
+    /// that can be a passing glitch: the auth race above is one, and the app sends nothing else at
+    /// the same moment from this process, so it can still come from a second program using the same
+    /// token (the CLI, a second window) or from RomM's own background work.
+    ///
+    /// Only for calls that are safe to make twice: reads, registering a device, negotiating and
+    /// completing a sync session. Never for uploads, which could be stored twice. A request whose
+    /// body cannot be copied is sent once.
+    async fn send_retrying(&self, rb: reqwest::RequestBuilder) -> Result<Response> {
+        let mut waits = RETRY_WAITS_MS.iter();
+        loop {
+            let Some(attempt) = rb.try_clone() else { return self.send(rb).await };
+            let resp = self.send(attempt).await?;
+            if !matches!(resp.status().as_u16(), 500 | 502 | 503 | 504) {
+                return Ok(resp);
+            }
+            let Some(ms) = waits.next() else { return Ok(resp) };
+            drop(resp);
+            // A little jitter, so two programs that collided do not collide again in step.
+            let jitter = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::from(d.subsec_nanos()) % 100);
+            tokio::time::sleep(Duration::from_millis(ms + jitter)).await;
+        }
     }
 
     async fn check(resp: Response) -> Result<Response> {
@@ -99,7 +173,7 @@ impl RommClient {
     }
 
     async fn get_json<T: DeserializeOwned>(&self, segments: &[&str], query: &[(&str, String)]) -> Result<T> {
-        let resp = self.send(self.authed(self.http.get(self.url(segments)?).query(query))).await?;
+        let resp = self.send_retrying(self.authed(self.http.get(self.url(segments)?).query(query))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
@@ -265,7 +339,7 @@ impl RommClient {
     /// Download to `<dest>.part`, then rename, so an interrupted download never
     /// leaves a truncated file under the real name.
     async fn download_url(&self, url: Url, dest: &Path, progress: &mut (dyn FnMut(u64, Option<u64>) + Send)) -> Result<()> {
-        let resp = Self::check(self.send(self.authed(self.http.get(url))).await?).await?;
+        let resp = Self::check(self.send_retrying(self.authed(self.http.get(url))).await?).await?;
         let total = resp.content_length();
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -305,18 +379,18 @@ impl RommClient {
 
     /// Idempotent: RomM returns the existing device when `hostname`+`platform` match.
     pub async fn register_device(&self, reg: &DeviceRegistration) -> Result<Device> {
-        let resp = self.send(self.authed(self.http.post(self.url(&["devices"])?).json(reg))).await?;
+        let resp = self.send_retrying(self.authed(self.http.post(self.url(&["devices"])?).json(reg))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
     pub async fn negotiate(&self, req: &NegotiateRequest) -> Result<NegotiateResponse> {
-        let resp = self.send(self.authed(self.http.post(self.url(&["sync", "negotiate"])?).json(req))).await?;
+        let resp = self.send_retrying(self.authed(self.http.post(self.url(&["sync", "negotiate"])?).json(req))).await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
     pub async fn complete_session(&self, session_id: i64, req: &CompleteRequest) -> Result<()> {
         let url = self.url(&["sync", "sessions", &session_id.to_string(), "complete"])?;
-        let resp = self.send(self.authed(self.http.post(url).json(req))).await?;
+        let resp = self.send_retrying(self.authed(self.http.post(url).json(req))).await?;
         Self::check(resp).await?;
         Ok(())
     }
@@ -455,7 +529,7 @@ impl RommClient {
     /// whose award count or last-earned date changed, which is what you want after playing.
     pub async fn refresh_ra(&self, user_id: i64, incremental: bool) -> Result<()> {
         let url = self.url(&["users", &user_id.to_string(), "ra", "refresh"])?;
-        let resp = self.authed(self.http.post(url).json(&serde_json::json!({ "incremental": incremental }))).send().await?;
+        let resp = self.send(self.authed(self.http.post(url).json(&serde_json::json!({ "incremental": incremental })))).await?;
         Self::check(resp).await?;
         Ok(())
     }
@@ -467,7 +541,7 @@ impl RommClient {
             ("optimistic", "true".to_string()),
         ];
         let url = self.url(&["saves", &save_id.to_string(), "content"])?;
-        let resp = self.send(self.authed(self.http.get(url).query(&q))).await?;
+        let resp = self.send_retrying(self.authed(self.http.get(url).query(&q))).await?;
         Ok(Self::check(resp).await?.bytes().await?.to_vec())
     }
 }

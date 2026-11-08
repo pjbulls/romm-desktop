@@ -242,7 +242,7 @@ impl AppState {
 fn build_client(dirs: &AppDirs, cfg: &Config) -> Option<RommClient> {
     let url = cfg.server_url.as_deref()?;
     let token = load_token(dirs)?;
-    RommClient::new(url, Some(token), cfg.accept_invalid_certs).ok()
+    RommClient::new(url, Some(token), cfg.accept_invalid_certs).ok().map(|c| c.with_process_lock(dirs.api_lock()))
 }
 
 // ----------------------------------------------------------------------------- DTOs

@@ -172,7 +172,7 @@ impl App {
     fn client(&self) -> Result<RommClient> {
         let url = self.cfg.server_url.as_deref().ok_or_else(|| anyhow!("not logged in; run `romm login --server <url> --code <code>`"))?;
         let token = load_token(&self.dirs).ok_or_else(|| anyhow!("no saved token; run `romm login` again"))?;
-        Ok(RommClient::new(url, Some(token), self.cfg.accept_invalid_certs)?)
+        Ok(RommClient::new(url, Some(token), self.cfg.accept_invalid_certs)?.with_process_lock(self.dirs.api_lock()))
     }
 
     async fn device_id(&mut self, client: &RommClient) -> Result<String> {

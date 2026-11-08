@@ -82,6 +82,12 @@ impl AppDirs {
     pub fn backups_dir(&self) -> PathBuf {
         self.data_dir.join("backups")
     }
+
+    /// The file the desktop app and the CLI lock, so that they never hit RomM's auth together (they
+    /// use the same token). See `RommClient::with_process_lock`.
+    pub fn api_lock(&self) -> PathBuf {
+        self.data_dir.join("api.lock")
+    }
 }
 
 impl Config {

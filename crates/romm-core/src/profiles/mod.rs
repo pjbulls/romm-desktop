@@ -50,8 +50,8 @@ pub struct Detect {
 pub struct Launch {
     /// Placeholders: `{rom}` and (RetroArch only) `{core}`.
     pub args: Vec<String>,
-    /// The emulator cannot open a `.m3u` playlist (Xenia reads it as a disc image and fails). A
-    /// multi-disc game is then launched on the first disc the playlist lists instead. RetroArch and
+    /// The emulator cannot open a `.m3u` playlist (Xenia and PCSX2 read it as a disc image and fail).
+    /// A multi-disc game is then launched on the first disc the playlist lists instead. RetroArch and
     /// DuckStation take playlists, so the default is that they are passed through.
     #[serde(default)]
     pub no_playlists: bool,
@@ -170,6 +170,15 @@ mod tests {
     /// xemu keeps both inside its virtual hard disk image, and Xenia has neither feature.
     const SAVES_ONLY: &[&str] = &["xemu", "xenia"];
 
+    /// Which emulators are known not to open a `.m3u` (checked against each one's source). Adding one
+    /// is a deliberate act: it changes what that emulator is launched with, so it is listed here
+    /// rather than inferred. RetroArch and DuckStation do take playlists.
+    #[test]
+    fn the_emulators_marked_as_unable_to_open_playlists() {
+        let marked: Vec<String> = builtin().into_iter().filter(|p| p.launch.no_playlists).map(|p| p.id).collect();
+        assert_eq!(marked, ["pcsx2", "xenia"]);
+    }
+
     #[test]
     fn all_builtin_profiles_parse_and_are_complete() {
         let ps = builtin();
@@ -281,13 +290,5 @@ mod xenia_tests {
         let p = get("xenia").unwrap();
         assert!(p.detect.flatpak_id.is_none());
         assert!(p.data.flatpak.is_empty());
-    }
-
-    /// Which emulators are known not to open a `.m3u`. Adding one is a deliberate act: it changes what
-    /// that emulator is launched with, so it is listed here rather than inferred.
-    #[test]
-    fn only_xenia_is_marked_as_unable_to_open_playlists() {
-        let marked: Vec<String> = builtin().into_iter().filter(|p| p.launch.no_playlists).map(|p| p.id).collect();
-        assert_eq!(marked, ["xenia"]);
     }
 }

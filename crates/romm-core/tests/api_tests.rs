@@ -347,3 +347,254 @@ async fn clones_share_the_same_turn_order() {
     b.unwrap();
     assert!(started.elapsed() >= std::time::Duration::from_millis(580), "clones overlapped: {:?}", started.elapsed());
 }
+
+// ---- RomM's auth step can fail a request that did nothing wrong ---------------------------------
+//
+// With MariaDB's snapshot isolation, two requests on one client token that arrive together can race
+// to update `client_tokens.last_used_at`; the loser gets an HTTP 500 ("Record has changed since last
+// read in table 'client_tokens'") before its handler has run at all. Calls that are safe to make
+// twice are therefore repeated; nothing that could be stored twice ever is.
+
+fn authed(server: &MockServer) -> RommClient {
+    RommClient::new(&server.uri(), Some("rmm_t".into()), false).unwrap()
+}
+
+fn negotiate_req() -> romm_core::api::types::NegotiateRequest {
+    romm_core::api::types::NegotiateRequest { device_id: "dev".into(), saves: vec![], rom_ids: vec![969], restore_unlisted: false, emulators: None }
+}
+
+/// The 500 RomM sent (its body is just this text, so nothing else tells the cause apart).
+fn glitch() -> ResponseTemplate {
+    ResponseTemplate::new(500).set_body_string("Internal Server Error")
+}
+
+async fn count(server: &MockServer, m: &str, p: &str) -> usize {
+    server.received_requests().await.unwrap().iter().filter(|r| r.method.as_str() == m && r.url.path() == p).count()
+}
+
+#[tokio::test]
+async fn a_negotiate_that_hits_the_auth_race_is_simply_made_again() {
+    let server = MockServer::start().await;
+    // What the log showed: a 500 at 20:45:18, though the same call had worked at 20:43:35.
+    Mock::given(method("POST")).and(path("/api/sync/negotiate")).respond_with(glitch()).up_to_n_times(1).mount(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/negotiate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"session_id": 397, "operations": []})))
+        .mount(&server)
+        .await;
+
+    let r = authed(&server).negotiate(&negotiate_req()).await.expect("the second attempt succeeds, so the sync does");
+    assert_eq!(r.session_id, 397);
+    assert_eq!(count(&server, "POST", "/api/sync/negotiate").await, 2);
+}
+
+#[tokio::test]
+async fn reads_and_the_other_sync_calls_are_retried_too() {
+    let server = MockServer::start().await;
+    for (m, p, body) in [
+        ("GET", "/api/users/me", json!({"id": 1, "username": "u", "role": "admin", "ra_user_id": null})),
+        ("POST", "/api/devices", json!({"id": "d", "name": "n", "client": "c"})),
+        ("POST", "/api/sync/sessions/5/complete", json!({})),
+    ] {
+        Mock::given(method(m)).and(path(p)).respond_with(glitch()).up_to_n_times(1).mount(&server).await;
+        Mock::given(method(m)).and(path(p)).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(&server).await;
+    }
+    let c = authed(&server);
+    let _ = c.me().await; // shapes vary between RomM versions; what matters is that a second request was made
+    assert_eq!(count(&server, "GET", "/api/users/me").await, 2, "a read is retried");
+    c.complete_session(5, &romm_core::api::types::CompleteRequest { operations_completed: 0, operations_failed: 0, play_sessions: vec![] }).await.unwrap();
+    assert_eq!(count(&server, "POST", "/api/sync/sessions/5/complete").await, 2, "completing the session is retried");
+}
+
+#[tokio::test]
+async fn a_server_that_keeps_failing_is_given_up_on_after_three_tries() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/sync/negotiate")).respond_with(glitch()).mount(&server).await;
+    let started = std::time::Instant::now();
+    let e = authed(&server).negotiate(&negotiate_req()).await.unwrap_err();
+    assert_eq!(e.status(), Some(500), "the real status still reaches the caller: {e}");
+    assert_eq!(count(&server, "POST", "/api/sync/negotiate").await, 3, "one try and two retries, no more");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "and it does not stall the app");
+}
+
+#[tokio::test]
+async fn an_answer_that_is_not_a_glitch_is_never_retried() {
+    for status in [400u16, 401, 403, 404, 409, 422] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/sync/negotiate")).respond_with(ResponseTemplate::new(status).set_body_string("no")).mount(&server).await;
+        let e = authed(&server).negotiate(&negotiate_req()).await.unwrap_err();
+        assert_eq!(e.status(), Some(status));
+        assert_eq!(count(&server, "POST", "/api/sync/negotiate").await, 1, "{status} is an answer, not a glitch");
+    }
+}
+
+#[tokio::test]
+async fn an_upload_is_never_repeated_because_it_could_be_stored_twice() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/saves")).respond_with(glitch()).mount(&server).await;
+    Mock::given(method("PUT")).and(path("/api/saves/9")).respond_with(glitch()).mount(&server).await;
+    let c = authed(&server);
+    let p = romm_core::api::types::UploadParams { rom_id: 1, file_name: "a.zip".into(), ..Default::default() };
+    assert_eq!(c.upload_save(&p, vec![1, 2, 3]).await.unwrap_err().status(), Some(500));
+    assert_eq!(c.replace_save(9, &p, vec![1, 2, 3]).await.unwrap_err().status(), Some(500));
+    assert_eq!(count(&server, "POST", "/api/saves").await, 1, "one attempt: the first might have been stored");
+    assert_eq!(count(&server, "PUT", "/api/saves/9").await, 1);
+}
+
+#[tokio::test]
+async fn a_slow_retry_never_overlaps_the_next_request() {
+    // The turn-taking lock is held per attempt, not across the wait, so a retry does not freeze other
+    // calls, and two calls never reach RomM's auth together.
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(glitch()).up_to_n_times(1).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&server).await;
+    let c = authed(&server);
+    let (a, b) = tokio::join!(c.heartbeat(), c.heartbeat());
+    assert!(a.is_ok() && b.is_ok(), "{a:?} {b:?}");
+}
+
+// ---- the desktop app and the CLI share one token, in two processes -------------------------------
+
+/// Records when each request reaches the server, and answers slowly, so that two requests that
+/// were sent together show up as arriving together.
+#[derive(Clone, Default)]
+struct Arrivals(std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>);
+
+impl wiremock::Respond for Arrivals {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.0.lock().unwrap().push(std::time::Instant::now());
+        ResponseTemplate::new(200).set_body_json(json!({})).set_delay(std::time::Duration::from_millis(300))
+    }
+}
+
+async fn two_programs_call_at_once(server: &MockServer, lock: Option<&std::path::Path>) -> std::time::Duration {
+    let arrivals = Arrivals::default();
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(arrivals.clone()).mount(server).await;
+    // Two separate clients: each has its own in-process lock, exactly as the app and the CLI do.
+    let make = || {
+        let c = authed(server);
+        match lock {
+            Some(p) => c.with_process_lock(p),
+            None => c,
+        }
+    };
+    let (a, b) = (make(), make());
+    let (ra, rb) = tokio::join!(a.heartbeat(), b.heartbeat());
+    assert!(ra.is_ok() && rb.is_ok(), "{ra:?} {rb:?}");
+    let t = arrivals.0.lock().unwrap().clone();
+    assert_eq!(t.len(), 2);
+    t[1].duration_since(t[0])
+}
+
+#[tokio::test]
+async fn two_programs_sharing_a_lock_file_reach_the_server_one_after_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let gap = two_programs_call_at_once(&MockServer::start().await, Some(&dir.path().join("api.lock"))).await;
+    assert!(gap >= std::time::Duration::from_millis(250), "the second waited for the first's response: {gap:?}");
+}
+
+#[tokio::test]
+async fn without_a_shared_lock_two_programs_do_arrive_together() {
+    // The control: this is the collision that made RomM answer 500, and what the test above rules out.
+    let gap = two_programs_call_at_once(&MockServer::start().await, None).await;
+    assert!(gap < std::time::Duration::from_millis(150), "{gap:?}");
+}
+
+#[tokio::test]
+async fn a_lock_file_that_cannot_be_used_never_holds_a_request_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("file");
+    std::fs::write(&not_a_dir, b"x").unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&server).await;
+    let started = std::time::Instant::now();
+    // A "folder" that is really a file, so the lock file cannot be created.
+    authed(&server).with_process_lock(not_a_dir.join("api.lock")).heartbeat().await.expect("the request goes ahead without the lock");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn a_lock_that_is_never_let_go_only_delays_a_request_a_little() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("api.lock");
+    // Some other program holds it for good (it hung, say).
+    let held = std::fs::OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock).unwrap();
+    held.lock().unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&server).await;
+    let started = std::time::Instant::now();
+    authed(&server).with_process_lock(&lock).with_process_lock_wait(std::time::Duration::from_millis(300)).heartbeat().await.expect("goes ahead after waiting its turn");
+    let took = started.elapsed();
+    assert!(took >= std::time::Duration::from_millis(280) && took < std::time::Duration::from_secs(3), "{took:?}");
+    drop(held);
+}
+
+#[tokio::test]
+async fn the_lock_is_free_again_as_soon_as_a_request_has_its_headers() {
+    // Not held across the body: a second request is not kept waiting for a long download.
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("api.lock");
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&server).await;
+    let c = authed(&server).with_process_lock(&lock);
+    c.heartbeat().await.unwrap();
+    let probe = std::fs::OpenOptions::new().read(true).write(true).open(&lock).unwrap();
+    probe.try_lock().expect("nothing is still holding the lock after the call returns");
+}
+
+// ---- two real processes ------------------------------------------------------------------------
+
+/// Not a test of its own: the body the child processes below run. Without the variables it does nothing.
+#[tokio::test]
+async fn child_process_makes_a_call() {
+    let (Ok(url), Ok(start_at)) = (std::env::var("ROMM_TEST_URL"), std::env::var("ROMM_TEST_START_AT_MS")) else { return };
+    let client = RommClient::new(&url, Some("rmm_t".into()), false).unwrap();
+    let client = match std::env::var("ROMM_TEST_LOCK") {
+        Ok(p) if !p.is_empty() => client.with_process_lock(p),
+        _ => client,
+    };
+    // Everyone starts together, however long each process took to come up.
+    let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(start_at.parse().unwrap());
+    if let Ok(wait) = at.duration_since(std::time::SystemTime::now()) {
+        tokio::time::sleep(wait).await;
+    }
+    client.heartbeat().await.expect("the call succeeds");
+}
+
+async fn two_real_processes_call_at_once(lock: Option<&std::path::Path>) -> std::time::Duration {
+    let server = MockServer::start().await;
+    let arrivals = Arrivals::default();
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(arrivals.clone()).mount(&server).await;
+    let start_at = (std::time::SystemTime::now() + std::time::Duration::from_millis(1500)).duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let me = std::env::current_exe().unwrap();
+    let spawn = || {
+        let mut c = std::process::Command::new(&me);
+        c.args(["--exact", "child_process_makes_a_call", "--test-threads=1"])
+            .env("ROMM_TEST_URL", server.uri())
+            .env("ROMM_TEST_START_AT_MS", start_at.to_string())
+            .env("ROMM_TEST_LOCK", lock.map(|p| p.as_os_str().to_owned()).unwrap_or_default())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        c.spawn().expect("a child process starts")
+    };
+    let (mut a, mut b) = (spawn(), spawn());
+    let (sa, sb) = tokio::task::spawn_blocking(move || (a.wait().unwrap(), b.wait().unwrap())).await.unwrap();
+    assert!(sa.success() && sb.success(), "both processes made their call: {sa:?} {sb:?}");
+    let t = arrivals.0.lock().unwrap().clone();
+    assert_eq!(t.len(), 2, "each process sent exactly one request");
+    t[1].duration_since(t[0])
+}
+
+#[tokio::test]
+async fn two_real_processes_sharing_the_lock_file_take_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let gap = two_real_processes_call_at_once(Some(&dir.path().join("api.lock"))).await;
+    assert!(gap >= std::time::Duration::from_millis(250), "the second process waited for the first's response: {gap:?}");
+}
+
+#[tokio::test]
+async fn two_real_processes_without_it_collide_which_is_what_romm_choked_on() {
+    let gap = two_real_processes_call_at_once(None).await;
+    assert!(gap < std::time::Duration::from_millis(200), "{gap:?}");
+}

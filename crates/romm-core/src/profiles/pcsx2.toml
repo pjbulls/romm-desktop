@@ -12,6 +12,12 @@ flatpak_id = "net.pcsx2.PCSX2"
 
 [launch]
 args = ["-batch", "--", "{rom}"]
+# PCSX2 has no playlist support (nothing in its source reads a .m3u). Handed one, it falls through
+# VMManager::AutoDetectSource to "assume it is a disc image", looks for the ISO 9660 signature at
+# sector 16 and fails with "Unable to identify the ISO image type for 'X.m3u'". A multi-disc game
+# (stored with its playlist as the launch file) is launched on the first disc it lists instead; the
+# other discs are swapped in from PCSX2's own Change Disc action.
+no_playlists = true
 
 [data]
 linux = ["{xdg_config}/PCSX2"]
