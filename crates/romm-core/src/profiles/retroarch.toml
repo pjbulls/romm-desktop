@@ -51,7 +51,6 @@ dir = "system"
 id = "resolution"
 core = "flycast"
 label = "Internal resolution"
-help = "How sharp the picture is rendered. Higher looks better and needs a faster graphics card."
 choices = [
   { value = "640x480", label = "640×480 (native)" },
   { value = "1280x960", label = "1280×960 (2×)" },
@@ -68,7 +67,6 @@ apply = [{ type = "retroarch_option", sets = [{ key = "reicast_internal_resoluti
 id = "resolution"
 core = "mupen64plus_next"
 label = "Internal resolution (GLideN64)"
-help = "How sharp the picture is rendered. Higher looks better and needs a faster graphics card. Applies to the GLideN64 renderer, the core's default."
 choices = [
   { value = "1", label = "1× (640×480)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "640x480" }, { key = "mupen64plus-169screensize", value = "640x360" }] }] },
   { value = "2", label = "2× (1280×960)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "1280x960" }, { key = "mupen64plus-169screensize", value = "1280x720" }] }] },
@@ -82,7 +80,6 @@ choices = [
 id = "resolution"
 core = "swanstation"
 label = "Internal resolution"
-help = "How sharp the picture is rendered, as a multiple of the PlayStation's own. Higher looks better and needs a faster graphics card; a few games break above 1×."
 choices = [
   { value = "1", label = "1× (native)" },
   { value = "2", label = "2×" },

@@ -52,7 +52,6 @@ mode = "hdd"
 [[settings]]
 id = "resolution"
 label = "Internal resolution"
-help = "How sharp the picture is rendered, as a multiple of the Xbox's own. Higher looks better and needs a faster graphics card."
 choices = [
   { value = "1", label = "1× (native)" },
   { value = "2", label = "2×" },
@@ -66,7 +65,6 @@ apply = [{ type = "toml", file = "xemu.toml", path = "display.quality.surface_sc
 [[settings]]
 id = "fullscreen"
 label = "Screen mode"
-help = "Whether games open fullscreen or in a window."
 choices = [
   { value = "on", label = "Fullscreen", apply = [{ type = "toml", file = "xemu.toml", path = "display.window.fullscreen_on_startup", value = "true", kind = "bool" }] },
   { value = "off", label = "Windowed", apply = [{ type = "toml", file = "xemu.toml", path = "display.window.fullscreen_on_startup", value = "false", kind = "bool" }] },

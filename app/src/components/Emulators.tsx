@@ -68,7 +68,7 @@ export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: P
   return (
     <div className="page">
       <header className="topbar"><h1>Emulators &amp; BIOS</h1></header>
-      <p className="muted lead">RomM Desktop finds installed emulators automatically (including Flatpak on Linux). If one isn't found, point it at the executable.{onGoSettings && <> To set resolution and similar options for them, see <button className="link-btn" type="button" onClick={onGoSettings} data-testid="go-emulation-settings">Settings → Emulation</button>.</>}</p>
+      <p className="muted lead">If auto-detection is unsuccessful, the executable path can be set here.{onGoSettings && <> Some emulator options are exposed at <button className="link-btn" type="button" onClick={onGoSettings} data-testid="go-emulation-settings">Settings → Emulation</button>.</>}</p>
 
       <section className="stack">
         {emus.map((e) => (
@@ -98,7 +98,7 @@ export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: P
       <section>
         <h2>BIOS files</h2>
         {withBios.length === 0 ? (
-          <p className="muted">None of your platforms have BIOS files on the server. Add them to a platform's <code>bios</code> folder in RomM and rescan.</p>
+          <p className="muted">None of your platforms have BIOS files on the server.</p>
         ) : (
           <div className="card">
             <ul className="rows">
@@ -107,7 +107,7 @@ export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: P
                   <div className="row-flex">
                     <div className="row-main"><span className="row-name">{p.name}</span><span className="muted small">{p.firmwareCount} file{p.firmwareCount === 1 ? "" : "s"} → {p.emulatorName}</span></div>
                     <button className="btn" disabled={bios[p.slug]?.busy || !p.emulatorInstalled} onClick={() => installBios(p.slug)} title={!p.emulatorInstalled ? `${p.emulatorName} isn't installed` : undefined} data-testid={`bios-${p.slug}`}>
-                      {bios[p.slug]?.busy ? "Downloading…" : "Install BIOS"}
+                      {bios[p.slug]?.busy ? "Downloading..." : "Install BIOS"}
                     </button>
                   </div>
                   {bios[p.slug]?.error && <div className="banner banner-error">{bios[p.slug]!.error}</div>}
@@ -120,7 +120,7 @@ export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: P
       </section>
 
       <section>
-        <h2>Which emulator plays what</h2>
+        <h2>Emulator mapping</h2>
         <div className="card">
           <ul className="rows">
             {mappable.map((p) => <PlatformChoice key={p.id} platform={p.slug in picked ? { ...p, selected: picked[p.slug] } : p} onChange={mapPlatform} />)}

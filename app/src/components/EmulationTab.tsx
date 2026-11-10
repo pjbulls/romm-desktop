@@ -18,17 +18,9 @@ export function EmulationTab({
     <>
       <section className="card form">
         <h3>Emulator settings</h3>
-        <p className="muted small" style={{ margin: 0 }}>
-          Choose how games should run and this app applies it every time you press Play, so you don't have to open the
-          emulator's own settings. Anything left on “Don't change” stays exactly as the emulator has it.
-        </p>
-        <span className="hint">
-          The emulators stay yours: install and update them yourself and point to them on the Emulators page. If an
-          emulator also has a setting for one particular game, that game-specific setting can still win.
-        </span>
       </section>
 
-      {error && <div className="card error-text" role="alert">Couldn't load the emulator settings: {error}</div>}
+      {error && <div className="card error-text" role="alert">Couldn't load emulator settings: {error}</div>}
       {!scopes && !error && <div className="loading-row"><span className="spinner sm" /> Loading…</div>}
 
       {scopes?.map((sc) => (
@@ -50,13 +42,6 @@ function ScopeCard({ sc, values, onChange }: { sc: EmulationScope; values: Emula
         </span>
       </div>
 
-      {sc.core && sc.platforms.length > 0 && (
-        <div className="emu-platforms">
-          <span className="muted small">Used for</span>
-          {sc.platforms.map((p) => <span key={p} className="chip chip-muted">{p}</span>)}
-        </div>
-      )}
-
       {sc.settings.map((s) => (
         <label key={s.id}>
           {s.label}
@@ -72,16 +57,10 @@ function ScopeCard({ sc, values, onChange }: { sc: EmulationScope; values: Emula
         </label>
       ))}
 
-      <span className="hint">
-        {sc.changesFiles
-          ? "Written to the emulator's settings file just before a game starts. The first version of that file is kept in a backups folder."
-          : "Passed on the command line each time a game starts. This emulator's own files are never changed."}
-      </span>
-      {!sc.installed && <span className="hint">Not found on this PC yet. You can choose now and it will apply once it is installed.</span>}
       {set > 0 && (
         <div>
           <button className="link-btn" type="button" onClick={() => onChange(clearScope(values, sc.scope))}>
-            Reset everything here to “Don't change”
+            Reset all to "Don't change"
           </button>
         </div>
       )}

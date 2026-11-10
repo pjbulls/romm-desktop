@@ -72,7 +72,6 @@ export function Settings({ status, onDisconnected, initialTab }: { status: Statu
             <input value={form.romDir} onChange={(e) => set("romDir", e.target.value)} data-testid="rom-dir" />
             <button className="btn" type="button" onClick={browse}>Browse…</button>
           </div>
-          <span className="hint">Games are stored in a subfolder per platform. Changing this doesn't move games you've already downloaded.</span>
         </label>
       </section>
 
@@ -82,7 +81,6 @@ export function Settings({ status, onDisconnected, initialTab }: { status: Statu
           <input type="checkbox" checked={form.syncStates} onChange={(e) => set("syncStates", e.target.checked)} data-testid="sync-states" />
           Sync save states
         </label>
-        <span className="hint">Saves are always synced. Save states can be large (PS2 and GameCube states are tens of MB each), so you can turn them off or cap their size.</span>
         <label>
           Skip states larger than
           <div className="input-row short">
@@ -90,6 +88,7 @@ export function Settings({ status, onDisconnected, initialTab }: { status: Statu
             <span>MB</span>
           </div>
         </label>
+        <span className="hint">Saves are always synced.</span>
 
         <fieldset>
           <legend>When both this PC and the server changed the same file</legend>
@@ -100,7 +99,6 @@ export function Settings({ status, onDisconnected, initialTab }: { status: Statu
             </label>
           ))}
         </fieldset>
-        <span className="hint">Whatever is replaced locally is first copied to a backups folder.</span>
       </section>
       </>}
 
@@ -116,7 +114,7 @@ export function Settings({ status, onDisconnected, initialTab }: { status: Statu
           Navigate with a game controller
         </label>
         <span className="hint" data-testid="pad-status">
-          {pad.controller ? `Connected: ${pad.controller}` : "No controller detected. Connect one and press any button."}
+          {pad.controller ? `Connected: ${pad.controller}` : "No controller detected."}
           {" "}Input is ignored while a game is running.
         </span>
         <dl className="kv pad-legend">

@@ -52,7 +52,6 @@ dir = "bios"
 [[settings]]
 id = "resolution"
 label = "Internal resolution"
-help = "How sharp the picture is rendered, as a multiple of the PS2's own. Higher looks better and needs a faster graphics card."
 choices = [
   { value = "1", label = "1× (native)" },
   { value = "2", label = "2× (about 720p)" },
@@ -67,7 +66,6 @@ apply = [{ type = "ini", file = "inis/PCSX2.ini", section = "EmuCore/GS", sets =
 [[settings]]
 id = "fullscreen"
 label = "Screen mode"
-help = "Whether games open fullscreen or in a window."
 choices = [
   { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-fullscreen"] }] },
   { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-nofullscreen"] }] },

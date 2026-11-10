@@ -44,7 +44,6 @@ dir = "StateSaves"
 [[settings]]
 id = "resolution"
 label = "Internal resolution"
-help = "How sharp the picture is rendered, as a multiple of the console's own. Higher looks better and needs a faster graphics card."
 choices = [
   { value = "0", label = "Automatic (fit the window)" },
   { value = "1", label = "1× (native)" },
@@ -59,7 +58,6 @@ apply = [{ type = "args", args = ["-C", "Graphics.Settings.InternalResolution={v
 [[settings]]
 id = "fullscreen"
 label = "Screen mode"
-help = "Whether games open fullscreen or in a window."
 choices = [
   { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=True"] }] },
   { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=False"] }] },

@@ -60,7 +60,6 @@ dir = "states"
 [[settings]]
 id = "resolution"
 label = "Internal resolution"
-help = "How sharp the picture is rendered, as a multiple of the 3DS's own. Higher looks better and needs a faster graphics card."
 choices = [
   { value = "0", label = "Automatic (fit the window)" },
   { value = "1", label = "1× (native)" },
