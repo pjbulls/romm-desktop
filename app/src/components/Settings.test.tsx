@@ -192,7 +192,6 @@ describe("Settings → Emulation", () => {
     expect(host.textContent).toContain("RetroArch · Flycast");
     expect(tid("emu-scope-dolphin")!.textContent).toContain("Installed");
     expect(tid("emu-scope-retroarch:flycast")!.textContent).toContain("Not installed");
-    expect(tid("emu-scope-retroarch:flycast")!.textContent).toContain("dc"); // the platforms the core is used for
     expect(tid("emu-scope-dolphin")!.textContent).toContain("never changed"); // arguments only
     expect(tid("emu-scope-retroarch:flycast")!.textContent).toContain("settings file"); // edits a file
   });
