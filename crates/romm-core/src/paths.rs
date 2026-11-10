@@ -95,14 +95,31 @@ pub struct DataRoot {
 /// Picks the emulator's data directory: the first candidate that exists (and whose
 /// `requires` marker exists), else the first candidate that can be expanded.
 pub fn resolve_data_root(profile: &Profile, flatpak: bool, os: Os, ctx: &PathCtx) -> Option<DataRoot> {
-    let cands: &[Candidate] = if flatpak {
-        &profile.data.flatpak
+    pick(candidates(&profile.data, flatpak, os), ctx)
+}
+
+/// Where the emulator keeps its settings files: the `[config]` folder when the profile has one
+/// (Azahar splits config from data on Linux), else the data folder it was given.
+pub fn resolve_config_root(profile: &Profile, flatpak: bool, os: Os, ctx: &PathCtx, data_root: &Path) -> PathBuf {
+    let cands = candidates(&profile.config, flatpak, os);
+    if cands.is_empty() {
+        return data_root.to_path_buf();
+    }
+    pick(cands, ctx).map(|r| r.path).unwrap_or_else(|| data_root.to_path_buf())
+}
+
+fn candidates(dirs: &crate::profiles::DataDirs, flatpak: bool, os: Os) -> &[Candidate] {
+    if flatpak {
+        &dirs.flatpak
     } else {
         match os {
-            Os::Linux => &profile.data.linux,
-            Os::Windows => &profile.data.windows,
+            Os::Linux => &dirs.linux,
+            Os::Windows => &dirs.windows,
         }
-    };
+    }
+}
+
+fn pick(cands: &[Candidate], ctx: &PathCtx) -> Option<DataRoot> {
     let mut first_plain: Option<PathBuf> = None;
     let mut flagged: Option<PathBuf> = None;
     for c in cands {

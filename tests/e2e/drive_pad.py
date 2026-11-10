@@ -248,6 +248,17 @@ try:
     wait_toast("Settings saved", 10)
     check("changes made with the controller are saved", f"max_state_mb = {v1}" in open(f"{HOME}/rommhome/config/config.toml").read())
     shot("p04-settings")
+    # Settings has tabs: General, Emulation, Controller, Connection. LB/RB move between them here, and
+    # only here: on a page without tabs they still change platform.
+    selected_tab = lambda: js("return document.querySelector('[role=tab][aria-selected=true]').dataset.testid")
+    check("settings opens on its General tab", selected_tab() == "tab-general", selected_tab())
+    press("rb")
+    d.wait_css("[data-testid=emu-scope-dolphin]", 8)
+    check("RB moves to the next settings tab, not the next platform", selected_tab() == "tab-emulation" and "Settings" in sidebar_active(), f"{selected_tab()} / {sidebar_active()}")
+    check("and the hints call it a tab", "Tab" in hints(), hints())
+    press("rb")
+    d.wait_css("[data-testid=pad-status]", 8)
+    check("RB again reaches the Controller tab", selected_tab() == "tab-controller", selected_tab())
     check("settings shows the controller and its button legend", "Xbox 360 Controller" in js("return document.querySelector('[data-testid=pad-status]').innerText"))
 
     print("== Opting out")

@@ -206,7 +206,34 @@ export interface Settings {
   deviceName: string | null;
   acceptInvalidCerts: boolean;
   platformEmulators: Record<string, string>;
+  /** What's been chosen under Settings → Emulation: scope → setting id → choice value. A missing entry means "don't change". */
+  emulatorSettings: EmulatorSettings;
 }
+
+export type EmulatorSettings = Record<string, Record<string, string>>;
+
+/** Mirrors `EmulationScopeDto`: one emulator, or one RetroArch core, and what the app can control for it. */
+export interface EmulationScope {
+  /** The emulator's id, or `retroarch:<core>`; the key into `Settings.emulatorSettings`. */
+  scope: string;
+  emulatorId: string;
+  name: string;
+  core: string | null;
+  installed: boolean;
+  platforms: string[];
+  /** True when applying these settings edits one of the emulator's own files; false when it's all command-line arguments. */
+  changesFiles: boolean;
+  settings: EmulationSetting[];
+}
+
+export interface EmulationSetting {
+  id: string;
+  label: string;
+  help: string;
+  choices: { value: string; label: string }[];
+}
+
+export type SettingsTab = "general" | "emulation" | "controller" | "connection";
 
 /** Mirrors `romm_core::achievements` (snake_case, passed through as-is like SaveView/StateView). */
 export type RaState = "ready" | "no_set" | "not_linked";
@@ -250,4 +277,4 @@ export type View =
   | { kind: "library"; platform: Platform | null }
   | { kind: "installed" }
   | { kind: "emulators" }
-  | { kind: "settings" };
+  | { kind: "settings"; tab?: SettingsTab };

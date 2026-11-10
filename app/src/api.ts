@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  AchievementsView, Bios, Details, Emulator, GamesArgs, GamesPage, JobEvent, LibraryEvent, LoginArgs, Platform, ProgressEvent, Settings, Status, VersionSize,
+  AchievementsView, Bios, Details, EmulationScope, Emulator, GamesArgs, GamesPage, JobEvent, LibraryEvent, LoginArgs, Platform, ProgressEvent, Settings, Status, VersionSize,
 } from "./types";
 
 /** Tauri rejects with the Rust `String` error; normalise anything else. */
@@ -38,6 +38,7 @@ export const api = {
   setPlatformChoice: (slug: string, choice: string | null) => invoke<void>("set_platform_choice", { slug, choice }),
   installBios: (platformSlug: string) => invoke<Bios[]>("install_bios", { platformSlug }),
   settings: () => invoke<Settings>("settings"),
+  emulationSchema: () => invoke<EmulationScope[]>("emulation_schema"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
 };
 

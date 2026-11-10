@@ -31,3 +31,24 @@ mode = "diff"
 mode = "diff"
 dir = "PPSSPP_STATE"
 ignore_extensions = ["jpg", "jpeg", "png"]
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against PPSSPP's source: `InternalResolution` is in the `[Graphics]` section of
+# `SYSTEM/ppsspp.ini` under the PSP folder (Core/Config.cpp). 0 is automatic (it follows the window);
+# N draws at 480N × 272N (UI/EmuScreen.cpp). A game with its own settings in PPSSPP still uses those.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+help = "How sharp the picture is rendered, as a multiple of the PSP's own 480×272. Higher looks better and needs a faster graphics card."
+choices = [
+  { value = "0", label = "Automatic (fit the window)" },
+  { value = "1", label = "1× (480×272, native)" },
+  { value = "2", label = "2× (960×544)" },
+  { value = "3", label = "3× (1440×816)" },
+  { value = "4", label = "4× (1920×1088)" },
+  { value = "5", label = "5× (2400×1360)" },
+  { value = "6", label = "6× (2880×1632)" },
+  { value = "8", label = "8× (3840×2176)" },
+  { value = "10", label = "10× (4800×2720)" },
+]
+apply = [{ type = "ini", file = "SYSTEM/ppsspp.ini", section = "Graphics", sets = [{ key = "InternalResolution", value = "{value}" }] }]

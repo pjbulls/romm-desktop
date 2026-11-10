@@ -34,3 +34,33 @@ mode = "diff"
 [states]
 mode = "diff"
 dir = "StateSaves"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Dolphin takes these on its command line, so none of its files are touched: `-C <System>.<Section>.<Key>=<Value>`
+# is its own config override (UICommon/CommandLineParse.cpp). Two details that matter, both from its source:
+#   * The graphics system is named `Graphics` here (Common/Config/Config.cpp), not `GFX` as its file is. An
+#     unknown system name is skipped without a word, so a wrong one would look like it worked and do nothing.
+#   * The override sits below a game's own ini in Dolphin's layer order, so a per-game setting still wins.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+help = "How sharp the picture is rendered, as a multiple of the console's own. Higher looks better and needs a faster graphics card."
+choices = [
+  { value = "0", label = "Automatic (fit the window)" },
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2× (about 720p)" },
+  { value = "3", label = "3× (about 1080p)" },
+  { value = "4", label = "4× (about 1440p)" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6× (about 4K)" },
+]
+apply = [{ type = "args", args = ["-C", "Graphics.Settings.InternalResolution={value}"] }]
+
+[[settings]]
+id = "fullscreen"
+label = "Screen mode"
+help = "Whether games open fullscreen or in a window."
+choices = [
+  { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=True"] }] },
+  { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=False"] }] },
+]

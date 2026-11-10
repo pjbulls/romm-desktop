@@ -116,6 +116,90 @@ pub struct BiosRule {
     pub dir: String,
 }
 
+/// Which of an emulator's folders a settings file is relative to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Root {
+    /// The data root (`[data]`): where saves, states and, for most emulators, the settings live.
+    #[default]
+    Data,
+    /// The config root (`[config]`), for emulators that keep settings somewhere other than their data.
+    Config,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct KeyValue {
+    pub key: String,
+    pub value: String,
+}
+
+/// How a value is written into a TOML file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TomlKind {
+    #[default]
+    String,
+    Int,
+    Bool,
+}
+
+/// One thing a setting's choice does to an emulator. `{value}` in any string is replaced by the
+/// choice's value. See `emu_settings` for how these are carried out.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Apply {
+    /// Command-line arguments. They go ahead of the user's own extra args, so those still win.
+    Args { args: Vec<String> },
+    /// Keys in a section of an INI file. The file must already exist: an emulator that has never
+    /// run has no settings file, and one we made would stop it running its first-time setup.
+    Ini {
+        #[serde(default)]
+        root: Root,
+        file: String,
+        section: String,
+        sets: Vec<KeyValue>,
+    },
+    /// One key in a TOML file (a dotted `path`, e.g. `display.quality.surface_scale`).
+    Toml {
+        #[serde(default)]
+        root: Root,
+        file: String,
+        path: String,
+        value: String,
+        #[serde(default)]
+        kind: TomlKind,
+    },
+    /// Options of the libretro core a RetroArch setting belongs to, in RetroArch's per-core options file.
+    RetroarchOption { sets: Vec<KeyValue> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SettingChoice {
+    pub value: String,
+    pub label: String,
+    /// What this choice does, when that differs from the setting's own `apply` (e.g. a flag for
+    /// "on" and another for "off", or two options set together).
+    #[serde(default)]
+    pub apply: Vec<Apply>,
+}
+
+/// A setting the app can take over for an emulator. Until the user picks a choice the emulator's
+/// own setting is left alone.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Setting {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub help: String,
+    /// RetroArch only: the libretro core this setting belongs to (each core names its options differently).
+    #[serde(default)]
+    pub core: Option<String>,
+    pub choices: Vec<SettingChoice>,
+    /// What every choice does, with `{value}` filled in. A choice's own `apply` replaces it.
+    #[serde(default)]
+    pub apply: Vec<Apply>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -134,6 +218,13 @@ pub struct Profile {
     pub states: Option<StateRule>,
     #[serde(default)]
     pub bios: Option<BiosRule>,
+    /// Where the emulator keeps its settings files when that is not its data folder (empty: the
+    /// data folder). Same candidate rules as `[data]`.
+    #[serde(default)]
+    pub config: DataDirs,
+    /// Settings the app can control (see `emu_settings`).
+    #[serde(default)]
+    pub settings: Vec<Setting>,
 }
 
 impl Profile {

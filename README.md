@@ -13,6 +13,7 @@ A Windows + Linux desktop client for [RomM](https://github.com/rommapp/romm), mo
 - **Play**: pull saves and states → launch the emulator → work out which files changed → push saves, states and playtime.
 - **Conflicts**: never lose data. Default "keep both": your version is archived on the server, the server's is used, and what's replaced locally is copied to a backups folder first.
 - **Emulators**: RetroArch, DuckStation (PS1), Dolphin, PPSSPP, PCSX2 (PS2), Azahar (3DS), xemu (original Xbox) and Xenia Canary (Xbox 360), the last two described below. Auto-detected via PATH, standard Windows locations and Flatpak, or manually locate the executable. BIOS files install into known folders.
+- **Emulator settings**: choose internal resolution (upscaling) and fullscreen once, under Settings → Emulation, and the app applies it every time you press Play. The emulators stay yours: nothing is downloaded, installed or managed. See [Emulator settings](#emulator-settings).
 - **RetroAchievements**: each game's achievements with what you've earned, progress and points, read from your RomM server.
 - **Controller support**: browse, install, play and change settings without touching a keyboard or mouse.
 
@@ -26,7 +27,7 @@ Plug in a controller and press any button. Xbox, PlayStation and Switch pads wor
 | A (✕) | Select; on a text field it opens an **on-screen keyboard** |
 | B (○) | Back / close the panel or keyboard |
 | Start (Menu) | Play the focused game (Install if it isn't installed, inside the panel) |
-| LB / RB | Previous / next platform |
+| LB / RB | Previous / next platform (on Settings: previous / next tab) |
 | LT / RT | Page up / down (focus follows) |
 | Y (△) | Search |
 | X (□) | Dismiss notifications (in the keyboard: delete) |
@@ -74,6 +75,32 @@ A GitHub Actions workflow (`.github/workflows/build.yml`) builds both installers
 In RomM: **Profile → Client API Tokens**, create a token with scopes `me.read platforms.read roms.read firmware.read assets.read assets.write devices.read devices.write`, press **Pair**, and enter the 8-digit code in the app.
 
 Optional: add `me.write` to refresh RetroAchievements progress from inside the app (see [RetroAchievements](#retroachievements)). It is deliberately not in the list above: besides refreshing RetroAchievements, it lets a token edit your RomM profile and manage API tokens.
+
+## Emulator settings
+
+Settings has tabs (General, Emulation, Controller, Connection). **Emulation** lets you choose how your emulators run games, and the app applies it each time you press Play here, so you don't have to open each emulator's own settings. The Emulators page links to it. You still install and update the emulators yourself, and point the app at them on the Emulators page if they aren't found.
+
+| Emulator | Internal resolution | Screen mode | How it's applied |
+|---|---|---|---|
+| Dolphin | yes | yes | command-line options (`-C …`); none of Dolphin's files are touched |
+| PCSX2 | yes | yes | `inis/PCSX2.ini`, and `-fullscreen` / `-nofullscreen` |
+| DuckStation | yes | yes | `settings.ini`, and `-fullscreen` / `-nofullscreen` |
+| PPSSPP | yes | | `SYSTEM/ppsspp.ini` |
+| Azahar | yes | | `qt-config.ini` |
+| xemu | yes | yes | `xemu.toml` |
+| RetroArch | Flycast, Mupen64Plus-Next, SwanStation | | the core's own options file (`config/<core>/<core>.opt`) |
+
+How it behaves, because it edits files that belong to the emulator:
+
+- **Nothing changes until you choose.** Every setting starts on *Don't change*, and that leaves the emulator's own value alone.
+- **Edits are minimal.** Only the one key is changed; comments, order, spacing and line endings around it stay.
+- **The original is kept.** The first version of each file the app changes is copied to `emulator-config-backups` in the app's data folder (next to `backups`) and is not replaced by later changes.
+- **It never invents a settings file.** An emulator that has never run has none, and a file made for it would make it skip its first-time setup. You're told to start the emulator once. RetroArch's per-core options file is the exception, because RetroArch creates it itself; the app seeds it from RetroArch's global options file, as RetroArch would, so your other options for that core carry over.
+- **It never stops a game starting.** A setting that can't be applied is a note shown after the game.
+- **Others can still win.** Anything typed in the Emulators page's extra arguments comes after the app's and wins, and an emulator's own per-game settings (RetroArch's per-game and per-folder option files, Dolphin's per-game ini, PPSSPP's per-game config) outrank these. RetroArch says so when it finds such files.
+- The CLI's `romm play` applies the same settings, since they are stored in the shared config.
+
+A setting is declared in the emulator's profile (`[[settings]]` in `crates/romm-core/src/profiles/*.toml`), and what it does is carried out by `emu_settings.rs`. Every option name, value, flag and file location there was read from that emulator's source, and the profile comment says which file; please keep to that, because an option the emulator doesn't recognise is usually skipped without a word.
 
 ## Games with several versions
 
@@ -152,7 +179,7 @@ How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`me
 
 ```bash
 cargo test --workspace --lib --tests   # 344 tests, all in romm-core (against a mock RomM server)
-cd app && npm test                      # 160 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions, the whole app mounted against a fake backend (startup, loading, crashes), diagnostics reporting, achievement search and filtering
+cd app && npm test                      # 160 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions, the Settings tabs and the Emulation tab, the whole app mounted against a fake backend (startup, loading, crashes), diagnostics reporting, achievement search and filtering
 tests/e2e/run.sh                        # 36 checks driving the real app (needs xvfb + webkit2gtk-driver, debug build)
 DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
 DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
@@ -165,6 +192,7 @@ tests/smoke/psp_smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated d
 **Verified**
 - Games with several versions: the version, search, count and grouping logic (unit tests), the paged fetch against a mock server (grouped, no files, one count request, duplicates dropped), the card badge and the dropdown's contents and preselection (rendered components), and the real fetch-and-label code against the e2e fake server. The e2e journey `drive_versions.py` is written but **has not been run**; the app isn't built in the environment this was written in. The Tauri crate type-checks.
 - Core logic and CLI: unit and integration tests, plus scripted two-device runs of the real binary.
+- Emulator settings: every key, section, flag and file location was read from the emulator's own source (Dolphin, PCSX2, DuckStation, PPSSPP, Azahar, xemu, RetroArch and the three cores). The INI and TOML editors are unit-tested for what they preserve, and a launch is tested end to end with stand-in emulator scripts that are really run (the arguments they receive, their settings file as seen at start-up, the original kept). Two details that would be easy to get wrong have regression tests: Dolphin's graphics system is `Graphics` on its command line, not `GFX` (an unknown name is skipped silently), and Azahar ignores `resolution_factor` unless its `\default` flag is also set to `false`.
 - UI: the real Linux app (WebKitGTK, software-rendered under Xvfb) driven through login errors, pairing, library paging and search, cover art, install with progress, play → save + state upload, installed list, emulator detection, BIOS install, settings persistence, sync all, disconnect. The screenshots above come from that run.
 - Controller navigation: the real app driven end to end with a **simulated** controller: on-screen keyboard, grid/sidebar/panel navigation, both sticks, paging, infinite-scroll loading, platform switching, install, play, Start-to-play, ignoring input while a game runs, dropdowns and number fields, saving settings, opting out. It surfaced and fixed four real bugs (focus-lift mis-navigation, Down jumping to the menu, focus parking on the search box, and a library "No games" flash).
 - RetroAchievements: matching, offline copy and refresh errors against a fake server shaped like RomM's responses (including its badge-name quirk), and the panel in the real app, with and without the `me.write` scope.
@@ -172,6 +200,7 @@ tests/smoke/psp_smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated d
 
 **Not verified, so please test**
 - Against a **real RomM server**. Everything is written from RomM's docs and source and tested against a fake server I wrote. The device-sync protocol is still changing, so pin a minimum server version. Cover art assumes `/assets/…` accepts the bearer token; if not, the grid shows placeholders.
+- **Emulator settings with the real emulators.** None of Dolphin, PCSX2, DuckStation, PPSSPP, Azahar, xemu or RetroArch has been run with them; the options and files come from source, and the stand-ins only prove the app does what it intends. Most worth testing: that Azahar's resolution actually changes (its config folder on Windows and the `\default` flag are from source only), that PPSSPP finds `SYSTEM/ppsspp.ini` where expected, and that RetroArch picks up the per-core options file it is given. The Emulation tab was tested mounted against a fake backend, not in the built app, and `drive_pad.py` was edited to switch Settings tabs with LB/RB but **has not been re-run**.
 - With **real emulators**. Launch flags and save/state folders come from each project's documented behaviour. Likeliest to need tweaks: Wii NAND roots, DuckStation/PCSX2/PPSSPP state folder names, PCSX2 state file naming. The Azahar and xemu profiles were checked against those projects' source code and docs but never run against the real emulators (xemu's save upload and restore are tested against disk images built with libfatx and QEMU, and judged by `qemu-img check`/`compare` and libfatx; one real image's titles were listed by the CLI, but nothing has been run against a live RomM or a real console save); for Azahar, the Windows install locations are guesses and the save roots assume the default all-zero `sdmc` id folders (a console-imported `movable.sed` changes them). Azahar needs your console's keys in `sysdata/keys.txt` to play encrypted dumps (older Citra guides call it `aes_keys.txt`).
 - **Xenia Canary against a real install.** Launch args, storage-root rules, the `Headers/` layout and the legacy header format were read from Canary's source (`xenia_main.cc`, `content_manager.cc`, `xcontent_package_directory.cc`, `xcontent.h`) and the header's byte layout was compiled and checked against Xenia's own `static_assert`s, but no real Xenia was run. Most worth testing: that a save restored onto a fresh machine shows up in the game's own Load list (that is what the generated header is for), and the Windows install locations in the profile, which are guesses (Xenia ships as a zip). The Xbox 360 disc-image reader inside Sigil was exercised with a synthetic trimmed image, not a real XGD2/XGD3 dump.
 - **RetroAchievements against a real RomM** with a RetroAchievements key and a linked account. The response shapes come from RomM's source, not a live server. A successful Refresh (a token with `me.write`) is covered by core tests only, not in the real app.

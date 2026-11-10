@@ -26,6 +26,10 @@ pub struct Config {
     /// profile id → extra command-line args placed before the profile's own
     /// (e.g. duckstation → ["-fullscreen"])
     pub extra_args: BTreeMap<String, Vec<String>>,
+    /// Emulator settings the app applies at launch: scope (a profile id, or `retroarch:<core>`) →
+    /// setting id → chosen value. Anything not listed is left as the emulator has it.
+    /// See `emu_settings`.
+    pub emulator_settings: BTreeMap<String, BTreeMap<String, String>>,
     /// Sync save states (large files) in addition to saves.
     pub sync_states: bool,
     /// States bigger than this are skipped, in MiB.
@@ -45,6 +49,7 @@ impl Default for Config {
             platform_emulators: BTreeMap::new(),
             retroarch_cores: BTreeMap::new(),
             extra_args: BTreeMap::new(),
+            emulator_settings: BTreeMap::new(),
             sync_states: true,
             max_state_mb: 512,
             conflict_policy: crate::sync::ConflictPolicy::KeepBoth,
@@ -81,6 +86,10 @@ impl AppDirs {
     }
     pub fn backups_dir(&self) -> PathBuf {
         self.data_dir.join("backups")
+    }
+    /// The first copy of each emulator settings file this app has changed (see `emu_settings`).
+    pub fn emulator_config_backups(&self) -> PathBuf {
+        self.data_dir.join("emulator-config-backups")
     }
 
     /// The file the desktop app and the CLI lock, so that they never hit RomM's auth together (they

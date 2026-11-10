@@ -38,3 +38,58 @@ mode = "stem"
 
 [bios]
 dir = "system"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# RetroArch's own settings aren't touched. What is controlled is a libretro *core's* options, and each
+# core names its own, so each setting belongs to one core. They are written to the core's per-core
+# options file, `<config dir>/<core name>/<core name>.opt` (RetroArch's runloop.c). A per-game or
+# per-folder `.opt` file in the same folder outranks it, and the app says so when one exists.
+# The option names and values below are each core's own (its libretro_core_options.h).
+
+# Flycast (Dreamcast). The option keeps its old `reicast_` prefix.
+[[settings]]
+id = "resolution"
+core = "flycast"
+label = "Internal resolution"
+help = "How sharp the picture is rendered. Higher looks better and needs a faster graphics card."
+choices = [
+  { value = "640x480", label = "640×480 (native)" },
+  { value = "1280x960", label = "1280×960 (2×)" },
+  { value = "1920x1440", label = "1920×1440 (3×)" },
+  { value = "2560x1920", label = "2560×1920 (4×)" },
+  { value = "3840x2880", label = "3840×2880 (6×)" },
+  { value = "5120x3840", label = "5120×3840 (8×)" },
+]
+apply = [{ type = "retroarch_option", sets = [{ key = "reicast_internal_resolution", value = "{value}" }] }]
+
+# Mupen64Plus-Next (Nintendo 64). Its default GLideN64 renderer has one size for 4:3 and one for
+# widescreen, so both are set together. ParaLLEl-RDP, the other renderer, has its own scaling option.
+[[settings]]
+id = "resolution"
+core = "mupen64plus_next"
+label = "Internal resolution (GLideN64)"
+help = "How sharp the picture is rendered. Higher looks better and needs a faster graphics card. Applies to the GLideN64 renderer, the core's default."
+choices = [
+  { value = "1", label = "1× (640×480)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "640x480" }, { key = "mupen64plus-169screensize", value = "640x360" }] }] },
+  { value = "2", label = "2× (1280×960)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "1280x960" }, { key = "mupen64plus-169screensize", value = "1280x720" }] }] },
+  { value = "3", label = "3× (1920×1440)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "1920x1440" }, { key = "mupen64plus-169screensize", value = "1920x1080" }] }] },
+  { value = "4", label = "4× (2560×1920)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "2560x1920" }, { key = "mupen64plus-169screensize", value = "2560x1440" }] }] },
+  { value = "6", label = "6× (3840×2880)", apply = [{ type = "retroarch_option", sets = [{ key = "mupen64plus-43screensize", value = "3840x2880" }, { key = "mupen64plus-169screensize", value = "3840x2160" }] }] },
+]
+
+# SwanStation (PlayStation).
+[[settings]]
+id = "resolution"
+core = "swanstation"
+label = "Internal resolution"
+help = "How sharp the picture is rendered, as a multiple of the PlayStation's own. Higher looks better and needs a faster graphics card; a few games break above 1×."
+choices = [
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2×" },
+  { value = "3", label = "3× (about 720p)" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5× (about 1080p)" },
+  { value = "6", label = "6× (about 1440p)" },
+  { value = "9", label = "9× (about 4K)" },
+]
+apply = [{ type = "retroarch_option", sets = [{ key = "swanstation_GPU_ResolutionScale", value = "{value}" }] }]

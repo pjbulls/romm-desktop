@@ -4,7 +4,7 @@ import { useStore } from "../store";
 import type { Bios, Emulator, Platform } from "../types";
 import { PlatformChoice } from "./PlatformChoice";
 
-export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onChanged: () => void }) {
+export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: Platform[]; onChanged: () => void; onGoSettings?: () => void }) {
   const { push } = useStore();
   const [emus, setEmus] = useState<Emulator[] | null>(null);
   const [bios, setBios] = useState<Record<string, { busy: boolean; files?: Bios[]; error?: string }>>({});
@@ -68,7 +68,7 @@ export function Emulators({ platforms, onChanged }: { platforms: Platform[]; onC
   return (
     <div className="page">
       <header className="topbar"><h1>Emulators &amp; BIOS</h1></header>
-      <p className="muted lead">RomM Desktop finds installed emulators automatically (including Flatpak on Linux). If one isn't found, point it at the executable.</p>
+      <p className="muted lead">RomM Desktop finds installed emulators automatically (including Flatpak on Linux). If one isn't found, point it at the executable.{onGoSettings && <> To set resolution and similar options for them, see <button className="link-btn" type="button" onClick={onGoSettings} data-testid="go-emulation-settings">Settings → Emulation</button>.</>}</p>
 
       <section className="stack">
         {emus.map((e) => (

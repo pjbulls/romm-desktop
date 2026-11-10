@@ -1,23 +1,41 @@
 import { useEffect, useState } from "react";
 import { api, errMsg, pickFolder } from "../api";
+import { dirtyTabs } from "../emulation";
 import { POLICY_LABEL } from "../format";
 import { useGamepad } from "../gamepad/GamepadProvider";
 import { useStore } from "../store";
-import type { ConflictPolicy, Settings as S, Status } from "../types";
+import type { ConflictPolicy, EmulationScope, Settings as S, SettingsTab, Status } from "../types";
+import { EmulationTab } from "./EmulationTab";
+import { TabPanel, Tabs, type TabDef } from "./Tabs";
 
-export function Settings({ status, onDisconnected }: { status: Status; onDisconnected: (s: Status) => void }) {
+export function Settings({ status, onDisconnected, initialTab }: { status: Status; onDisconnected: (s: Status) => void; initialTab?: SettingsTab }) {
   const { push } = useStore();
   const [saved, setSaved] = useState<S | null>(null);
   const [form, setForm] = useState<S | null>(null);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
+  const [scopes, setScopes] = useState<EmulationScope[] | null>(null);
+  const [scopesError, setScopesError] = useState<string | null>(null);
   const pad = useGamepad();
 
   useEffect(() => {
     api.settings().then((s) => { setSaved(s); setForm(s); }).catch((e) => push("error", "Couldn't load settings", [errMsg(e)]));
   }, [push]);
 
+  // What the Emulation tab offers doesn't change while the page is open, so it's asked for once.
+  useEffect(() => {
+    api.emulationSchema().then(setScopes).catch((e) => setScopesError(errMsg(e)));
+  }, []);
+
   if (!form || !saved) return <div className="loading-row"><span className="spinner sm" /> Loading…</div>;
-  const dirty = JSON.stringify(form) !== JSON.stringify(saved);
+  const dirtyIn = dirtyTabs(form, saved);
+  const dirty = dirtyIn.size > 0;
+  const tabs: TabDef<SettingsTab>[] = [
+    { id: "general", label: "General", dirty: dirtyIn.has("general") },
+    { id: "emulation", label: "Emulation", dirty: dirtyIn.has("emulation") },
+    { id: "controller", label: "Controller" },
+    { id: "connection", label: "Connection", dirty: dirtyIn.has("connection") },
+  ];
   const set = <K extends keyof S>(k: K, v: S[K]) => setForm({ ...form, [k]: v });
 
   async function browse() {
@@ -42,7 +60,10 @@ export function Settings({ status, onDisconnected }: { status: Status; onDisconn
   return (
     <div className="page narrow">
       <header className="topbar"><h1>Settings</h1></header>
+      <Tabs tabs={tabs} active={tab} onChange={setTab} label="Settings sections" idPrefix="settings" />
 
+      <TabPanel id={tab} idPrefix="settings">
+      {tab === "general" && <>
       <section className="card form">
         <h3>Downloads</h3>
         <label>
@@ -81,7 +102,13 @@ export function Settings({ status, onDisconnected }: { status: Status; onDisconn
         </fieldset>
         <span className="hint">Whatever is replaced locally is first copied to a backups folder.</span>
       </section>
+      </>}
 
+      {tab === "emulation" && (
+        <EmulationTab scopes={scopes} error={scopesError} values={form.emulatorSettings} onChange={(v) => set("emulatorSettings", v)} />
+      )}
+
+      {tab === "controller" &&
       <section className="card form" data-testid="controller-settings">
         <h3>Game controller</h3>
         <label className="check">
@@ -97,15 +124,16 @@ export function Settings({ status, onDisconnected }: { status: Status; onDisconn
           <dt>{pad.labels.accept}</dt><dd>Select (opens an on-screen keyboard on text fields)</dd>
           <dt>{pad.labels.back}</dt><dd>Back / close</dd>
           <dt>{pad.labels.start}</dt><dd>Play the focused game</dd>
-          <dt>{pad.labels.lb} / {pad.labels.rb}</dt><dd>Previous / next platform</dd>
+          <dt>{pad.labels.lb} / {pad.labels.rb}</dt><dd>Previous / next platform, or tab on pages with tabs</dd>
           <dt>{pad.labels.lt} / {pad.labels.rt}</dt><dd>Page up / down</dd>
           <dt>{pad.labels.y}</dt><dd>Search</dd>
           <dt>{pad.labels.x}</dt><dd>Dismiss notifications</dd>
           <dt>{pad.labels.select}</dt><dd>Switch between the menu and the games</dd>
           <dt>Right stick</dt><dd>Scroll</dd>
         </dl>
-      </section>
+      </section>}
 
+      {tab === "connection" &&
       <section className="card form">
         <h3>Connection</h3>
         <dl className="kv">
@@ -118,7 +146,8 @@ export function Settings({ status, onDisconnected }: { status: Status; onDisconn
           Accept a self-signed HTTPS certificate
         </label>
         <div><button className="btn btn-danger" onClick={async () => onDisconnected(await api.logout())}>Disconnect</button></div>
-      </section>
+      </section>}
+      </TabPanel>
 
       <div className="savebar">
         <button className="btn btn-primary" disabled={!dirty || busy} onClick={save} data-testid="save-settings">{busy ? "Saving…" : "Save changes"}</button>

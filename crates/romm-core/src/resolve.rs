@@ -9,7 +9,8 @@ use crate::config::Config;
 use crate::detect::{self, Installed};
 use crate::error::{Error, Result};
 use crate::launch;
-use crate::paths::{resolve_data_root, Os, PathCtx};
+use crate::emu_settings::{self, PlanCtx, Tuning};
+use crate::paths::{resolve_config_root, resolve_data_root, Os, PathCtx};
 use crate::profiles::{self, Profile};
 use crate::retroarch;
 use crate::state::LocalRom;
@@ -26,6 +27,9 @@ pub struct Prepared {
     pub env: EmuEnv,
     pub installed: Installed,
     pub command: Command,
+    /// The emulator settings chosen for this launch. Its arguments are already on `command`; its
+    /// file edits are not made until `Tuning::apply` is called, just before the emulator starts.
+    pub tuning: Tuning,
 }
 
 impl<'a> Resolver<'a> {
@@ -99,9 +103,18 @@ impl<'a> Resolver<'a> {
             }
             None => None,
         };
-        let extra = self.cfg.extra_args.get(&emu_id).cloned().unwrap_or_default();
+        let pctx = self.pctx.clone().with_exe_dir(installed.exe_dir());
+        let config_root = resolve_config_root(&env.profile, installed.is_flatpak(), self.os, &pctx, &env.data_root);
+        let tuning = emu_settings::plan(
+            &env.profile,
+            &self.cfg.emulator_settings,
+            &PlanCtx { data_root: &env.data_root, config_root: &config_root, retroarch: env.retroarch.as_ref(), core: env.core.as_deref() },
+        );
+        // The app's settings go first, so an argument the user typed by hand still has the last word.
+        let mut extra = tuning.args.clone();
+        extra.extend(self.cfg.extra_args.get(&emu_id).cloned().unwrap_or_default());
         let command = launch::build_command(&env.profile, &installed, &rom.launch_path, core.as_deref(), &extra)?;
-        Ok(Prepared { env, installed, command })
+        Ok(Prepared { env, installed, command, tuning })
     }
 }
 
@@ -124,6 +137,50 @@ mod tests {
         let p = r.prepare(&rom).unwrap();
         assert_eq!(p.command.as_std().get_program(), exe.as_os_str());
         assert!(p.env.data_root.ends_with("cfg/ppsspp/PSP"), "{:?}", p.env.data_root);
+    }
+
+    /// The app's emulator settings reach the command line ahead of the user's own extra args (so a
+    /// hand-typed flag still wins), and nothing is written to disk by preparing a launch.
+    #[test]
+    fn chosen_emulator_settings_come_before_the_users_own_args_and_preparing_writes_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let exe = t.path().join("dolphin-emu");
+        std::fs::write(&exe, "").unwrap();
+        let mut cfg = Config::default();
+        cfg.emulator_paths.insert("dolphin".into(), exe);
+        cfg.emulator_settings.insert("dolphin".into(), [("resolution".to_string(), "3".to_string())].into());
+        cfg.extra_args.insert("dolphin".into(), vec!["--mine".into()]);
+        let rom = LocalRom {
+            rom_id: 1, name: "Melee".into(), platform_slug: "ngc".into(), path: "/r".into(),
+            launch_path: "/r/melee.iso".into(), stem: "melee".into(), ..Default::default()
+        };
+        let r = Resolver { cfg: &cfg, os: Os::Linux, pctx: PathCtx { home: Some(t.path().into()), xdg_data: Some(t.path().join("share")), ..Default::default() } };
+        let p = r.prepare(&rom).unwrap();
+
+        let args: Vec<String> = p.command.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = |needle: &str| args.iter().position(|a| a == needle).unwrap_or_else(|| panic!("{needle} not in {args:?}"));
+        assert_eq!(args[at("-C") + 1], "Graphics.Settings.InternalResolution=3");
+        assert!(at("-C") < at("--mine") && at("--mine") < at("/r/melee.iso"), "{args:?}");
+        assert!(p.tuning.edits.is_empty(), "Dolphin is controlled by arguments alone");
+        assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 1, "nothing but the fake executable exists");
+    }
+
+    #[test]
+    fn with_no_settings_chosen_the_command_is_exactly_what_it_was() {
+        let t = tempfile::tempdir().unwrap();
+        let exe = t.path().join("dolphin-emu");
+        std::fs::write(&exe, "").unwrap();
+        let mut cfg = Config::default();
+        cfg.emulator_paths.insert("dolphin".into(), exe);
+        let rom = LocalRom {
+            rom_id: 1, name: "Melee".into(), platform_slug: "ngc".into(), path: "/r".into(),
+            launch_path: "/r/melee.iso".into(), stem: "melee".into(), ..Default::default()
+        };
+        let r = Resolver { cfg: &cfg, os: Os::Linux, pctx: PathCtx { home: Some(t.path().into()), ..Default::default() } };
+        let p = r.prepare(&rom).unwrap();
+        assert!(p.tuning.is_empty() && p.tuning.notes.is_empty());
+        let args: Vec<String> = p.command.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|a| a == "-C"), "{args:?}");
     }
 
     #[test]

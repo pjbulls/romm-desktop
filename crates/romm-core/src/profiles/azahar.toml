@@ -30,6 +30,17 @@ windows = [
   "{appdata}/Azahar",
 ]
 
+# Azahar keeps `qt-config.ini` apart from the user directory on Linux (file_util.cpp: ConfigDir is
+# $XDG_CONFIG_HOME/azahar-emu, while the data is under $XDG_DATA_HOME). On Windows it is the `config`
+# folder inside the user directory (portable or not), which is why only Linux and Flatpak differ here.
+[config]
+linux = ["{xdg_config}/azahar-emu"]
+flatpak = ["{home}/.var/app/org.azahar_emu.Azahar/config/azahar-emu"]
+windows = [
+  { path = "{exe_dir}/user/config", requires = "{exe_dir}/user" },
+  "{appdata}/Azahar/config",
+]
+
 # Game saves live in the emulated SD card (sdmc/Nintendo 3DS/<id0>/<id1>/title/00040000/<tid>/data/
 # and extdata/); the game's save, metadata and extdata are found by title id (see unit.rs / route.rs).
 [saves]
@@ -40,3 +51,25 @@ mode = "diff"
 [states]
 mode = "diff"
 dir = "states"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against Azahar's source: `resolution_factor` is in the `[Renderer]` group of `qt-config.ini`
+# (src/citra_qt/configuration/config.cpp), 0 meaning "automatic" (by window size). Every setting in
+# that file has a companion `<key>\default` flag, and while it is `true` Azahar ignores the value
+# and uses its own default, so the flag has to be set to `false` along with the value.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+help = "How sharp the picture is rendered, as a multiple of the 3DS's own. Higher looks better and needs a faster graphics card."
+choices = [
+  { value = "0", label = "Automatic (fit the window)" },
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2×" },
+  { value = "3", label = "3×" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6×" },
+  { value = "8", label = "8×" },
+  { value = "10", label = "10×" },
+]
+apply = [{ type = "ini", root = "config", file = "qt-config.ini", section = "Renderer", sets = [{ key = "resolution_factor\\default", value = "false" }, { key = "resolution_factor", value = "{value}" }] }]

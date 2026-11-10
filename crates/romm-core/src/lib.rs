@@ -6,6 +6,7 @@ pub mod browse;
 pub mod config;
 pub mod detect;
 pub mod diagnostics;
+pub mod emu_settings;
 pub mod error;
 pub mod launch;
 pub mod library;

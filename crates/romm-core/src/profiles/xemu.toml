@@ -45,3 +45,29 @@ mode = "hdd"
 #   a whole-disk conflict.
 # * xemu takes its BIOS, boot ROM and HDD image from paths configured inside xemu
 #   itself, so there is no BIOS folder to install into.
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against xemu's config_spec.yml: `display.quality.surface_scale` (an integer, default 1) and
+# `display.window.fullscreen_on_startup` (a bool), both in `xemu.toml` in the data folder.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+help = "How sharp the picture is rendered, as a multiple of the Xbox's own. Higher looks better and needs a faster graphics card."
+choices = [
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2×" },
+  { value = "3", label = "3×" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6×" },
+]
+apply = [{ type = "toml", file = "xemu.toml", path = "display.quality.surface_scale", value = "{value}", kind = "int" }]
+
+[[settings]]
+id = "fullscreen"
+label = "Screen mode"
+help = "Whether games open fullscreen or in a window."
+choices = [
+  { value = "on", label = "Fullscreen", apply = [{ type = "toml", file = "xemu.toml", path = "display.window.fullscreen_on_startup", value = "true", kind = "bool" }] },
+  { value = "off", label = "Windowed", apply = [{ type = "toml", file = "xemu.toml", path = "display.window.fullscreen_on_startup", value = "false", kind = "bool" }] },
+]

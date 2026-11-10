@@ -5,6 +5,7 @@ import { initialState, mergeSnapshots, step, type Action, type Snapshot } from "
 import { controllerKind, friendlyName, labelsFor, type Labels } from "./layouts";
 import { setNativeValue } from "./osk";
 import { pickNext, type Box, type Dir } from "./spatial";
+import { cycleTab, hasTabs } from "./tabs";
 
 const STORAGE_KEY = "romm.gamepad.enabled";
 const readEnabled = () => {
@@ -152,20 +153,23 @@ interface HintCtx {
   kind: "osk" | "dialog" | "card" | "text" | "generic";
   primary: "" | "Play" | "Install";
   toasts: boolean;
+  /** The page has tabs, so LB/RB switch tab rather than platform. */
+  tabs: boolean;
 }
 
 function hintContext(osk: boolean): HintCtx {
   const toasts = document.querySelectorAll(".toast").length > 0;
-  if (osk) return { kind: "osk", primary: "", toasts };
+  const tabs = hasTabs();
+  if (osk) return { kind: "osk", primary: "", toasts, tabs };
   const dlg = document.querySelector<HTMLElement>("[role=dialog]");
   if (dlg) {
     const primary = dlg.querySelector("[data-testid=play]:not(:disabled)") ? "Play" : dlg.querySelector("[data-testid=install]:not(:disabled)") ? "Install" : "";
-    return { kind: "dialog", primary, toasts };
+    return { kind: "dialog", primary, toasts, tabs };
   }
   const ae = document.activeElement;
-  if (ae?.matches(".game-card")) return { kind: "card", primary: (ae as HTMLElement).dataset.installed === "true" ? "Play" : "", toasts };
-  if (isTextInput(ae)) return { kind: "text", primary: "", toasts };
-  return { kind: "generic", primary: "", toasts };
+  if (ae?.matches(".game-card")) return { kind: "card", primary: (ae as HTMLElement).dataset.installed === "true" ? "Play" : "", toasts, tabs };
+  if (isTextInput(ae)) return { kind: "text", primary: "", toasts, tabs };
+  return { kind: "generic", primary: "", toasts, tabs };
 }
 
 function Hints({ ctx, labels }: { ctx: HintCtx; labels: Labels }) {
@@ -187,7 +191,7 @@ function Hints({ ctx, labels }: { ctx: HintCtx; labels: Labels }) {
       items.push([labels.accept, "Type"], [labels.back, "Back"]);
       break;
     default:
-      items.push([labels.accept, "Select"], [labels.back, "Back"], [`${labels.lb}/${labels.rb}`, "Platform"]);
+      items.push([labels.accept, "Select"], [labels.back, "Back"], [`${labels.lb}/${labels.rb}`, ctx.tabs ? "Tab" : "Platform"]);
   }
   if (ctx.toasts && ctx.kind !== "osk") items.push([labels.x, "Dismiss"]);
   return (
@@ -211,7 +215,7 @@ export function GamepadProvider({ children }: { children: ReactNode }) {
   const [controller, setController] = useState<string | null>(null);
   const [kind, setKind] = useState(controllerKind(""));
   const [osk, setOsk] = useState<HTMLInputElement | null>(null);
-  const [hint, setHint] = useState<HintCtx>({ kind: "generic", primary: "", toasts: false });
+  const [hint, setHint] = useState<HintCtx>({ kind: "generic", primary: "", toasts: false, tabs: false });
 
   const activeRef = useRef(false);
   const oskRef = useRef<HTMLInputElement | null>(null);
@@ -328,8 +332,9 @@ export function GamepadProvider({ children }: { children: ReactNode }) {
       case "back": return back();
       case "x": return storeRef.current.toasts.forEach((t) => storeRef.current.dismiss(t.id));
       case "y": return (document.querySelector<HTMLElement>("[data-testid=search]") ?? document.querySelector<HTMLElement>(".side-filter"))?.focus();
-      case "lb": return cyclePlatform(-1);
-      case "rb": return cyclePlatform(1);
+      // On a page with tabs (Settings) the shoulder buttons move between them; elsewhere, between platforms.
+      case "lb": return cycleTab(-1) || cyclePlatform(-1);
+      case "rb": return cycleTab(1) || cyclePlatform(1);
       case "lt": return page(-1);
       case "rt": return page(1);
       case "start": return void start();

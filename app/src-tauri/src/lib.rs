@@ -13,6 +13,7 @@ use romm_core::api::types::{DeviceRegistration, Me, Platform, Rom};
 use romm_core::api::{RommClient, CLIENT_SLUG};
 use romm_core::config::{default_device_name, hostname, load_token, store_token, AppDirs, Config};
 use romm_core::diagnostics::{self, LogFile, Watchdog};
+use romm_core::emu_settings;
 use romm_core::library::{self, BiosStatus};
 use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
@@ -515,6 +516,41 @@ struct SettingsDto {
     device_name: Option<String>,
     accept_invalid_certs: bool,
     platform_emulators: std::collections::BTreeMap<String, String>,
+    /// What's been chosen under Settings → Emulation: scope → setting → value (see `emu_settings`).
+    #[serde(default)]
+    emulator_settings: emu_settings::Values,
+}
+
+/// What the Emulation tab needs to know about one emulator (or one RetroArch core): what can be
+/// controlled, and whether it's here.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmulationScopeDto {
+    scope: String,
+    emulator_id: String,
+    name: String,
+    core: Option<String>,
+    installed: bool,
+    platforms: Vec<String>,
+    /// True when these settings edit one of the emulator's own files; false when everything is
+    /// passed on the command line and its files are never touched.
+    changes_files: bool,
+    settings: Vec<SettingDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingDto {
+    id: String,
+    label: String,
+    help: String,
+    choices: Vec<SettingChoiceDto>,
+}
+
+#[derive(Serialize)]
+struct SettingChoiceDto {
+    value: String,
+    label: String,
 }
 
 // -------------------------------------------------------------------------- commands
@@ -924,7 +960,7 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
     tauri::async_runtime::spawn(async move {
         let _busy = busy;
         emit_job::<()>(&app, "romm://play", rom_id, "syncing", None, None);
-        let (env, cmd) = (prepared.env, prepared.command);
+        let (env, cmd, tuning) = (prepared.env, prepared.command, prepared.tuning);
         let backups = st.dirs.backups_dir();
         let state_file = st.dirs.state_file();
         let run: CmdResult<PlaySummary> = async {
@@ -933,6 +969,9 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
                 session::pre_play(&client, &device, &mut db, &state_file, backups.clone(), &rom, &env, policy, opts.as_ref()).await.map_err(s)?
             };
             emit_job::<()>(&app, "romm://play", rom_id, "running", None, None);
+            // The emulator settings chosen under Settings → Emulation, written just before it starts.
+            // A problem here is a note for the player, never a reason not to play.
+            let tuning_notes = tuning.apply(&st.dirs.emulator_config_backups());
             let run = session::run_emulator(cmd, &env.profile.name).await.map_err(s)?;
             // The emulator has exited, so whatever was earned is on retroachievements.org by now. Ask
             // RomM to pull it while the saves upload; this neither delays the upload nor can fail it.
@@ -946,7 +985,7 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
                 session::post_play(&client, &device, &mut db, &state_file, backups, &rom, &env, policy, opts.as_ref(), pre, &run).await.map_err(s)?
             };
             let mut sync = SyncSummary::default();
-            let mut notes = vec![];
+            let mut notes = tuning_notes;
             for r in [&out.pull, &out.push].into_iter().flatten() {
                 sync.add_saves(r);
             }
@@ -1129,6 +1168,49 @@ async fn emulators(st: TauriState<'_, AppState>) -> CmdResult<Vec<EmulatorDto>> 
         .collect())
 }
 
+/// What the Emulation tab can offer: every emulator (and RetroArch core) with settings the app can
+/// control, and whether it's installed. Static apart from the installed flag; the values are in `settings`.
+#[tauri::command]
+async fn emulation_schema(st: TauriState<'_, AppState>) -> CmdResult<Vec<EmulationScopeDto>> {
+    let cfg = st.cfg.read().await.clone();
+    let resolver = Resolver::new(&cfg);
+    Ok(emu_settings::scopes()
+        .into_iter()
+        .map(|sc| {
+            let profile = profiles::get(&sc.profile_id);
+            let installed = profile.as_ref().is_some_and(|p| resolver.installed(p).is_some());
+            let platforms = match (&sc.core, &profile) {
+                (Some(core), _) => retroarch::supported_slugs()
+                    .filter(|slug| retroarch::cores_for(slug).contains(&core.as_str()))
+                    .map(String::from)
+                    .collect(),
+                (None, Some(p)) => p.platforms.clone(),
+                (None, None) => vec![],
+            };
+            let changes_files = sc.changes_files();
+            EmulationScopeDto {
+                changes_files,
+                scope: sc.scope,
+                emulator_id: sc.profile_id,
+                name: sc.name,
+                core: sc.core,
+                installed,
+                platforms,
+                settings: sc
+                    .settings
+                    .into_iter()
+                    .map(|s| SettingDto {
+                        id: s.id,
+                        label: s.label,
+                        help: s.help,
+                        choices: s.choices.into_iter().map(|c| SettingChoiceDto { value: c.value, label: c.label }).collect(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 async fn set_emulator_path(st: TauriState<'_, AppState>, id: String, path: Option<String>) -> CmdResult<()> {
     if profiles::get(&id).is_none() {
@@ -1205,6 +1287,7 @@ async fn settings(st: TauriState<'_, AppState>) -> CmdResult<SettingsDto> {
         device_name: c.device_name.clone(),
         accept_invalid_certs: c.accept_invalid_certs,
         platform_emulators: c.platform_emulators.clone(),
+        emulator_settings: c.emulator_settings.clone(),
     })
 }
 
@@ -1222,6 +1305,7 @@ async fn save_settings(st: TauriState<'_, AppState>, settings: SettingsDto) -> C
         c.conflict_policy = settings.conflict_policy;
         c.device_name = settings.device_name.filter(|n| !n.trim().is_empty());
         c.accept_invalid_certs = settings.accept_invalid_certs;
+        c.emulator_settings = emu_settings::sanitize(settings.emulator_settings);
     })
     .await?;
     // A changed certificate policy needs a fresh HTTP client.
@@ -1274,6 +1358,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            emulation_schema,
             status,
             login,
             logout,

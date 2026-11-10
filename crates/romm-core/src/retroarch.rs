@@ -135,6 +135,12 @@ pub struct Layout {
     /// Same for save states; downloads can't be placed correctly when these are on.
     pub sort_states_by_core: bool,
     pub sort_states_by_content: bool,
+    /// Where per-core and per-game option files live (`rgui_config_directory`): `<name>/<name>.opt`.
+    pub config_dir: PathBuf,
+    /// The one options file shared by every core (`core_options_path`, else `retroarch-core-options.cfg`).
+    pub global_options: PathBuf,
+    /// "Use global core options": every core reads `global_options` and per-core files are ignored.
+    pub global_core_options: bool,
 }
 
 fn resolve_dir(value: Option<&String>, root: &Path, default_sub: &str, ctx: &PathCtx) -> PathBuf {
@@ -181,6 +187,12 @@ pub fn layout(root: &Path, os: Os, ctx: &PathCtx) -> Layout {
         sort_saves_by_content: flag("sort_savefiles_by_content_enable"),
         sort_states_by_core: flag("sort_savestates_enable"),
         sort_states_by_content: flag("sort_savestates_by_content_enable"),
+        config_dir: resolve_dir(cfg.get("rgui_config_directory"), root, "config", ctx),
+        global_options: match cfg.get("core_options_path").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            Some(_) => resolve_dir(cfg.get("core_options_path"), root, "retroarch-core-options.cfg", ctx),
+            None => root.join("retroarch-core-options.cfg"),
+        },
+        global_core_options: flag("global_core_options"),
     }
 }
 
@@ -244,12 +256,12 @@ pub fn save_dirs(layout: &Layout, core: &str, content: &Path) -> Vec<PathBuf> {
 }
 
 /// The core options a layout's save file names can depend on, read the way RetroArch keeps them: a
-/// per-core `.opt` first, then the global `retroarch-core-options.cfg`. Only keys that belong to
-/// the core are returned (its own prefix, plus Flycast's historical `reicast_`).
+/// per-core `.opt` first, then the global options file. Only keys that belong to the core are
+/// returned (its own prefix, plus Flycast's historical `reicast_`).
 pub fn core_options(layout: &Layout, core: &str) -> Vec<(String, String)> {
     let name = core_dir_name(layout, core);
-    let mut files = vec![layout.root.join("config").join(&name).join(format!("{name}.opt"))];
-    files.push(layout.root.join("retroarch-core-options.cfg"));
+    let mut files = vec![layout.config_dir.join(&name).join(format!("{name}.opt"))];
+    files.push(layout.global_options.clone());
     let prefixes = [format!("{core}_"), if core == "flycast" { "reicast_".to_string() } else { String::new() }];
     let mut found: BTreeMap<String, String> = BTreeMap::new();
     for f in files {
@@ -261,6 +273,46 @@ pub fn core_options(layout: &Layout, core: &str) -> Vec<(String, String)> {
         }
     }
     found.into_iter().collect()
+}
+
+/// The file RetroArch will read a core's options from when no game- or folder-specific file
+/// overrides it (checked against RetroArch's `runloop_init_core_options_path`): the per-core
+/// `<config>/<name>/<name>.opt`, or the global file when "Use global core options" is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionsTarget {
+    pub path: PathBuf,
+    /// A per-core file that doesn't exist yet is created by RetroArch from the global file, not
+    /// from nothing. Whoever creates it first has to do the same, or the user's other options for
+    /// the core would quietly stop applying.
+    pub seed: Option<PathBuf>,
+}
+
+pub fn options_target(layout: &Layout, core: &str) -> OptionsTarget {
+    if layout.global_core_options {
+        return OptionsTarget { path: layout.global_options.clone(), seed: None };
+    }
+    let name = core_dir_name(layout, core);
+    let path = layout.config_dir.join(&name).join(format!("{name}.opt"));
+    let seed = (!path.exists()).then(|| layout.global_options.clone());
+    OptionsTarget { path, seed }
+}
+
+/// Option files that take priority over a core's own: RetroArch's per-game and per-folder ones are
+/// the other `.opt` files in the core's config folder.
+pub fn overriding_option_files(layout: &Layout, core: &str) -> usize {
+    let name = core_dir_name(layout, core);
+    let own = format!("{name}.opt");
+    std::fs::read_dir(layout.config_dir.join(&name))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let n = e.file_name();
+                    let n = n.to_string_lossy();
+                    n.ends_with(".opt") && n != own.as_str()
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// Does `file_name` look like one of RetroArch's state files for `stem`?

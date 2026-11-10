@@ -504,6 +504,10 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow!("game {rom_id} isn't installed, run `romm install {rom_id}`"))?;
             let prepared = app.resolver().prepare(&rom)?;
             let (env, cmd) = (prepared.env, prepared.command);
+            // Settings chosen in the desktop app (Settings → Emulation) apply here too.
+            for note in prepared.tuning.apply(&app.dirs.emulator_config_backups()) {
+                println!("({note})");
+            }
 
             println!("Syncing saves, then launching {} in {}…", rom.name, env.profile.name);
             let st_opts = app.state_opts(no_states);
