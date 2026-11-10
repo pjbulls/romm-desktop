@@ -188,6 +188,9 @@ try:
     dismiss_toasts()
     d.click(d.find("[data-testid=nav-settings]"))
     d.wait_css("[data-testid=sync-states]")
+    # The tab bar must have nothing to scroll: a 1px overflow here once drew a scrollbar under the header.
+    overflow = d.js("const t = document.querySelector('[role=tablist]'); return t.scrollHeight > t.clientHeight || t.scrollWidth > t.clientWidth")
+    check("the settings tab bar has no scrollbar", overflow is False, str(overflow))
     d.click(d.find("[data-testid=sync-states]"))
     d.click(d.find("[data-testid=save-settings]"))
     wait_toast("Settings saved", 10)
