@@ -442,3 +442,108 @@ async fn states_that_cannot_be_synced_do_not_discard_the_saves_result() {
     assert!(round.saves.is_ok(), "the saves were synced and that stands");
     assert!(round.states.expect("states were on").is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// What each decision does to the files and the record (the decision table itself is tested as a
+// pure function in states.rs)
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_state_the_server_no_longer_has_is_forgotten_not_re_uploaded_and_not_deleted() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![]).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v1");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5); // what was last exchanged, and it hasn't changed since
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+
+    assert!(db.states.is_empty(), "the stale baseline is dropped");
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"v1", "the local state is left alone");
+    assert!(rep.uploaded.is_empty() && rep.downloaded.is_empty() && rep.failed.is_empty(), "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/states").await.is_empty() && reqs(&server, "PUT", "/api/states/*").await.is_empty(), "and not put back");
+}
+
+#[tokio::test]
+async fn a_state_the_server_lost_is_uploaded_again_if_it_changed_here() {
+    // The other side of the case above: what was changed after the last exchange is never dropped.
+    let server = MockServer::start().await;
+    mock_list(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(st(9, "Zelda.state1", 6, "T5", "retroarch"))).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"LOCAL2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5);
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+
+    assert_eq!(rep.uploaded, ["Zelda.state1"]);
+    assert_eq!(db.states[&state_key(7, "retroarch", "Zelda.state1")].server_id, Some(9));
+}
+
+#[tokio::test]
+async fn server_wins_replaces_the_local_state_after_keeping_a_copy_of_it() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st(5, "Zelda.state1", 6, "T2", "retroarch")]).await;
+    mock_content(&server, 5, b"SERVER").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"LOCAL2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5); // both sides have changed since
+
+    let bak = t.path().join("bak");
+    let rep = sync_states(&client(&server), &mut db, &bak, &rom("Zelda"), &env, ConflictPolicy::ServerWins, &opts()).await.unwrap();
+
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"SERVER");
+    assert!(contains(&bak, b"LOCAL2"), "what was replaced is kept");
+    assert_eq!(rep.downloaded, ["Zelda.state1"]);
+    assert!(rep.uploaded.is_empty() && rep.conflicts.is_empty(), "{rep:?}");
+    let rec = &db.states[&state_key(7, "retroarch", "Zelda.state1")];
+    assert_eq!((rec.server_updated_at.as_str(), rec.local_hash.as_str()), ("T2", md5_bytes(b"SERVER").as_str()));
+    assert!(reqs(&server, "PUT", "/api/states/*").await.is_empty() && reqs(&server, "POST", "/api/states").await.is_empty());
+}
+
+#[tokio::test]
+async fn server_wins_on_first_sight_uses_the_copy_it_already_fetched_to_compare() {
+    // Never compared before and different: the server's file is downloaded once, to compare, and
+    // is then the one installed. It must not be fetched a second time.
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st(5, "Zelda.state1", 6, "T2", "retroarch")]).await;
+    mock_content(&server, 5, b"SERVER").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"LOCAL!");
+    let mut db = State::default();
+
+    let bak = t.path().join("bak");
+    let rep = sync_states(&client(&server), &mut db, &bak, &rom("Zelda"), &env, ConflictPolicy::ServerWins, &opts()).await.unwrap();
+
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"SERVER");
+    assert!(contains(&bak, b"LOCAL!"));
+    assert_eq!(rep.downloaded, ["Zelda.state1"]);
+    assert_eq!(reqs(&server, "GET", "/api/states/5/content").await.len(), 1, "one download, not two");
+    assert!(!t.path().join("ra/states/Zelda.state1.romm-dl").exists(), "no staging file is left behind");
+}
+
+#[tokio::test]
+async fn a_state_both_sides_have_but_never_compared_is_skipped_when_the_servers_is_over_the_limit() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st(8, "Zelda.state1", 5000, "T1", "retroarch")]).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"LOCAL");
+    let mut db = State::default();
+
+    let small = StateOptions { max_bytes: 1000 };
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &small).await.unwrap();
+
+    assert_eq!(rep.skipped, ["Zelda.state1"]);
+    assert!(reqs(&server, "GET", "/api/states/8/content").await.is_empty(), "the big file is not downloaded to find out");
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"LOCAL");
+    assert!(db.states.is_empty(), "and nothing is claimed to be in sync");
+}
