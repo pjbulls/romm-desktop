@@ -14,6 +14,7 @@ use romm_core::api::RommClient;
 use romm_core::paths::{Os, PathCtx};
 use romm_core::profiles;
 use romm_core::retroarch;
+use romm_core::route;
 use romm_core::saves;
 use romm_core::state::{save_key, LocalRom, State};
 use romm_core::sync::{saves_overview, ConflictPolicy, EmuEnv, SaveStatus, Syncer};
@@ -1486,4 +1487,92 @@ async fn a_save_keeps_its_age_when_it_is_restored_and_reported_again() {
     let aged = romm_core::xbox::FileHdd::open(&x.image).unwrap().export_save("55550001").unwrap().unwrap();
     let got = chrono::DateTime::<chrono::Utc>::from(aged.modified.unwrap()).format("%Y-%m-%dT%H:%M:%SZ").to_string();
     assert_eq!(got, noon_iso((2020, 3, 4)), "restored files keep the time the save has, to the second the console can store");
+}
+
+// ============================================================================================
+// A slot emptied on the server: the one place a sync takes something of the user's away
+// ============================================================================================
+
+/// A RetroArch game whose save is on disk and which the sync record says the server once held.
+fn tracked_raw_save(root: &Path, content: &[u8]) -> (EmuEnv, State) {
+    let env = retroarch_env(&root.join("ra"), "snes9x");
+    std::fs::create_dir_all(root.join("ra/saves")).unwrap();
+    std::fs::write(root.join("ra/saves/Zelda.srm"), content).unwrap();
+    let mut st = State::default();
+    st.save_record(7, "snes9x").mark_synced(&saves::md5_bytes(content), Some(99), Some(SERVER_TIME.into()));
+    (env, st)
+}
+
+#[tokio::test]
+async fn a_slot_emptied_on_the_server_backs_up_a_raw_save_and_then_removes_it() {
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("delete", Some(99), "Zelda.srm")]).await;
+    mock_complete(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, mut st) = tracked_raw_save(t.path(), b"MY-PROGRESS");
+    let (c, bak) = (client(&server), t.path().join("bak"));
+
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+
+    assert!(!t.path().join("ra/saves/Zelda.srm").exists(), "the save is removed");
+    assert!(find_file_containing(&bak, b"MY-PROGRESS"), "but only after a copy of it was kept");
+    assert!(!st.saves.contains_key(&save_key(7, "snes9x")), "and the server's slot is no longer tracked");
+    assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.downloaded.is_empty(), "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty(), "nothing is sent back");
+    let done: Value = reqs(&server, "POST", "/api/sync/sessions/42/complete").await[0].body_json().unwrap();
+    assert_eq!((done["operations_completed"].as_i64(), done["operations_failed"].as_i64()), (Some(1), Some(0)));
+}
+
+/// The backups exist so that nothing is ever lost for good; a second one must not destroy the first.
+#[tokio::test]
+async fn a_second_emptied_slot_does_not_overwrite_the_backup_of_the_first() {
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("delete", Some(99), "Zelda.srm")]).await;
+    mock_complete(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let (c, bak) = (client(&server), t.path().join("bak"));
+
+    let (env, mut st) = tracked_raw_save(t.path(), b"FIRST-PROGRESS");
+    syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    assert!(!t.path().join("ra/saves/Zelda.srm").exists());
+
+    // The player carries on and the slot is emptied again. (Backups are named by the second.)
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (env, mut st) = tracked_raw_save(t.path(), b"SECOND-PROGRESS");
+    syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+
+    assert!(find_file_containing(&bak, b"SECOND-PROGRESS"), "the second save is kept");
+    assert!(find_file_containing(&bak, b"FIRST-PROGRESS"), "and the first backup survived it: {:?}", walk(&bak));
+}
+
+#[tokio::test]
+async fn a_slot_emptied_on_the_server_untracks_a_unit_but_never_touches_the_emulators_files() {
+    let t = tempfile::tempdir().unwrap();
+    psp_memory_stick(&t.path().join("ppsspp"));
+    let root = t.path().join("ppsspp/PSP");
+    let r = rom_disc(&t.path().join("roms"), "Crisis Core.iso", "psp", &psp_disc("ULUS-10064"));
+    let env = standalone_env("ppsspp", &root);
+    // What Sigil last saw of this save: the key it is filed under is the planner's own.
+    let id = unit::identify(&r.launch_path, "psp");
+    let key = match route::plan(&env, &r, &id).expect("a PSP game has a plan").kind {
+        route::Kind::Unit(route) => route.state_key(),
+        _ => panic!("a PSP save is a unit"),
+    };
+    let mut st = State::default();
+    st.set_sigil_state(&key, b"WHAT-SIGIL-LAST-SAW");
+    st.save_record(7, "ppsspp").mark_synced("old-hash", Some(21), Some(SERVER_TIME.into()));
+    let before: Vec<(PathBuf, Vec<u8>)> = walk(&root).into_iter().map(|p| { let b = std::fs::read(&p).unwrap(); (p, b) }).collect();
+    assert!(!before.is_empty());
+
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("delete", Some(21), "Crisis Core.zip")]).await;
+    mock_complete(&server).await;
+    let c = client(&server);
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&r, &env, None).await.unwrap();
+
+    let after: Vec<(PathBuf, Vec<u8>)> = walk(&root).into_iter().map(|p| { let b = std::fs::read(&p).unwrap(); (p, b) }).collect();
+    assert_eq!(after, before, "the emulator's own files are left exactly as they were");
+    assert!(st.sigil_state(&key).is_none(), "Sigil's memory of the save is cleared, so the next change counts as new");
+    assert!(!st.saves.contains_key(&save_key(7, "ppsspp")));
+    assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.downloaded.is_empty(), "{rep:?}");
 }

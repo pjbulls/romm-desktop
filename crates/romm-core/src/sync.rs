@@ -549,7 +549,9 @@ impl<'a> Syncer<'a> {
                 if let Some(l) = cx.local {
                     match &l.kind {
                         LocalKind::Raw(p) => {
-                            saves::backup_file(p, &self.backup_dir, &l.file_name)?;
+                            // Where every other backup goes (a download's is `backup/<stamp>/<emulator>`), so
+                            // this one can't be overwritten by the next, and it is found in the same place.
+                            saves::backup_file(p, &self.backup_dir.join(saves::stamp()).join(&l.emulator), &l.file_name)?;
                             std::fs::remove_file(p)?;
                         }
                         LocalKind::Unit(_) => {
