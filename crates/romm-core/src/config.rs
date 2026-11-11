@@ -1,6 +1,6 @@
 //! App configuration, directories, and token storage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,10 @@ pub struct Config {
     /// profile id → extra command-line args placed before the profile's own
     /// (e.g. duckstation → ["-fullscreen"])
     pub extra_args: BTreeMap<String, Vec<String>>,
+    /// Platforms (by slug) the user has hidden from the game browser: the sidebar, All games,
+    /// Installed and search leave them, and all their games, out. Saves of installed games still
+    /// sync, and the Emulators page still lists them so they can be shown again.
+    pub hidden_platforms: BTreeSet<String>,
     /// Emulator settings the app applies at launch: scope (a profile id, or `retroarch:<core>`) →
     /// setting id → chosen value. Anything not listed is left as the emulator has it.
     /// See `emu_settings`.
@@ -52,6 +56,7 @@ impl Default for Config {
             platform_emulators: BTreeMap::new(),
             retroarch_cores: BTreeMap::new(),
             extra_args: BTreeMap::new(),
+            hidden_platforms: BTreeSet::new(),
             emulator_settings: BTreeMap::new(),
             sync_states: true,
             max_state_mb: 512,
@@ -257,6 +262,30 @@ mod tests {
             let mode = std::fs::metadata(dirs.token_file()).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn hidden_platforms_are_saved_and_default_to_none() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = AppDirs { config_dir: t.path().join("c"), data_dir: t.path().join("d") };
+        assert!(Config::load(&dirs).unwrap().hidden_platforms.is_empty(), "nothing is hidden until asked");
+
+        let mut c = Config::default();
+        c.hidden_platforms.insert("gba".into());
+        c.hidden_platforms.insert("arcade".into());
+        c.save(&dirs).unwrap();
+        assert_eq!(Config::load(&dirs).unwrap().hidden_platforms, ["arcade".to_string(), "gba".to_string()].into());
+    }
+
+    #[test]
+    fn a_config_from_before_hiding_existed_still_loads() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = AppDirs { config_dir: t.path().join("c"), data_dir: t.path().join("d") };
+        std::fs::create_dir_all(&dirs.config_dir).unwrap();
+        std::fs::write(dirs.config_dir.join("config.toml"), "server_url = \"http://romm.lan\"\nsync_states = false\n").unwrap();
+        let c = Config::load(&dirs).unwrap();
+        assert_eq!(c.server_url.as_deref(), Some("http://romm.lan"));
+        assert!(c.hidden_platforms.is_empty());
     }
 }
 

@@ -4,7 +4,13 @@ import { useStore } from "../store";
 import type { Bios, Emulator, Platform } from "../types";
 import { PlatformChoice } from "./PlatformChoice";
 
-export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: Platform[]; onChanged: () => void; onGoSettings?: () => void }) {
+export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }: {
+  platforms: Platform[];
+  onChanged: () => void;
+  /** Shows or hides a platform in the list the app holds, at once. Without it the rows have no show/hide checkbox. */
+  onHiddenChange?: (slug: string, hidden: boolean) => void;
+  onGoSettings?: () => void;
+}) {
   const { push } = useStore();
   const [emus, setEmus] = useState<Emulator[] | null>(null);
   const [bios, setBios] = useState<Record<string, { busy: boolean; files?: Bios[]; error?: string }>>({});
@@ -48,6 +54,15 @@ export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: P
     try { await api.setPlatformChoice(slug, value || null); await changed(); } catch (err) {
       setPicked((m) => { const { [slug]: _dropped, ...rest } = m; return rest; });
       push("error", "Couldn't change the emulator", [errMsg(err)]);
+    }
+  }
+
+  // The list is updated at once (the sidebar is driven by it); if saving fails it is put back.
+  async function toggleHidden(slug: string, hidden: boolean) {
+    onHiddenChange?.(slug, hidden);
+    try { await api.setPlatformHidden(slug, hidden); onChanged(); } catch (err) {
+      onHiddenChange?.(slug, !hidden);
+      push("error", "Couldn't change that platform", [errMsg(err)]);
     }
   }
 
@@ -121,9 +136,22 @@ export function Emulators({ platforms, onChanged, onGoSettings }: { platforms: P
 
       <section>
         <h2>Emulator mapping</h2>
+        {onHiddenChange && (
+          <p className="muted small">
+            Untick a platform to hide it, and all its games, from the library. Only what is listed changes: installed games stay
+            installed and their saves keep syncing.
+          </p>
+        )}
         <div className="card">
           <ul className="rows">
-            {mappable.map((p) => <PlatformChoice key={p.id} platform={p.slug in picked ? { ...p, selected: picked[p.slug] } : p} onChange={mapPlatform} />)}
+            {mappable.map((p) => (
+              <PlatformChoice
+                key={p.id}
+                platform={p.slug in picked ? { ...p, selected: picked[p.slug] } : p}
+                onChange={mapPlatform}
+                onToggleHidden={onHiddenChange && toggleHidden}
+              />
+            ))}
           </ul>
         </div>
       </section>

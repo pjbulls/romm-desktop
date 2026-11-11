@@ -36,6 +36,7 @@ export const api = {
   emulators: () => invoke<Emulator[]>("emulators"),
   setEmulatorPath: (id: string, path: string | null) => invoke<void>("set_emulator_path", { id, path }),
   setPlatformChoice: (slug: string, choice: string | null) => invoke<void>("set_platform_choice", { slug, choice }),
+  setPlatformHidden: (slug: string, hidden: boolean) => invoke<void>("set_platform_hidden", { slug, hidden }),
   installBios: (platformSlug: string) => invoke<Bios[]>("install_bios", { platformSlug }),
   settings: () => invoke<Settings>("settings"),
   emulationSchema: () => invoke<EmulationScope[]>("emulation_schema"),

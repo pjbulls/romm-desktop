@@ -6,7 +6,7 @@ import type { Platform } from "../types";
 const base: Platform = {
   id: 1, slug: "gb", name: "Game Boy", romCount: 12, firmwareCount: 0,
   emulator: "retroarch", emulatorName: "RetroArch", emulatorInstalled: true,
-  choices: [], selected: "", automaticLabel: null, ignoredOverride: null,
+  choices: [], selected: "", automaticLabel: null, ignoredOverride: null, hidden: false,
 };
 
 const gameBoy: Platform = {
@@ -75,5 +75,39 @@ describe("PlatformChoice", () => {
   it("only flags uninstalled choices", () => {
     expect(choiceText("Dolphin", true)).toBe("Dolphin");
     expect(choiceText("Dolphin", false)).toBe("Dolphin (not installed)");
+  });
+
+  describe("show/hide checkbox", () => {
+    const withToggle = (p: Platform) => renderToStaticMarkup(<PlatformChoice platform={p} onChange={() => {}} onToggleHidden={() => {}} />);
+    const box = (html: string) => html.match(/<input type="checkbox"[^>]*>/)?.[0] ?? null;
+
+    it("is absent unless the page can act on it", () => {
+      expect(box(render(gameBoy))).toBeNull();
+    });
+
+    it("is ticked for a platform that is shown, and says what it does", () => {
+      const html = box(withToggle(gameBoy))!;
+      expect(html).toContain("checked");
+      expect(html).toContain('aria-label="Show Game Boy in the library"');
+      expect(html).toContain('data-testid="show-gb"');
+      expect(withToggle(gameBoy)).not.toContain("Hidden from the library");
+    });
+
+    it("is unticked for a hidden platform, which is also marked as hidden", () => {
+      const hidden = { ...gameBoy, hidden: true };
+      expect(box(withToggle(hidden))).not.toContain("checked");
+      expect(withToggle(hidden)).toContain("Hidden from the library");
+      expect(withToggle(hidden)).toContain('class="is-hidden"');
+    });
+
+    it("is there for a platform nothing can play yet too, which is when you most want to hide it", () => {
+      const html = withToggle({ ...base, slug: "arcade", name: "Arcade", choices: [] });
+      expect(html).toContain('data-testid="show-arcade"');
+      expect(html).toContain("No supported emulator yet");
+    });
+
+    it("still shows the emulator choice for a hidden platform", () => {
+      expect(options(withToggle({ ...gameBoy, hidden: true })).length).toBe(4);
+    });
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "./api";
 import { Emulators } from "./components/Emulators";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -7,6 +7,7 @@ import { Login } from "./components/Login";
 import { Settings } from "./components/Settings";
 import { Sidebar } from "./components/Sidebar";
 import { Toasts } from "./components/Toasts";
+import { viewAfterPlatformsChange, visiblePlatforms, withHidden } from "./platforms";
 import { useStore } from "./store";
 import type { Platform, Status, View } from "./types";
 
@@ -33,6 +34,13 @@ export default function App() {
     api.loadLibrary().then(loadPlatforms).catch(() => {});
   }, [status?.loggedIn, loadPlatforms]);
 
+  // Platforms the user hid from the game browser are left out of the sidebar (and its counts); the Emulators
+  // page gets the whole list so they can be shown again. A hidden platform that is open has nothing left to show.
+  const shownPlatforms = useMemo(() => visiblePlatforms(platforms), [platforms]);
+  useEffect(() => { setView((v) => viewAfterPlatformsChange(v, platforms)); }, [platforms]);
+  // Shown at once, as the sidebar can't wait for the RomM server to be asked for the platform list again.
+  const setPlatformHidden = useCallback((slug: string, hidden: boolean) => setPlatforms((ps) => withHidden(ps, slug, hidden)), []);
+
   if (fatal) return <div className="center-screen"><div className="card"><h1>Something went wrong</h1><p className="error-text">{fatal}</p></div></div>;
   if (!status) return <div className="center-screen"><div className="spinner" aria-label="Loading" /></div>;
 
@@ -49,7 +57,7 @@ export default function App() {
     <div className="shell">
       <Sidebar
         status={status}
-        platforms={platforms}
+        platforms={shownPlatforms}
         view={view}
         onView={setView}
         onDisconnected={(s) => { setStatus(s); setPlatforms([]); }}
@@ -58,7 +66,7 @@ export default function App() {
         <ErrorBoundary key={view.kind}>
         {view.kind === "library" && <Library key={view.platform?.id ?? "all"} mode={{ kind: "library", platform: view.platform }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} onLibraryChanged={loadPlatforms} />}
         {view.kind === "installed" && <Library key="installed" mode={{ kind: "installed" }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} onLibraryChanged={loadPlatforms} />}
-        {view.kind === "emulators" && <Emulators platforms={platforms} onChanged={loadPlatforms} onGoSettings={() => setView({ kind: "settings", tab: "emulation" })} />}
+        {view.kind === "emulators" && <Emulators platforms={platforms} onChanged={loadPlatforms} onHiddenChange={setPlatformHidden} onGoSettings={() => setView({ kind: "settings", tab: "emulation" })} />}
         {view.kind === "settings" && <Settings status={status} initialTab={view.tab} onDisconnected={(s) => { setStatus(s); setPlatforms([]); }} />}
         </ErrorBoundary>
       </main>

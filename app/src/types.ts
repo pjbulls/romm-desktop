@@ -41,6 +41,8 @@ export interface Platform {
   automaticLabel: string | null;
   /** A saved emulator that can't play this platform and is being ignored. */
   ignoredOverride: string | null;
+  /** Hidden from the game browser (sidebar, All games, Installed, search). Still listed on the Emulators page so it can be shown again. */
+  hidden: boolean;
 }
 
 /** One copy of a game (a region, a revision...). Each is its own ROM: install, play and sync it by `id`. */

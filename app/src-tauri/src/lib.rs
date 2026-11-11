@@ -281,6 +281,8 @@ struct PlatformDto {
     automatic_label: Option<String>,
     /// A saved emulator that can't play this platform and is being ignored.
     ignored_override: Option<String>,
+    /// The user hid this platform from the game browser. It is still listed here so it can be shown again.
+    hidden: bool,
 }
 
 #[derive(Serialize)]
@@ -645,6 +647,7 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
                     .collect(),
                 selected: saved.choice.map(|c| c.value()).unwrap_or_default(),
                 ignored_override: saved.ignored.map(|id| profiles::get(&id).map(|pr| pr.name).unwrap_or(id)),
+                hidden: cfg.hidden_platforms.contains(&p.slug),
                 slug: p.slug,
             }
         })
@@ -653,11 +656,18 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
 
 #[tauri::command]
 async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) -> CmdResult<GamesPage> {
+    // Platforms the user has hidden from the game browser: none of their games are listed, installed or not.
+    let hidden = st.cfg.read().await.hidden_platforms.clone();
     if args.installed_only {
         // Served from the local database so it works offline and needs no paging.
         let db = st.db.lock().await;
         let needle = args.search.clone().unwrap_or_default().to_lowercase();
-        let roms: Vec<&LocalRom> = db.roms.values().filter(|r| needle.is_empty() || r.name.to_lowercase().contains(&needle)).collect();
+        let roms: Vec<&LocalRom> = db
+            .roms
+            .values()
+            .filter(|r| !hidden.contains(&r.platform_slug))
+            .filter(|r| needle.is_empty() || r.name.to_lowercase().contains(&needle))
+            .collect();
         // Two installed copies of one game (USA and Japan) would otherwise be identical cards.
         let file_names: Vec<String> = roms.iter().map(|r| r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
         let entries: Vec<(&str, &str, &str)> = roms.iter().zip(&file_names).map(|(r, f)| (r.platform_slug.as_str(), r.name.as_str(), f.as_str())).collect();
@@ -684,7 +694,7 @@ async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) ->
     // The whole library is held in memory and sliced here. A list opened from the top may refresh
     // it if it has gone stale; a request for further down must see the same list as the first.
     let loaded = st.library(&app, (args.offset == 0).then_some(LIBRARY_TTL)).await?;
-    let hits = browse::filter(&loaded.roms, args.platform_id, args.search.as_deref().unwrap_or(""));
+    let hits = browse::filter(&loaded.roms, args.platform_id, args.search.as_deref().unwrap_or(""), &hidden);
     let total = Some(hits.len() as i64);
     let db = st.db.lock().await;
     let items = hits.into_iter().skip(args.offset.max(0) as usize).take(args.limit.max(0) as usize).map(|r| game_dto(r, &db)).collect();
@@ -1223,6 +1233,19 @@ async fn set_platform_choice(st: TauriState<'_, AppState>, slug: String, choice:
     cfg.save(&st.dirs).map_err(s)
 }
 
+/// Hides a platform, and all its games, from the game browser (or shows it again). Only what is
+/// listed changes: installed games stay installed and their saves still sync.
+#[tauri::command]
+async fn set_platform_hidden(st: TauriState<'_, AppState>, slug: String, hidden: bool) -> CmdResult<()> {
+    let mut cfg = st.cfg.write().await;
+    if hidden {
+        cfg.hidden_platforms.insert(slug);
+    } else {
+        cfg.hidden_platforms.remove(&slug);
+    }
+    cfg.save(&st.dirs).map_err(s)
+}
+
 #[tauri::command]
 async fn install_bios(st: TauriState<'_, AppState>, platform_slug: String) -> CmdResult<Vec<BiosDto>> {
     let client = st.client().await?;
@@ -1324,6 +1347,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             emulation_schema,
+            set_platform_hidden,
             status,
             login,
             logout,
