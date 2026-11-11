@@ -6,15 +6,14 @@
 //! is the protocol around that: what to tell the server, what to do with its answer, and what to
 //! remember afterwards.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-use chrono::Utc;
 
 use crate::api::types::*;
 use crate::api::RommClient;
 use crate::error::{Error, Result};
-use crate::profiles::{Profile, SaveMode};
+use crate::profiles::Profile;
 use crate::retroarch;
 use crate::route::{self, Kind, Plan};
 use crate::xenia;
@@ -49,22 +48,12 @@ pub struct EmuEnv {
     pub core: Option<String>,
 }
 
-impl EmuEnv {
-    pub fn save_mode(&self) -> Option<SaveMode> {
-        self.profile.saves.as_ref().map(|s| s.mode)
-    }
-}
-
 /// The ids Sigil read from the ROM, cached in the state file. Argosy reads them once, when a game is
 /// installed; here that happens the first time the game is synced (and again if its launch path
 /// changes, which means the ROM did).
 pub fn identity_for(state: &mut State, rom: &LocalRom) -> Identity {
-    let source = rom.launch_path.to_string_lossy();
-    let platform = unit::platform_slug(&rom.platform_slug);
-    if let Some(id) = state.roms.get(&rom.rom_id).and_then(|r| r.identity.as_ref()) {
-        if id.source == source && id.platform == platform {
-            return id.clone();
-        }
+    if let Some(id) = cached_identity(state, rom) {
+        return id;
     }
     let id = unit::identify(&rom.launch_path, &rom.platform_slug);
     // Only remember a reading that found something; an unreadable ROM is tried again next time.
@@ -75,6 +64,12 @@ pub fn identity_for(state: &mut State, rom: &LocalRom) -> Identity {
         }
     }
     id
+}
+
+/// The cached reading of `rom`, if it is still the reading of this launch file on this platform.
+fn cached_identity(state: &State, rom: &LocalRom) -> Option<Identity> {
+    let id = state.roms.get(&rom.rom_id)?.identity.as_ref()?;
+    (id.source == rom.launch_path.to_string_lossy() && id.platform == unit::platform_slug(&rom.platform_slug)).then(|| id.clone())
 }
 
 /// What a game's local save is made of.
@@ -109,14 +104,26 @@ pub struct LocalUnit {
 }
 
 impl LocalUnit {
+    /// The bytes that would be uploaded. Only a raw save has to be read; the rest are already here.
+    fn data(&self) -> Result<Cow<'_, [u8]>> {
+        Ok(match &self.kind {
+            LocalKind::Raw(p) => Cow::Owned(std::fs::read(p)?),
+            LocalKind::Unit(u) => Cow::Borrowed(&u.data),
+            LocalKind::Bytes(b) => Cow::Borrowed(b),
+            LocalKind::Folder(c) => Cow::Borrowed(&c.data),
+        })
+    }
+
     /// The bytes that would be uploaded.
     pub fn bytes(&self) -> Result<Vec<u8>> {
-        match &self.kind {
-            LocalKind::Raw(p) => Ok(std::fs::read(p)?),
-            LocalKind::Unit(u) => Ok(u.data.clone()),
-            LocalKind::Bytes(b) => Ok(b.clone()),
-            LocalKind::Folder(c) => Ok(c.data.clone()),
-        }
+        Ok(self.data()?.into_owned())
+    }
+
+    /// Keeps a copy in `dir`, in the form that would have been uploaded, before something replaces it.
+    fn backup_to(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join(&self.file_name), self.data()?)?;
+        Ok(())
     }
 
     fn detail(&self) -> Option<String> {
@@ -159,7 +166,7 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
             }))
         }
         Kind::Xbox { image, save_id } => {
-            if !xbox::is_title_id(save_id) {
+            if !saves::is_title_id(save_id) {
                 return Err(Error::msg(format!(
                     "can't tell which game \"{}\" is: no Xbox title id could be read from the ROM, so its save can't be found in xemu's disk image. \
                      The ROM needs to be an XISO (or a bare default.xbe)",
@@ -230,12 +237,22 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                 file_name: upload_name(&name_base(rom, Some(plan)), "zip"),
                 size: c.data.len() as u64,
                 modified: c.modified,
-                changed: last != Some(c.content_hash.as_str()) || rec.is_some_and(|r| r.dirty),
+                changed: last != Some(c.content_hash.as_str()),
                 hash: c.content_hash.clone(),
                 kind: LocalKind::Folder(c),
             }))
         }
     }
+}
+
+/// `gather` with what the last sync left behind in `state`.
+fn gather_from_state(state: &State, rom: &LocalRom, id: &Identity, plan: &Plan) -> Result<Option<LocalUnit>> {
+    let rec = state.saves.get(&save_key(rom.rom_id, &plan.label));
+    let blob = match &plan.kind {
+        Kind::Unit(r) => state.sigil_state(&r.state_key()),
+        Kind::Raw { .. } | Kind::Xbox { .. } | Kind::Folder { .. } => None,
+    };
+    gather(rom, id, plan, rec, blob.as_deref())
 }
 
 /// The unowned saves that appeared since `previous` was recorded. With nothing recorded there is no
@@ -330,20 +347,10 @@ pub struct SaveView {
 
 /// Local view of a game's saves and whether each differs from the last sync. No network.
 pub fn saves_overview(env: &EmuEnv, rom: &LocalRom, db: &State) -> Result<Vec<SaveView>> {
-    let id = db
-        .roms
-        .get(&rom.rom_id)
-        .and_then(|r| r.identity.clone())
-        .filter(|i| i.source == rom.launch_path.to_string_lossy())
-        .unwrap_or_else(|| unit::identify(&rom.launch_path, &rom.platform_slug));
+    let id = cached_identity(db, rom).unwrap_or_else(|| unit::identify(&rom.launch_path, &rom.platform_slug));
     let Some(plan) = route::plan(env, rom, &id) else { return Ok(vec![]) };
-    let rec = db.saves.get(&save_key(rom.rom_id, &plan.label));
-    let blob = match &plan.kind {
-        Kind::Unit(r) => db.sigil_state(&r.state_key()),
-        Kind::Raw { .. } | Kind::Xbox { .. } | Kind::Folder { .. } => None,
-    };
-    let Some(local) = gather(rom, &id, &plan, rec, blob.as_deref())? else { return Ok(vec![]) };
-    let status = match rec.and_then(|r| r.last_hash.as_deref()) {
+    let Some(local) = gather_from_state(db, rom, &id, &plan)? else { return Ok(vec![]) };
+    let status = match db.saves.get(&save_key(rom.rom_id, &plan.label)).and_then(|r| r.last_hash.as_deref()) {
         None => SaveStatus::NeverSynced,
         Some(_) if local.changed => SaveStatus::Modified,
         Some(_) => SaveStatus::Synced,
@@ -373,6 +380,19 @@ pub struct SyncReport {
 impl SyncReport {
     pub fn is_clean(&self) -> bool {
         self.failed.is_empty() && self.conflicts.is_empty()
+    }
+
+    /// Adds `other` to this report, to total up several games. Every field is named on purpose: a
+    /// field added to the report is a compile error here until it is counted, so it can't be left
+    /// out of a total.
+    pub fn merge(&mut self, other: SyncReport) {
+        let SyncReport { uploaded, downloaded, archived, conflicts, failed, unchanged } = other;
+        self.uploaded.extend(uploaded);
+        self.downloaded.extend(downloaded);
+        self.archived.extend(archived);
+        self.conflicts.extend(conflicts);
+        self.failed.extend(failed);
+        self.unchanged += unchanged;
     }
 }
 
@@ -410,17 +430,10 @@ impl<'a> Syncer<'a> {
         }
         let (local, unreadable) = match &plan {
             None => (None, None),
-            Some(p) => {
-                let rec = self.state.saves.get(&save_key(rom.rom_id, &p.label));
-                let blob = match &p.kind {
-                    Kind::Unit(r) => self.state.sigil_state(&r.state_key()),
-                    Kind::Raw { .. } | Kind::Xbox { .. } | Kind::Folder { .. } => None,
-                };
-                match gather(rom, &id, p, rec, blob.as_deref()) {
-                    Ok(l) => (l, None),
-                    Err(e) => (None, Some(e)),
-                }
-            }
+            Some(p) => match gather_from_state(self.state, rom, &id, p) {
+                Ok(l) => (l, None),
+                Err(e) => (None, Some(e)),
+            },
         };
         if let Some(e) = &unreadable {
             report.failed.push(format!("{}: {e}", name_base(rom, plan.as_ref())));
@@ -500,7 +513,7 @@ impl<'a> Syncer<'a> {
                 if let Some(u) = &claimed.unit {
                     self.state.set_sigil_state(&key, &u.state);
                 }
-                self.state.saves.entry(save_key(rom.rom_id, &plan.label)).or_default().dirty = true;
+                self.state.save_record(rom.rom_id, &plan.label).dirty = true;
                 self.state.sigil_unowned.insert(key, claimed.unowned);
             }
             Err(e) => {
@@ -559,15 +572,7 @@ impl<'a> Syncer<'a> {
     async fn upload(&mut self, cx: &Cx<'_>, local: &LocalUnit, slot: Option<String>, file_name: String, report: &mut SyncReport) -> Result<()> {
         let bytes = local.bytes()?;
         let hash = unit::content_hash(&bytes);
-        let params = UploadParams {
-            rom_id: cx.rom.rom_id,
-            emulator: Some(local.emulator.clone()),
-            slot: slot.clone(),
-            device_id: Some(self.device_id.to_string()),
-            session_id: Some(cx.session_id),
-            content_hash: Some(hash.clone()),
-            file_name: file_name.clone(),
-        };
+        let params = self.upload_params(cx, &local.emulator, slot.clone(), &hash, &file_name);
         match self.client.upload_save(&params, bytes).await {
             Ok(saved) => {
                 if slot.is_some() {
@@ -602,18 +607,15 @@ impl<'a> Syncer<'a> {
         }
         let bytes = self.client.download_save(save_id, self.device_id, cx.session_id).await?;
         let hash = unit::content_hash(&bytes);
-        let stamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let backup = self.backup_dir.join(&stamp).join(&plan.label);
+        let backup = self.backup_dir.join(saves::stamp()).join(&plan.label);
 
         let name = match &plan.kind {
             Kind::Xbox { image, save_id: title } => {
                 if !saves::is_zip(&bytes) {
                     return Err(Error::msg("the server's save for this game isn't a zip of its UDATA folder, so it wasn't applied to xemu"));
                 }
-                // Keep what is there, in the form that would have been uploaded.
-                if let Some(LocalUnit { kind: LocalKind::Bytes(b), file_name, .. }) = cx.local {
-                    std::fs::create_dir_all(&backup)?;
-                    std::fs::write(backup.join(file_name), b)?;
+                if let Some(local) = cx.local {
+                    local.backup_to(&backup)?;
                 }
                 // All or nothing, verified by reading it back; a failure leaves the disk as it was.
                 xbox::import_save(image, title, &bytes)?;
@@ -641,10 +643,8 @@ impl<'a> Syncer<'a> {
                     return Ok(());
                 }
                 ensure_identified(route, cx.id, cx.rom)?;
-                // Keep what is there, in the form that would have been uploaded.
-                if let Some(LocalUnit { kind: LocalKind::Unit(u), file_name, .. }) = cx.local {
-                    std::fs::create_dir_all(&backup)?;
-                    std::fs::write(backup.join(file_name), &u.data)?;
+                if let Some(local) = cx.local {
+                    local.backup_to(&backup)?;
                 }
                 let blob = self.state.sigil_state(&route.state_key());
                 let restored = unit::restore(route, cx.id, &plan.content_name, &bytes, blob.as_deref())?;
@@ -654,10 +654,8 @@ impl<'a> Syncer<'a> {
             }
             Kind::Folder { content, title_id } => {
                 let title_id = ensure_title_id(title_id, &name_base(cx.rom, Some(plan)))?;
-                // Keep what is there, in the form that would have been uploaded.
-                if let Some(LocalUnit { kind: LocalKind::Folder(c), file_name, .. }) = cx.local {
-                    std::fs::create_dir_all(&backup)?;
-                    std::fs::write(backup.join(file_name), &c.data)?;
+                if let Some(local) = cx.local {
+                    local.backup_to(&backup)?;
                 }
                 let restored = xenia::restore(content, title_id, &bytes)?;
                 tracing::debug!("restored {} file(s) into {}, {} header(s) written", restored.files, restored.dir.display(), restored.headers_written);
@@ -696,32 +694,29 @@ impl<'a> Syncer<'a> {
             return Ok(());
         };
         let file_name = upload_name(&cx.rom.stem, &u.extension());
-        let params = UploadParams {
-            rom_id: cx.rom.rom_id,
-            emulator: Some(plan.label.clone()),
-            slot: Some(SLOT.to_string()),
-            device_id: Some(self.device_id.to_string()),
-            session_id: Some(cx.session_id),
-            content_hash: Some(u.content_hash.clone()),
-            file_name: file_name.clone(),
-        };
+        let params = self.upload_params(cx, &plan.label, Some(SLOT.to_string()), &u.content_hash, &file_name);
         let saved = self.client.replace_save(save_id, &params, u.data.clone()).await?;
-        let rec = self.state.saves.entry(save_key(cx.rom.rom_id, &plan.label)).or_default();
-        rec.last_hash = Some(saved.content_hash.clone().unwrap_or_else(|| u.content_hash.clone()));
-        rec.server_save_id = Some(saved.id);
-        rec.server_updated_at = saved.updated_at.clone();
-        rec.dirty = false;
+        let stored = saved.content_hash.clone().unwrap_or_else(|| u.content_hash.clone());
+        self.remember_download(cx, &plan.label, &stored, saved.id, saved.updated_at.clone());
         self.state.set_sigil_state(&route.state_key(), &u.state);
         report.downloaded.push(file_name);
         Ok(())
     }
 
     fn remember_download(&mut self, cx: &Cx<'_>, label: &str, hash: &str, save_id: i64, server_updated_at: Option<String>) {
-        let rec = self.state.saves.entry(save_key(cx.rom.rom_id, label)).or_default();
-        rec.last_hash = Some(hash.to_string());
-        rec.server_save_id = Some(save_id);
-        rec.server_updated_at = server_updated_at.or_else(|| Some(saves::iso(SystemTime::now())));
-        rec.dirty = false;
+        self.state.save_record(cx.rom.rom_id, label).mark_synced(hash, Some(save_id), server_updated_at);
+    }
+
+    fn upload_params(&self, cx: &Cx<'_>, emulator: &str, slot: Option<String>, content_hash: &str, file_name: &str) -> UploadParams {
+        UploadParams {
+            rom_id: cx.rom.rom_id,
+            emulator: Some(emulator.to_string()),
+            slot,
+            device_id: Some(self.device_id.to_string()),
+            session_id: Some(cx.session_id),
+            content_hash: Some(content_hash.to_string()),
+            file_name: file_name.to_string(),
+        }
     }
 
     async fn resolve_conflict(&mut self, op: &Operation, cx: &Cx<'_>, report: &mut SyncReport) -> Result<()> {
@@ -750,7 +745,7 @@ impl<'a> Syncer<'a> {
             }
             ConflictPolicy::ServerWins => self.download(cx, server_id, op.server_updated_at.clone(), report).await,
             ConflictPolicy::KeepBoth => {
-                let stamp = Utc::now().format("%Y%m%dT%H%M%S");
+                let stamp = saves::stamp();
                 let ext = Path::new(&local.file_name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
                 let archive_name = upload_name(&format!("{}.conflict-{stamp}", name_base(cx.rom, cx.plan)), &ext);
                 // 1. preserve the local copy on the server as an archival save (no slot, never paired)
@@ -761,15 +756,7 @@ impl<'a> Syncer<'a> {
             ConflictPolicy::DeviceWins => {
                 let bytes = local.bytes()?;
                 let hash = unit::content_hash(&bytes);
-                let params = UploadParams {
-                    rom_id: cx.rom.rom_id,
-                    emulator: Some(local.emulator.clone()),
-                    slot: Some(local.slot.clone()),
-                    device_id: Some(self.device_id.to_string()),
-                    session_id: Some(cx.session_id),
-                    content_hash: Some(hash.clone()),
-                    file_name: local.file_name.clone(),
-                };
+                let params = self.upload_params(cx, &local.emulator, Some(local.slot.clone()), &hash, &local.file_name);
                 let saved = self.client.replace_save(server_id, &params, bytes).await?;
                 let stored = saved.content_hash.clone().unwrap_or(hash);
                 self.record_synced(cx, local, &stored, Some(saved.id), saved.updated_at.clone());
@@ -782,13 +769,7 @@ impl<'a> Syncer<'a> {
     /// The save is now on the server: remember what was exchanged, and let Sigil's state catch up
     /// (it must not advance before this, or a failed upload would lose the change marker).
     fn record_synced(&mut self, cx: &Cx<'_>, local: &LocalUnit, hash: &str, save_id: Option<i64>, server_updated_at: Option<String>) {
-        let rec = self.state.saves.entry(save_key(cx.rom.rom_id, &local.emulator)).or_default();
-        rec.last_hash = Some(hash.to_string());
-        if save_id.is_some() {
-            rec.server_save_id = save_id;
-        }
-        rec.server_updated_at = server_updated_at.or_else(|| Some(saves::iso(SystemTime::now())));
-        rec.dirty = false;
+        self.state.save_record(cx.rom.rom_id, &local.emulator).mark_synced(hash, save_id, server_updated_at);
         if let (LocalKind::Unit(u), Some(Plan { kind: Kind::Unit(route), .. })) = (&local.kind, cx.plan) {
             self.state.set_sigil_state(&route.state_key(), &u.state);
         }
@@ -798,4 +779,77 @@ impl<'a> Syncer<'a> {
 /// `zip` for a zip unit, else nothing: the extension a restored unit is reported under.
 fn extension_of_unit(bytes: &[u8]) -> String {
     if saves::is_zip(bytes) { "zip".into() } else { String::new() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rom(platform: &str, launch: &str) -> LocalRom {
+        LocalRom { rom_id: 5, platform_slug: platform.into(), launch_path: PathBuf::from(launch), stem: "Game".into(), ..Default::default() }
+    }
+
+    fn state_with(identity: Identity) -> State {
+        let mut s = State::default();
+        s.roms.insert(5, LocalRom { rom_id: 5, identity: Some(identity), ..Default::default() });
+        s
+    }
+
+    fn read_as(platform: &str, source: &str) -> Identity {
+        Identity { source: source.into(), platform: unit::platform_slug(platform), title_id: "T".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_cached_identity_is_used_while_the_launch_file_and_platform_are_unchanged() {
+        let state = state_with(read_as("ngc", "/roms/Game.iso"));
+        // `ngc` and `gc` are the same platform to Sigil, so a RomM that renames the slug is not a new game.
+        assert_eq!(cached_identity(&state, &rom("gc", "/roms/Game.iso")).map(|i| i.title_id), Some("T".into()));
+    }
+
+    #[test]
+    fn a_cached_identity_is_dropped_when_the_launch_file_changes() {
+        let state = state_with(read_as("psp", "/roms/Old.iso"));
+        assert!(cached_identity(&state, &rom("psp", "/roms/New.iso")).is_none());
+    }
+
+    #[test]
+    fn a_cached_identity_is_dropped_when_the_platform_changes() {
+        // What the saves overview used to miss: it checked the file but not the platform, so a game
+        // moved to another platform kept being described by the reading of the old one.
+        let state = state_with(read_as("psp", "/roms/Game.iso"));
+        assert!(cached_identity(&state, &rom("psvita", "/roms/Game.iso")).is_none());
+    }
+
+    #[test]
+    fn merging_reports_adds_every_outcome_and_keeps_their_order() {
+        let conflict = |n: &str| PendingConflict { rom_id: 1, file_name: n.into(), server_updated_at: None, reason: None };
+        let mut total = SyncReport {
+            uploaded: vec!["a".into()],
+            downloaded: vec!["b".into()],
+            archived: vec!["c".into()],
+            conflicts: vec![conflict("d")],
+            failed: vec!["e".into()],
+            unchanged: 2,
+        };
+        total.merge(SyncReport {
+            uploaded: vec!["a2".into()],
+            downloaded: vec!["b2".into()],
+            archived: vec!["c2".into()],
+            conflicts: vec![conflict("d2")],
+            failed: vec!["e2".into()],
+            unchanged: 3,
+        });
+        assert_eq!(total.uploaded, ["a", "a2"]);
+        assert_eq!(total.downloaded, ["b", "b2"]);
+        // The ones a hand-written merge forgot: a total must not lose that a local copy was archived.
+        assert_eq!(total.archived, ["c", "c2"]);
+        assert_eq!(total.conflicts.iter().map(|c| c.file_name.as_str()).collect::<Vec<_>>(), ["d", "d2"]);
+        assert_eq!(total.failed, ["e", "e2"]);
+        assert_eq!(total.unchanged, 5);
+    }
+
+    #[test]
+    fn nothing_is_cached_for_a_game_that_was_never_read() {
+        assert!(cached_identity(&State::default(), &rom("psp", "/roms/Game.iso")).is_none());
+    }
 }

@@ -7,10 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::profiles;
+use crate::profiles::{self, RETROARCH};
 use crate::retroarch;
-
-const RETROARCH: &str = "retroarch";
 
 /// One thing a user can pick for a platform: a standalone emulator, or RetroArch with a core.
 #[derive(Debug, Clone, PartialEq, Eq)]

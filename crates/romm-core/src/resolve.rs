@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::launch;
 use crate::emu_settings::{self, PlanCtx, Tuning};
 use crate::paths::{resolve_config_root, resolve_data_root, Os, PathCtx};
-use crate::profiles::{self, Profile};
+use crate::profiles::{self, Profile, RETROARCH};
 use crate::retroarch;
 use crate::state::LocalRom;
 use crate::sync::EmuEnv;
@@ -66,7 +66,7 @@ impl<'a> Resolver<'a> {
         let pctx = self.pctx.clone().with_exe_dir(installed.exe_dir());
         let root = resolve_data_root(&profile, installed.is_flatpak(), self.os, &pctx)
             .ok_or_else(|| Error::msg(format!("could not work out where {} keeps its data", profile.name)))?;
-        let retro = (profile.id == "retroarch").then(|| retroarch::layout(&root.path, self.os, &pctx));
+        let retro = (profile.id == RETROARCH).then(|| retroarch::layout(&root.path, self.os, &pctx));
         Ok((EmuEnv { profile, data_root: root.path, retroarch: retro, core: None }, installed))
     }
 

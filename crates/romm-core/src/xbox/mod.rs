@@ -18,7 +18,7 @@ pub mod qcow2;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::{BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -28,6 +28,8 @@ use zip::{ZipArchive, ZipWriter};
 
 use fatx::{DirEntry, Fatx, FatxTime};
 use qcow2::Qcow2;
+
+use crate::saves::{is_title_id, read_within_budget, MAX_ARCHIVE_ENTRIES};
 
 pub type XboxResult<T> = std::result::Result<T, XboxError>;
 
@@ -131,10 +133,6 @@ pub struct TitleDir {
     pub save_id: String,
     /// The folder's name as stored on the disk (any case).
     pub dir_name: String,
-}
-
-pub fn is_title_id(s: &str) -> bool {
-    s.len() == 8 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub struct XboxHdd<D: BlockRead> {
@@ -354,9 +352,6 @@ enum Node {
 // Putting a save back
 // ---------------------------------------------------------------------------------------------
 
-/// Most entries a save zip may hold; no real save has more than a few dozen.
-const MAX_ZIP_ENTRIES: usize = 20_000;
-
 /// What an import did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportSummary {
@@ -379,13 +374,17 @@ struct SaveNode {
 /// written. Anything the console could not hold, or that tries to reach outside the title folder,
 /// is refused outright. Parents come before the things in them.
 fn parse_save_zip(save_id: &str, bytes: &[u8]) -> XboxResult<Vec<SaveNode>> {
+    parse_save_zip_within(save_id, bytes, MAX_ARCHIVE_ENTRIES, MAX_EXPORT_BYTES)
+}
+
+fn parse_save_zip_within(save_id: &str, bytes: &[u8], max_entries: usize, max_bytes: u64) -> XboxResult<Vec<SaveNode>> {
     let bad = |m: String| XboxError::Fatx(format!("the save zip can't be restored: {m}"));
     let mut z = ZipArchive::new(Cursor::new(bytes))?;
-    if z.len() > MAX_ZIP_ENTRIES {
+    if z.len() > max_entries {
         return Err(bad(format!("it has {} entries", z.len())));
     }
     let mut nodes: BTreeMap<String, SaveNode> = BTreeMap::new();
-    let mut budget = MAX_EXPORT_BYTES;
+    let mut budget = max_bytes;
     for i in 0..z.len() {
         let mut f = z.by_index(i)?;
         let raw = f.name().to_string();
@@ -434,15 +433,12 @@ fn parse_save_zip(save_id: &str, bytes: &[u8]) -> XboxResult<Vec<SaveNode>> {
             if nodes.contains_key(&k) {
                 return Err(bad(format!("{raw:?} appears twice (names are not case-sensitive)")));
             }
-            if f.size() > budget || f.size() > u32::MAX as u64 {
-                return Err(bad(format!("it is larger than {} MiB", MAX_EXPORT_BYTES >> 20)));
+            let too_big = || bad(format!("it is larger than {} MiB", max_bytes >> 20));
+            let size = f.size();
+            if size > u32::MAX as u64 {
+                return Err(too_big());
             }
-            let mut data = Vec::with_capacity(f.size() as usize);
-            f.by_ref().take(budget + 1).read_to_end(&mut data)?;
-            if data.len() as u64 > budget {
-                return Err(bad(format!("it is larger than {} MiB", MAX_EXPORT_BYTES >> 20)));
-            }
-            budget -= data.len() as u64;
+            let data = read_within_budget(&mut f, size, &mut budget)?.ok_or_else(too_big)?;
             nodes.insert(k, SaveNode { rel: rel_comps.join("/"), data: Some(data), modified: fatx_time_from_zip(f.last_modified()) });
         }
     }
@@ -601,5 +597,50 @@ pub fn import_save(image: &Path, save_id: &str, zip: &[u8]) -> XboxResult<Import
                 "{e}; and undoing it failed too ({r}). The image will be put back the next time it is opened"
             ))),
         },
+    }
+}
+
+#[cfg(test)]
+mod zip_limit_tests {
+    use super::*;
+
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut w = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            w.start_file(*name, SimpleFileOptions::default()).unwrap();
+            w.write_all(data).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    fn refusal(r: XboxResult<Vec<SaveNode>>) -> String {
+        match r {
+            Ok(_) => panic!("expected the zip to be refused"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_zip_with_too_many_entries_is_refused() {
+        let z = zip_of(&[("4D5307E6/a", b"1"), ("4D5307E6/b", b"2"), ("4D5307E6/c", b"3")]);
+        assert!(refusal(parse_save_zip_within("4D5307E6", &z, 2, 1 << 20)).contains("it has 3 entries"));
+        assert_eq!(parse_save_zip_within("4D5307E6", &z, 3, 1 << 20).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_zip_that_unpacks_to_too_much_is_refused_across_its_files() {
+        let big = vec![7u8; 600];
+        let z = zip_of(&[("4D5307E6/a", &big), ("4D5307E6/b", &big)]);
+        assert!(refusal(parse_save_zip_within("4D5307E6", &z, 100, 1000)).contains("it is larger than"));
+        assert_eq!(parse_save_zip_within("4D5307E6", &z, 100, 1200).unwrap().len(), 2, "exactly the budget is allowed");
+    }
+
+    #[test]
+    fn the_real_limits_are_the_ones_the_save_zip_is_held_to() {
+        // `parse_save_zip` is `parse_save_zip_within` with the real limits; a small honest zip passes.
+        let z = zip_of(&[("4D5307E6/SaveData.dat", b"data")]);
+        assert_eq!(parse_save_zip("4D5307E6", &z).unwrap().len(), 1);
+        assert_eq!(MAX_ARCHIVE_ENTRIES, 20_000);
+        assert_eq!(MAX_EXPORT_BYTES, 256 * 1024 * 1024);
     }
 }

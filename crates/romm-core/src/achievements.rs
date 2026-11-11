@@ -20,6 +20,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::api::types::{Me, RaAchievement, RaEarned, RomRa};
+use crate::saves;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,7 +82,7 @@ pub struct AchievementsView {
 /// the UI would show raw text. Normalise to RFC 3339; anything unrecognised is returned as-is.
 pub fn normalize_ts(s: &str) -> String {
     let s = s.trim();
-    const OUT: &str = "%Y-%m-%dT%H:%M:%SZ";
+    const OUT: &str = saves::ISO_FORMAT;
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return dt.naive_utc().format(OUT).to_string();
     }
@@ -100,7 +101,7 @@ pub fn normalize_ts(s: &str) -> String {
 
 /// The current time as RFC 3339 (UTC), for `AchievementsView::fetched_at`.
 pub fn now_rfc3339() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    saves::iso(std::time::SystemTime::now())
 }
 
 /// RomM already sorts by RetroAchievements' "Display Order", but don't depend on it.

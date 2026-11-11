@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::api::types::DeviceRegistration;
+use crate::api::{RommClient, CLIENT_SLUG};
+use crate::error::{Error, Result};
 use crate::saves::write_atomic;
+use crate::states::StateOptions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,6 +58,48 @@ impl Default for Config {
             conflict_policy: crate::sync::ConflictPolicy::KeepBoth,
         }
     }
+}
+
+impl Config {
+    /// How states are synced, or `None` when the user has turned that off.
+    pub fn state_options(&self) -> Option<StateOptions> {
+        self.sync_states.then(|| StateOptions { max_bytes: self.max_state_mb * 1024 * 1024 })
+    }
+
+    /// Points this configuration at the server just logged in to. The device registered with a
+    /// previous server means nothing to this one, so it is forgotten and registered afresh.
+    pub fn set_server(&mut self, url: &str, accept_invalid_certs: bool, device_name: Option<String>) {
+        self.server_url = Some(url.to_string());
+        self.accept_invalid_certs = accept_invalid_certs;
+        self.device_name = device_name;
+        self.device_id = None;
+    }
+
+    /// A client for the server and token saved at login. The errors say what is missing and leave
+    /// it to the caller to say how to log in.
+    pub fn client(&self, dirs: &AppDirs) -> Result<RommClient> {
+        let url = self.server_url.as_deref().ok_or_else(|| Error::msg("not logged in"))?;
+        let token = load_token(dirs).ok_or_else(|| Error::msg("no saved token"))?;
+        Ok(RommClient::new(url, Some(token), self.accept_invalid_certs)?.with_process_lock(dirs.api_lock()))
+    }
+}
+
+/// Registers this machine with the server as a device and returns its id. `name` is what the user
+/// chose, else one made from the host name.
+pub async fn register_device(client: &RommClient, name: Option<&str>) -> Result<String> {
+    let registration = DeviceRegistration {
+        name: name.map(str::to_string).unwrap_or_else(default_device_name),
+        platform: std::env::consts::OS.to_string(),
+        client: CLIENT_SLUG.to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        hostname: hostname(),
+        sync_mode: "api".to_string(),
+    };
+    client
+        .register_device(&registration)
+        .await
+        .map(|d| d.device_id)
+        .map_err(|e| Error::msg(format!("registering this device with RomM failed (does the token have the devices.write scope?): {e}")))
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +196,44 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dirs_in(t: &tempfile::TempDir) -> AppDirs {
+        AppDirs { config_dir: t.path().join("c"), data_dir: t.path().join("d") }
+    }
+
+    #[test]
+    fn state_options_follow_the_setting_and_the_size_limit() {
+        let on = Config { sync_states: true, max_state_mb: 3, ..Default::default() };
+        assert_eq!(on.state_options().map(|o| o.max_bytes), Some(3 * 1024 * 1024));
+        assert!(Config { sync_states: false, ..Default::default() }.state_options().is_none());
+    }
+
+    #[test]
+    fn logging_in_to_a_server_forgets_the_device_of_the_last_one() {
+        let mut c = Config { device_id: Some("old".into()), device_name: Some("Old name".into()), ..Default::default() };
+        c.set_server("http://romm.lan", true, Some("Deck".into()));
+        assert_eq!(c.server_url.as_deref(), Some("http://romm.lan"));
+        assert!(c.accept_invalid_certs);
+        assert_eq!(c.device_name.as_deref(), Some("Deck"));
+        assert_eq!(c.device_id, None, "the old server's device id means nothing to the new one");
+        // And no name given means the default is used from then on, not the old one.
+        c.set_server("http://romm.lan", false, None);
+        assert_eq!(c.device_name, None);
+    }
+
+    #[test]
+    fn a_client_needs_both_a_server_and_a_token() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(&t);
+        let none = Config::default();
+        assert_eq!(none.client(&dirs).err().expect("no server").to_string(), "not logged in");
+
+        let c = Config { server_url: Some("http://romm.lan".into()), ..Default::default() };
+        assert_eq!(c.client(&dirs).err().expect("no token").to_string(), "no saved token");
+
+        store_token(&dirs, "rmm_abc").unwrap();
+        assert_eq!(c.client(&dirs).unwrap().base_url(), "http://romm.lan");
+    }
 
     #[test]
     fn config_and_token_roundtrip() {

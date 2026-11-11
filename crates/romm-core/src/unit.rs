@@ -12,7 +12,7 @@
 //! future in the crate ever holds a non-`Send` value across an `.await`.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -30,7 +30,6 @@ pub fn content_hash(bytes: &[u8]) -> String {
 }
 
 fn zip_content_hash(bytes: &[u8]) -> Option<String> {
-    use md5::{Digest, Md5};
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
     let mut entries: Vec<(String, String)> = Vec::new();
     for i in 0..zip.len() {
@@ -39,16 +38,7 @@ fn zip_content_hash(bytes: &[u8]) -> Option<String> {
         if name.ends_with('/') {
             continue;
         }
-        let mut h = Md5::new();
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = f.read(&mut buf).ok()?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
-        }
-        entries.push((name, hex::encode(h.finalize())));
+        entries.push((name, saves::md5_reader(&mut f).ok()?));
     }
     // RomM sorts by entry name (Python `sorted` on str = code point order = UTF-8 byte order).
     entries.sort();

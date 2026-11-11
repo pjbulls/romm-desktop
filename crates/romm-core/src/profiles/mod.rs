@@ -244,6 +244,10 @@ const BUILTIN: &[&str] = &[
     include_str!("xenia.toml"),
 ];
 
+/// The id of RetroArch's profile: the one that is not a single emulator but a front end for many
+/// libretro cores, which is why it is handled apart from the rest.
+pub const RETROARCH: &str = "retroarch";
+
 pub fn builtin() -> Vec<Profile> {
     BUILTIN
         .iter()

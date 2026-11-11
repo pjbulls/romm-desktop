@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::paths::PathCtx;
-use crate::profiles::SaveMode;
+use crate::profiles::{SaveMode, RETROARCH};
 use crate::retroarch;
 use crate::state::LocalRom;
 use crate::sync::EmuEnv;
@@ -77,7 +77,7 @@ pub fn plan(env: &EmuEnv, rom: &LocalRom, id: &Identity) -> Option<Plan> {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| rom.stem.clone());
-    if env.profile.id == "retroarch" {
+    if env.profile.id == RETROARCH {
         return retroarch_plan(env, rom, id, content_name);
     }
     if env.profile.saves.as_ref().is_some_and(|r| r.mode == SaveMode::Hdd) {

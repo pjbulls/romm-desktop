@@ -2,7 +2,10 @@ use std::io::Write;
 
 use romm_core::api::types::{Platform, Rom};
 use romm_core::api::RommClient;
-use romm_core::library::{install_bios, install_rom, BiosStatus};
+use romm_core::config::Config;
+use romm_core::library::{install_bios, install_platform_bios, install_rom, BiosStatus};
+use romm_core::paths::{Os, PathCtx};
+use romm_core::resolve::Resolver;
 use romm_core::saves::md5_bytes;
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
@@ -121,4 +124,85 @@ async fn corrupt_bios_is_rejected_and_removed() {
     let err = install_bios(&client(&server), &p, &t.path().join("bios"), &mut |_, _| {}).await.unwrap_err();
     assert!(err.to_string().contains("checksum mismatch"), "{err}");
     assert!(!t.path().join("bios/scph5501.bin").exists());
+}
+
+// ---------------------------------------------------------------------------------------------
+// install_platform_bios: platform → emulator → its BIOS folder, then the install
+// ---------------------------------------------------------------------------------------------
+
+/// A config whose PCSX2 is a stand-in executable, and a resolver that looks only under `root`.
+fn pcsx2_in(root: &std::path::Path) -> Config {
+    let exe = root.join("pcsx2-qt");
+    std::fs::write(&exe, "").unwrap();
+    let mut cfg = Config::default();
+    cfg.emulator_paths.insert("pcsx2".into(), exe);
+    cfg
+}
+
+fn resolver<'a>(cfg: &'a Config, root: &std::path::Path) -> Resolver<'a> {
+    Resolver { cfg, os: Os::Linux, pctx: PathCtx { home: Some(root.into()), xdg_config: Some(root.join("cfg")), ..Default::default() } }
+}
+
+async fn mock_platforms(server: &MockServer, body: serde_json::Value) {
+    Mock::given(method("GET")).and(path("/api/platforms")).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(server).await;
+}
+
+fn ps2(firmware: serde_json::Value) -> serde_json::Value {
+    json!({"id": 8, "slug": "ps2", "fs_slug": "ps2", "name": "PlayStation 2", "firmware": firmware})
+}
+
+#[tokio::test]
+async fn bios_goes_into_the_folder_the_platforms_emulator_reads() {
+    let data = b"PS2BIOS".to_vec();
+    let server = MockServer::start().await;
+    mock_platforms(&server, json!([ps2(json!([{"id": 4, "platform_id": 8, "file_name": "scph70012.bin", "md5_hash": md5_bytes(&data)}]))])).await;
+    Mock::given(method("GET")).and(path("/api/firmware/4/content/scph70012.bin"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone())).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let cfg = pcsx2_in(t.path());
+
+    let (dir, done) = install_platform_bios(&client(&server), &resolver(&cfg, t.path()), "ps2", &mut |_, _| {}).await.unwrap();
+
+    assert!(dir.ends_with("PCSX2/bios"), "{dir:?}");
+    assert_eq!(std::fs::read(dir.join("scph70012.bin")).unwrap(), data);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].status, BiosStatus::Installed);
+}
+
+#[tokio::test]
+async fn bios_for_a_platform_the_server_does_not_have_is_refused_plainly() {
+    let server = MockServer::start().await;
+    mock_platforms(&server, json!([ps2(json!([]))])).await;
+    let t = tempfile::tempdir().unwrap();
+    let cfg = pcsx2_in(t.path());
+
+    let err = install_platform_bios(&client(&server), &resolver(&cfg, t.path()), "dreamcast", &mut |_, _| {}).await.unwrap_err();
+
+    assert_eq!(err.to_string(), "no platform 'dreamcast' on the server");
+}
+
+#[tokio::test]
+async fn a_platform_with_no_bios_on_the_server_says_where_to_put_it() {
+    let server = MockServer::start().await;
+    mock_platforms(&server, json!([ps2(json!([]))])).await;
+    let t = tempfile::tempdir().unwrap();
+    let cfg = pcsx2_in(t.path());
+
+    let err = install_platform_bios(&client(&server), &resolver(&cfg, t.path()), "ps2", &mut |_, _| {}).await.unwrap_err().to_string();
+
+    assert!(err.contains("no BIOS files for PlayStation 2") && err.contains("rescan"), "{err}");
+}
+
+#[tokio::test]
+async fn no_download_is_attempted_when_the_emulator_is_not_installed() {
+    let server = MockServer::start().await;
+    mock_platforms(&server, json!([ps2(json!([{"id": 4, "platform_id": 8, "file_name": "scph70012.bin", "md5_hash": "x"}]))])).await;
+    let t = tempfile::tempdir().unwrap();
+    let cfg = Config::default(); // no PCSX2 path, and nothing of it under `t`
+
+    let err = install_platform_bios(&client(&server), &resolver(&cfg, t.path()), "ps2", &mut |_, _| {}).await.unwrap_err().to_string();
+
+    assert!(err.contains("PCSX2 was not found"), "{err}");
+    let downloads = server.received_requests().await.unwrap().iter().filter(|r| r.url.path().starts_with("/api/firmware")).count();
+    assert_eq!(downloads, 0);
 }

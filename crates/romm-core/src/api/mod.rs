@@ -17,6 +17,15 @@ use types::*;
 
 pub const CLIENT_SLUG: &str = "romm-desktop";
 
+/// The scopes a token needs for everything this app does. A token made in RomM (Profile → Client
+/// API Tokens) without one of them is accepted at login and then fails when that feature is used.
+pub const REQUIRED_SCOPES: &[&str] = &["me.read", "platforms.read", "roms.read", "firmware.read", "assets.read", "assets.write", "devices.read", "devices.write"];
+
+/// The required scopes that `granted` does not include, in `REQUIRED_SCOPES` order.
+pub fn missing_scopes(granted: &[String]) -> Vec<&'static str> {
+    REQUIRED_SCOPES.iter().copied().filter(|needed| !granted.iter().any(|g| g == needed)).collect()
+}
+
 /// How long to wait before each retry of a call that is safe to repeat (see `send_retrying`).
 const RETRY_WAITS_MS: [u64; 2] = [150, 450];
 
@@ -549,6 +558,27 @@ impl RommClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn granted(scopes: &[&str]) -> Vec<String> {
+        scopes.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_token_with_every_scope_lacks_none() {
+        assert!(missing_scopes(&granted(REQUIRED_SCOPES)).is_empty());
+    }
+
+    #[test]
+    fn extra_scopes_are_harmless_and_missing_ones_are_named_in_the_required_order() {
+        let mut have: Vec<&str> = REQUIRED_SCOPES.iter().copied().filter(|s| *s != "assets.write" && *s != "me.read").collect();
+        have.push("me.write");
+        assert_eq!(missing_scopes(&granted(&have)), ["me.read", "assets.write"]);
+    }
+
+    #[test]
+    fn a_token_with_no_scopes_lacks_them_all() {
+        assert_eq!(missing_scopes(&[]), REQUIRED_SCOPES);
+    }
 
     #[test]
     fn normalizes_urls() {

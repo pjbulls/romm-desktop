@@ -27,7 +27,7 @@
 //! never touched.
 
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -35,7 +35,7 @@ use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 
 use crate::error::{Error, Result};
-use crate::saves;
+use crate::saves::{self, is_hex, is_title_id};
 use crate::unit::{self, Identity};
 
 /// The content type folder of saved games (`XContentType::kSavedGame`), and the archive's root.
@@ -50,14 +50,10 @@ const MACHINE_XUID: &str = "0000000000000000";
 /// An archive that unpacks to more than this is not a save.
 const MAX_UNPACKED: u64 = 1 << 30;
 
-fn is_hex(s: &str, len: usize) -> bool {
-    s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// The title id of the game Sigil identified, as Xenia spells it in folder names (8 upper-case hex
 /// digits). Sigil's own save id for an Xbox 360 game is the title id.
 pub fn title_id_of(id: &Identity) -> Option<String> {
-    [&id.save_id, &id.title_id].into_iter().find(|s| is_hex(s, 8)).map(|s| s.to_ascii_uppercase())
+    [&id.save_id, &id.title_id].into_iter().find(|s| is_title_id(s)).map(|s| s.to_ascii_uppercase())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -229,9 +225,16 @@ struct Entry {
 /// than `00000001` (a Sigil unit, an older romm-desktop bundle, another emulator's save), a path
 /// that escapes it, no files at all, or an absurd size.
 fn read_archive(bytes: &[u8]) -> Result<Vec<Entry>> {
+    read_archive_within(bytes, saves::MAX_ARCHIVE_ENTRIES, MAX_UNPACKED)
+}
+
+fn read_archive_within(bytes: &[u8], max_entries: usize, max_bytes: u64) -> Result<Vec<Entry>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| Error::msg("the server's save is not a zip archive, so it isn't a Xenia saved game"))?;
+    if zip.len() > max_entries {
+        return Err(Error::msg(format!("the save archive has {} entries; refusing to apply it", zip.len())));
+    }
     let mut out = Vec::new();
-    let mut unpacked = 0u64;
+    let mut budget = max_bytes;
     let mut files = 0usize;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
@@ -254,12 +257,9 @@ fn read_archive(bytes: &[u8]) -> Result<Vec<Entry>> {
             out.push(Entry { rel, dir: true, data: Vec::new() });
             continue;
         }
-        unpacked = unpacked.saturating_add(f.size());
-        if unpacked > MAX_UNPACKED {
-            return Err(Error::msg("the save archive unpacks to more than 1 GiB; refusing to apply it"));
-        }
-        let mut data = Vec::with_capacity(f.size().min(1 << 24) as usize);
-        f.by_ref().take(MAX_UNPACKED).read_to_end(&mut data)?;
+        let size = f.size();
+        let data = saves::read_within_budget(&mut f, size, &mut budget)?
+            .ok_or_else(|| Error::msg(format!("the save archive unpacks to more than {} MiB; refusing to apply it", max_bytes >> 20)))?;
         files += 1;
         out.push(Entry { rel, dir: false, data });
     }
@@ -284,7 +284,7 @@ pub struct Restored {
 /// and swapped in, so a failure part-way leaves the old save as it was. The caller keeps a copy of
 /// what was there (the sync engine backs it up first).
 pub fn restore(content: &Path, title_id: &str, bytes: &[u8]) -> Result<Restored> {
-    if !is_hex(title_id, 8) {
+    if !is_title_id(title_id) {
         return Err(Error::msg(format!("\"{title_id}\" is not an Xbox 360 title id")));
     }
     let entries = read_archive(bytes)?;
@@ -706,6 +706,24 @@ mod tests {
         assert_eq!(&h[8..12], &[0x00, 0xE9, 0x00, 0xE9]);
         assert_eq!(&h[0x108..0x10A], "é".as_bytes());
         assert!(legacy_header(1, &"é".repeat(21)).is_none());
+    }
+
+    #[test]
+    fn an_archive_with_too_many_entries_is_refused() {
+        let a = zip_of(&[("00000001/a", Some(b"1")), ("00000001/b", Some(b"2")), ("00000001/c", Some(b"3"))]);
+        let err = read_archive_within(&a, 2, 1 << 20).unwrap_err().to_string();
+        assert!(err.contains("has 3 entries"), "{err}");
+        assert_eq!(read_archive_within(&a, 3, 1 << 20).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_archive_that_unpacks_to_too_much_is_refused_across_its_files() {
+        let big = vec![7u8; 600];
+        let a = zip_of(&[("00000001/a", Some(&big)), ("00000001/b", Some(&big))]);
+        // 600 + 600 > 1000, though neither is alone.
+        let err = read_archive_within(&a, 100, 1000).unwrap_err().to_string();
+        assert!(err.contains("unpacks to more than"), "{err}");
+        assert_eq!(read_archive_within(&a, 100, 1200).unwrap().len(), 2, "exactly the budget is allowed");
     }
 
     #[test]

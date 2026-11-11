@@ -9,16 +9,17 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use romm_core::achievements::{self, AchievementsView};
-use romm_core::api::types::{DeviceRegistration, Me, Platform, Rom};
-use romm_core::api::{RommClient, CLIENT_SLUG};
-use romm_core::config::{default_device_name, hostname, load_token, store_token, AppDirs, Config};
+use romm_core::api::types::{Me, Platform, Rom};
+use romm_core::api::{missing_scopes, RommClient};
+use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::diagnostics::{self, LogFile, Watchdog};
 use romm_core::emu_settings;
 use romm_core::library::{self, BiosStatus};
 use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
 use romm_core::states::{self, StateOptions, StateReport, StateView};
-use romm_core::sync::{saves_overview, ConflictPolicy, SaveView, SyncReport, Syncer};
+use romm_core::session::SyncCtx;
+use romm_core::sync::{saves_overview, ConflictPolicy, SaveView, SyncReport};
 use romm_core::{browse, platforms as plat, profiles, retroarch, session, versions};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State as TauriState};
@@ -29,11 +30,6 @@ type CmdResult<T> = Result<T, String>;
 fn s<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
-
-/// Scopes a token needs for everything the app does.
-const REQUIRED_SCOPES: &[&str] = &[
-    "me.read", "platforms.read", "roms.read", "firmware.read", "assets.read", "assets.write", "devices.read", "devices.write",
-];
 
 #[derive(Clone)]
 pub struct AppState {
@@ -218,32 +214,19 @@ impl AppState {
         if let Some(id) = self.cfg.read().await.device_id.clone() {
             return Ok(id);
         }
-        let name = self.cfg.read().await.device_name.clone().unwrap_or_else(default_device_name);
-        let d = client
-            .register_device(&DeviceRegistration {
-                name,
-                platform: std::env::consts::OS.to_string(),
-                client: CLIENT_SLUG.to_string(),
-                client_version: env!("CARGO_PKG_VERSION").to_string(),
-                hostname: hostname(),
-                sync_mode: "api".to_string(),
-            })
-            .await
-            .map_err(|e| format!("registering this device with RomM failed (does the token have the devices.write scope?): {e}"))?;
-        self.update_cfg(|c| c.device_id = Some(d.device_id.clone())).await?;
-        Ok(d.device_id)
+        let name = self.cfg.read().await.device_name.clone();
+        let id = register_device(client, name.as_deref()).await.map_err(s)?;
+        self.update_cfg(|c| c.device_id = Some(id.clone())).await?;
+        Ok(id)
     }
 
     async fn state_opts(&self) -> Option<StateOptions> {
-        let c = self.cfg.read().await;
-        c.sync_states.then(|| StateOptions { max_bytes: c.max_state_mb * 1024 * 1024 })
+        self.cfg.read().await.state_options()
     }
 }
 
 fn build_client(dirs: &AppDirs, cfg: &Config) -> Option<RommClient> {
-    let url = cfg.server_url.as_deref()?;
-    let token = load_token(dirs)?;
-    RommClient::new(url, Some(token), cfg.accept_invalid_certs).ok().map(|c| c.with_process_lock(dirs.api_lock()))
+    cfg.client(dirs).ok()
 }
 
 // ----------------------------------------------------------------------------- DTOs
@@ -413,6 +396,13 @@ struct SyncSummary {
 }
 
 impl SyncSummary {
+    fn of(saves: &SyncReport, states: &StateReport) -> SyncSummary {
+        let mut sum = SyncSummary::default();
+        sum.add_saves(saves);
+        sum.add_states(states);
+        sum
+    }
+
     fn add_saves(&mut self, r: &SyncReport) {
         self.uploaded.extend(r.uploaded.iter().cloned());
         self.downloaded.extend(r.downloaded.iter().cloned());
@@ -581,13 +571,7 @@ async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<Statu
 
     store_token(&st.dirs, &raw).map_err(s)?;
     let url = client.base_url().to_string();
-    st.update_cfg(|c| {
-        c.server_url = Some(url);
-        c.accept_invalid_certs = args.insecure;
-        c.device_name = args.device_name.clone().filter(|n| !n.trim().is_empty());
-        c.device_id = None;
-    })
-    .await?;
+    st.update_cfg(|c| c.set_server(&url, args.insecure, args.device_name.clone().filter(|n| !n.trim().is_empty()))).await?;
     *st.client.write().await = Some(client.clone());
     st.forget_ra().await;
     st.forget_library().await;
@@ -595,7 +579,7 @@ async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<Statu
 
     let mut warnings = vec![];
     if let Some(scopes) = scopes {
-        let missing: Vec<&str> = REQUIRED_SCOPES.iter().copied().filter(|r| !scopes.iter().any(|x| x == r)).collect();
+        let missing = missing_scopes(&scopes);
         if !missing.is_empty() {
             warnings.push(format!(
                 "This token is missing scopes the app needs ({}). Create a new token with them in RomM → Profile → Client API Tokens.",
@@ -630,7 +614,7 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
     let installed: std::collections::HashMap<String, bool> =
         profiles::builtin().into_iter().map(|p| { let ok = resolver.installed(&p).is_some(); (p.id, ok) }).collect();
     // RetroArch cores count as installed only if the core file is actually present.
-    let retro = resolver.emu_env("retroarch").ok().and_then(|(env, _)| env.retroarch);
+    let retro = resolver.emu_env(profiles::RETROARCH).ok().and_then(|(env, _)| env.retroarch);
     let choice_installed = |c: &plat::Choice| match &c.core {
         Some(core) => retro.as_ref().is_some_and(|l| retroarch::find_core(l, core, resolver.os).is_some()),
         None => installed.get(&c.emulator).copied().unwrap_or(false),
@@ -1012,20 +996,23 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
     Ok(())
 }
 
-async fn sync_one(st: &AppState, client: &RommClient, device: &str, rom: &LocalRom, cfg: &Config, opts: Option<&StateOptions>) -> CmdResult<SyncSummary> {
+async fn sync_one(st: &AppState, client: &RommClient, device: &str, rom: &LocalRom, cfg: &Config, opts: Option<&StateOptions>) -> CmdResult<(SyncReport, StateReport)> {
     let (env, _) = Resolver::new(cfg).env_for_platform(&rom.platform_slug).map_err(s)?;
-    let mut sum = SyncSummary::default();
     let mut db = st.db.lock().await;
     let backups = st.dirs.backups_dir();
-    let mut syncer = Syncer { client, device_id: device, state: &mut db, backup_dir: backups.clone(), policy: cfg.conflict_policy };
-    let r = syncer.sync_rom(rom, &env, None).await.map_err(s)?;
-    sum.add_saves(&r);
-    if let Some(o) = opts {
-        let r = states::sync_states(client, &mut db, &backups, rom, &env, cfg.conflict_policy, o).await.map_err(s)?;
-        sum.add_states(&r);
-    }
+    let round = SyncCtx { client, device_id: device, backup_dir: &backups, policy: cfg.conflict_policy, states: opts }.sync_game(&mut db, rom, &env, None).await;
+    // What was exchanged is recorded whether or not all of it worked, or the next sync would repeat it.
     db.save(&st.dirs.state_file()).map_err(s)?;
-    Ok(sum)
+    let saves = round.saves.map_err(s)?;
+    let mut states = StateReport::default();
+    match round.states {
+        Some(Ok(r)) => states = r,
+        // The saves were synced and that stands: say what went wrong with the states instead of
+        // discarding the whole result.
+        Some(Err(e)) => states.failed.push(format!("states: {e}")),
+        None => {}
+    }
+    Ok((saves, states))
 }
 
 #[tauri::command]
@@ -1041,7 +1028,7 @@ async fn sync_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
         let _busy = busy;
         emit_job::<()>(&app, "romm://sync", rom_id, "syncing", None, None);
         match sync_one(&st, &client, &device, &rom, &cfg, opts.as_ref()).await {
-            Ok(sum) => emit_job(&app, "romm://sync", rom_id, "finished", None, Some(sum)),
+            Ok((saves, states)) => emit_job(&app, "romm://sync", rom_id, "finished", None, Some(SyncSummary::of(&saves, &states))),
             Err(e) => emit_job::<()>(&app, "romm://sync", rom_id, "failed", Some(e), None),
         }
     });
@@ -1053,9 +1040,8 @@ async fn sync_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
 struct SyncAllResult {
     games: usize,
     skipped: Vec<String>,
-    summary: SyncSummaryOut,
+    summary: SyncSummary,
 }
-type SyncSummaryOut = serde_json::Value;
 
 #[tauri::command]
 async fn sync_all(app: AppHandle, st: TauriState<'_, AppState>) -> CmdResult<()> {
@@ -1069,24 +1055,20 @@ async fn sync_all(app: AppHandle, st: TauriState<'_, AppState>) -> CmdResult<()>
     tauri::async_runtime::spawn(async move {
         let _busy = busy;
         emit_job::<()>(&app, "romm://sync-all", SYNC_ALL, "syncing", None, None);
-        let mut total = SyncSummary::default();
+        // Totalled as reports and turned into a summary once, so nothing a game's sync reports can
+        // be left out of the total (a hand-copied list of fields once left out what was archived).
+        let (mut saves, mut states) = (SyncReport::default(), StateReport::default());
         let mut skipped = vec![];
         for rom in &roms {
             match sync_one(&st, &client, &device, rom, &cfg, opts.as_ref()).await {
-                Ok(sum) => {
-                    total.uploaded.extend(sum.uploaded);
-                    total.downloaded.extend(sum.downloaded);
-                    total.conflicts.extend(sum.conflicts);
-                    total.failed.extend(sum.failed);
-                    total.state_uploaded.extend(sum.state_uploaded);
-                    total.state_downloaded.extend(sum.state_downloaded);
-                    total.state_conflicts.extend(sum.state_conflicts);
-                    total.state_failed.extend(sum.state_failed);
+                Ok((game_saves, game_states)) => {
+                    saves.merge(game_saves);
+                    states.merge(game_states);
                 }
                 Err(e) => skipped.push(format!("{}: {e}", rom.name)),
             }
         }
-        let summary = serde_json::to_value(&total).unwrap_or_default();
+        let summary = SyncSummary::of(&saves, &states);
         emit_job(&app, "romm://sync-all", SYNC_ALL, "finished", None, Some(SyncAllResult { games: roms.len(), skipped, summary }));
     });
     Ok(())
@@ -1148,7 +1130,7 @@ async fn emulators(st: TauriState<'_, AppState>) -> CmdResult<Vec<EmulatorDto>> 
                 romm_core::detect::InstallKind::Native(x) => x.display().to_string(),
                 romm_core::detect::InstallKind::Flatpak(id) => format!("flatpak run {id}"),
             });
-            let platforms = if p.id == "retroarch" {
+            let platforms = if p.id == profiles::RETROARCH {
                 retroarch::supported_slugs().map(String::from).collect()
             } else {
                 p.platforms.clone()
@@ -1244,25 +1226,8 @@ async fn set_platform_choice(st: TauriState<'_, AppState>, slug: String, choice:
 #[tauri::command]
 async fn install_bios(st: TauriState<'_, AppState>, platform_slug: String) -> CmdResult<Vec<BiosDto>> {
     let client = st.client().await?;
-    let plat = client
-        .platforms()
-        .await
-        .map_err(s)?
-        .into_iter()
-        .find(|p| p.slug == platform_slug)
-        .ok_or_else(|| format!("no platform '{platform_slug}' on the server"))?;
-    if plat.firmware.is_empty() {
-        return Err(format!("RomM has no BIOS files for {}. Add them to the platform's bios folder on the server and rescan.", plat.title()));
-    }
     let cfg = st.cfg.read().await.clone();
-    let resolver = Resolver::new(&cfg);
-    let (env, _) = resolver.emu_env(&resolver.emulator_for(&platform_slug).map_err(s)?).map_err(s)?;
-    let rule = env.profile.bios.as_ref().ok_or_else(|| format!("{} has no known BIOS folder", env.profile.name))?;
-    let dir = match &env.retroarch {
-        Some(l) => l.system.clone(),
-        None => env.data_root.join(&rule.dir),
-    };
-    let res = library::install_bios(&client, &plat, &dir, &mut |_, _| {}).await.map_err(s)?;
+    let (_, res) = library::install_platform_bios(&client, &Resolver::new(&cfg), &platform_slug, &mut |_, _| {}).await.map_err(s)?;
     Ok(res
         .into_iter()
         .map(|r| BiosDto {
@@ -1385,4 +1350,88 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running RomM Desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use romm_core::sync::PendingConflict;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// One game's sync, as `sync_one` hands it to `sync_game` and `sync_all`.
+    fn game(n: &str) -> (SyncReport, StateReport) {
+        let tag = |what: &str| format!("{n}.{what}");
+        (
+            SyncReport {
+                uploaded: vec![tag("up")],
+                downloaded: vec![tag("down")],
+                archived: vec![tag("archived")],
+                conflicts: vec![PendingConflict { rom_id: 1, file_name: tag("conflict"), server_updated_at: None, reason: None }],
+                failed: vec![tag("failed")],
+                unchanged: 1,
+            },
+            StateReport {
+                uploaded: vec![tag("sup")],
+                downloaded: vec![tag("sdown")],
+                archived: vec![tag("sarchived")],
+                conflicts: vec![tag("sconflict")],
+                skipped: vec![tag("sskipped")],
+                failed: vec![tag("sfailed")],
+                unchanged: 1,
+            },
+        )
+    }
+
+    /// "Sync all" used to copy eight of the summary's eleven fields by hand and so never said that a
+    /// local copy had been archived on the server, or a state skipped for its size, however many
+    /// games it happened to. The total is now made the way `sync_all` makes it.
+    #[test]
+    fn a_total_over_several_games_reports_everything_each_game_reported() {
+        let (mut saves, mut states) = (SyncReport::default(), StateReport::default());
+        for n in ["A", "B"] {
+            let (s, st) = game(n);
+            saves.merge(s);
+            states.merge(st);
+        }
+        let sum = SyncSummary::of(&saves, &states);
+
+        assert_eq!(sum.uploaded, names(&["A.up", "B.up"]));
+        assert_eq!(sum.downloaded, names(&["A.down", "B.down"]));
+        assert_eq!(sum.archived, names(&["A.archived", "B.archived"]));
+        assert_eq!(sum.conflicts, names(&["A.conflict", "B.conflict"]));
+        assert_eq!(sum.failed, names(&["A.failed", "B.failed"]));
+        assert_eq!(sum.state_uploaded, names(&["A.sup", "B.sup"]));
+        assert_eq!(sum.state_downloaded, names(&["A.sdown", "B.sdown"]));
+        assert_eq!(sum.state_archived, names(&["A.sarchived", "B.sarchived"]));
+        assert_eq!(sum.state_conflicts, names(&["A.sconflict", "B.sconflict"]));
+        assert_eq!(sum.state_skipped, names(&["A.sskipped", "B.sskipped"]));
+        assert_eq!(sum.state_failed, names(&["A.sfailed", "B.sfailed"]));
+    }
+
+    #[test]
+    fn one_games_summary_is_the_same_as_that_game_alone_in_a_total() {
+        let (saves, states) = game("A");
+        let alone = serde_json::to_value(SyncSummary::of(&saves, &states)).unwrap();
+        let (mut total_saves, mut total_states) = (SyncReport::default(), StateReport::default());
+        let (s, st) = game("A");
+        total_saves.merge(s);
+        total_states.merge(st);
+        assert_eq!(alone, serde_json::to_value(SyncSummary::of(&total_saves, &total_states)).unwrap());
+    }
+
+    /// The names the frontend's `SyncSummary` type (app/src/types.ts) reads. Renaming one here
+    /// without there would make it silently `undefined` in the UI.
+    #[test]
+    fn the_summary_is_sent_under_the_names_the_frontend_reads() {
+        let v = serde_json::to_value(SyncSummary::default()).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["archived", "conflicts", "downloaded", "failed", "stateArchived", "stateConflicts", "stateDownloaded", "stateFailed", "stateSkipped", "stateUploaded", "uploaded"]
+        );
+    }
 }

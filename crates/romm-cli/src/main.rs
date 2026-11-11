@@ -5,28 +5,15 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use romm_core::api::types::DeviceRegistration;
-use romm_core::api::{RommClient, CLIENT_SLUG};
-use romm_core::config::{default_device_name, hostname, load_token, store_token, AppDirs, Config};
+use romm_core::api::{missing_scopes, RommClient};
+use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::detect::{self, Installed};
-use romm_core::paths::{Os, PathCtx};
 use romm_core::resolve::Resolver;
+use romm_core::session::SyncCtx;
 use romm_core::state::State;
-use romm_core::sync::{ConflictPolicy, EmuEnv, SyncReport, Syncer};
+use romm_core::sync::{ConflictPolicy, EmuEnv, SyncReport};
 use romm_core::states::{self, StateOptions, StateReport, StateStatus};
 use romm_core::{library, profiles, retroarch, session, unit, xbox};
-
-/// Scopes a token needs for everything this app does.
-const REQUIRED_SCOPES: &[&str] = &[
-    "me.read",
-    "platforms.read",
-    "roms.read",
-    "firmware.read",
-    "assets.read",
-    "assets.write",
-    "devices.read",
-    "devices.write",
-];
 
 #[derive(Parser)]
 #[command(name = "romm", version, about = "Sync ROMs, BIOS files and saves with RomM and launch them in your emulators")]
@@ -158,42 +145,27 @@ enum Cmd {
 struct App {
     dirs: AppDirs,
     cfg: Config,
-    os: Os,
-    pctx: PathCtx,
 }
 
 impl App {
     fn load() -> Result<App> {
         let dirs = AppDirs::discover();
         let cfg = Config::load(&dirs)?;
-        Ok(App { dirs, cfg, os: Os::current(), pctx: PathCtx::from_env() })
+        Ok(App { dirs, cfg })
     }
 
     fn client(&self) -> Result<RommClient> {
-        let url = self.cfg.server_url.as_deref().ok_or_else(|| anyhow!("not logged in; run `romm login --server <url> --code <code>`"))?;
-        let token = load_token(&self.dirs).ok_or_else(|| anyhow!("no saved token; run `romm login` again"))?;
-        Ok(RommClient::new(url, Some(token), self.cfg.accept_invalid_certs)?.with_process_lock(self.dirs.api_lock()))
+        self.cfg.client(&self.dirs).map_err(|e| anyhow!("{e}; run `romm login --server <url> --code <code>`"))
     }
 
     async fn device_id(&mut self, client: &RommClient) -> Result<String> {
         if let Some(id) = &self.cfg.device_id {
             return Ok(id.clone());
         }
-        let name = self.cfg.device_name.clone().unwrap_or_else(default_device_name);
-        let d = client
-            .register_device(&DeviceRegistration {
-                name,
-                platform: std::env::consts::OS.to_string(),
-                client: CLIENT_SLUG.to_string(),
-                client_version: env!("CARGO_PKG_VERSION").to_string(),
-                hostname: hostname(),
-                sync_mode: "api".to_string(),
-            })
-            .await
-            .context("registering this device with RomM (does the token have the devices.write scope?)")?;
-        self.cfg.device_id = Some(d.device_id.clone());
+        let id = register_device(client, self.cfg.device_name.as_deref()).await?;
+        self.cfg.device_id = Some(id.clone());
         self.cfg.save(&self.dirs)?;
-        Ok(d.device_id)
+        Ok(id)
     }
 
     fn state(&self) -> Result<State> {
@@ -201,7 +173,7 @@ impl App {
     }
 
     fn resolver(&self) -> Resolver<'_> {
-        Resolver { cfg: &self.cfg, os: self.os, pctx: self.pctx.clone() }
+        Resolver::new(&self.cfg)
     }
 
     fn emu_env(&self, emu_id: &str) -> Result<(EmuEnv, Installed)> {
@@ -215,7 +187,7 @@ impl App {
     }
 
     fn state_opts(&self, skip: bool) -> Option<StateOptions> {
-        (self.cfg.sync_states && !skip).then(|| StateOptions { max_bytes: self.cfg.max_state_mb * 1024 * 1024 })
+        if skip { None } else { self.cfg.state_options() }
     }
 
     fn policy(&self, flag: Option<OnConflict>) -> ConflictPolicy {
@@ -369,14 +341,11 @@ async fn main() -> Result<()> {
             };
             let client = RommClient::new(&server, Some(raw.clone()), insecure)?;
             client.platforms().await.context("the token was accepted but listing platforms failed")?;
-            app.cfg.server_url = Some(client.base_url().to_string());
-            app.cfg.accept_invalid_certs = insecure;
-            app.cfg.device_name = device_name;
-            app.cfg.device_id = None;
+            app.cfg.set_server(client.base_url(), insecure, device_name);
             store_token(&app.dirs, &raw)?;
             app.cfg.save(&app.dirs)?;
             if let Some(scopes) = scopes {
-                let missing: Vec<_> = REQUIRED_SCOPES.iter().filter(|s| !scopes.iter().any(|x| x == *s)).collect();
+                let missing = missing_scopes(&scopes);
                 if !missing.is_empty() {
                     eprintln!("warning: this token lacks scopes romm needs: {missing:?}\n         create a new token with them in RomM → Profile → Client API Tokens");
                 }
@@ -430,24 +399,8 @@ async fn main() -> Result<()> {
 
         Cmd::Bios { platform } => {
             let c = app.client()?;
-            let plat = c
-                .platforms()
-                .await?
-                .into_iter()
-                .find(|p| p.slug == platform)
-                .ok_or_else(|| anyhow!("no platform with slug '{platform}'"))?;
-            if plat.firmware.is_empty() {
-                bail!("RomM has no BIOS files for {}", plat.title());
-            }
-            let emu_id = app.emulator_for(&platform)?;
-            let (env, _) = app.emu_env(&emu_id)?;
-            let rel = env.profile.bios.as_ref().ok_or_else(|| anyhow!("{} has no known BIOS folder", env.profile.name))?.dir.clone();
-            let dir = match &env.retroarch {
-                Some(l) => l.system.clone(),
-                None => env.data_root.join(rel),
-            };
             let mut p = progress_printer("Downloading BIOS".into());
-            let res = library::install_bios(&c, &plat, &dir, &mut p).await?;
+            let (dir, res) = library::install_platform_bios(&c, &app.resolver(), &platform, &mut p).await?;
             eprintln!();
             for r in res {
                 println!("  {:?}: {}", r.status, r.file);
@@ -531,7 +484,7 @@ async fn main() -> Result<()> {
                 print_state_report(r);
             }
             if let Some(e) = &out.state_error {
-                println!("Couldn't syunc save states ({e}), will try again on the next `romm sync`.");
+                println!("Couldn't sync save states ({e}), will try again on the next `romm sync`.");
             }
         }
 
@@ -543,6 +496,7 @@ async fn main() -> Result<()> {
             if roms.is_empty() {
                 bail!("nothing installed to sync");
             }
+            let (backups, state_opts) = (app.dirs.backups_dir(), app.state_opts(no_states));
             let mut any_failed = false;
             for rom in roms {
                 if app.emulator_for(&rom.platform_slug).is_err() {
@@ -556,29 +510,28 @@ async fn main() -> Result<()> {
                     }
                 };
                 println!("{}", rom.name);
-                let policy = app.policy(on_conflict);
-                let mut s = Syncer { client: &c, device_id: &device, state: &mut state, backup_dir: app.dirs.backups_dir(), policy };
-                match s.sync_rom(&rom, &env, None).await {
+                let ctx = SyncCtx { client: &c, device_id: &device, backup_dir: &backups, policy: app.policy(on_conflict), states: state_opts.as_ref() };
+                let round = ctx.sync_game(&mut state, &rom, &env, None).await;
+                match &round.saves {
                     Ok(r) => {
                         any_failed |= !r.failed.is_empty();
-                        print_report(&r)
+                        print_report(r)
                     }
                     Err(e) => {
                         any_failed = true;
                         println!("  ✗ {e}");
                     }
                 }
-                if let Some(opts) = app.state_opts(no_states) {
-                    match states::sync_states(&c, &mut state, &app.dirs.backups_dir(), &rom, &env, policy, &opts).await {
-                        Ok(r) => {
-                            any_failed |= !r.failed.is_empty();
-                            print_state_report(&r)
-                        }
-                        Err(e) => {
-                            any_failed = true;
-                            println!("  ✗ states: {e}");
-                        }
+                match &round.states {
+                    Some(Ok(r)) => {
+                        any_failed |= !r.failed.is_empty();
+                        print_state_report(r)
                     }
+                    Some(Err(e)) => {
+                        any_failed = true;
+                        println!("  ✗ states: {e}");
+                    }
+                    None => {}
                 }
                 state.save(&app.dirs.state_file())?;
             }

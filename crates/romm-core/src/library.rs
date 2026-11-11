@@ -9,8 +9,10 @@ use walkdir::WalkDir;
 use crate::api::types::{Platform, Rom};
 use crate::api::RommClient;
 use crate::error::{Error, Result};
+use crate::resolve::Resolver;
 use crate::saves::{md5_file, safe_rel};
 use crate::state::LocalRom;
+use crate::sync::EmuEnv;
 
 /// Which file in an extracted multi-file ROM the emulator should be pointed at
 /// (lower = preferred): playlists and cue sheets before the raw data they reference.
@@ -129,6 +131,41 @@ pub struct BiosOutcome {
     pub status: BiosStatus,
 }
 
+impl EmuEnv {
+    /// Where this emulator looks for BIOS files: RetroArch's own `system` folder, else the profile's
+    /// folder under the emulator's data.
+    pub fn bios_dir(&self) -> Result<PathBuf> {
+        let rule = self.profile.bios.as_ref().ok_or_else(|| Error::msg(format!("{} has no known BIOS folder", self.profile.name)))?;
+        Ok(match &self.retroarch {
+            Some(layout) => layout.system.clone(),
+            None => self.data_root.join(&rule.dir),
+        })
+    }
+}
+
+/// Installs the BIOS files RomM holds for `platform_slug` into the folder the emulator chosen for
+/// that platform reads them from. Returns that folder and what became of each file.
+pub async fn install_platform_bios(
+    client: &RommClient,
+    resolver: &Resolver<'_>,
+    platform_slug: &str,
+    progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+) -> Result<(PathBuf, Vec<BiosOutcome>)> {
+    let platform = client
+        .platforms()
+        .await?
+        .into_iter()
+        .find(|p| p.slug == platform_slug)
+        .ok_or_else(|| Error::msg(format!("no platform '{platform_slug}' on the server")))?;
+    if platform.firmware.is_empty() {
+        return Err(Error::msg(format!("RomM has no BIOS files for {}. Add them to the platform's bios folder on the server and rescan.", platform.title())));
+    }
+    let (env, _) = resolver.emu_env(&resolver.emulator_for(platform_slug)?)?;
+    let dir = env.bios_dir()?;
+    let outcomes = install_bios(client, &platform, &dir, progress).await?;
+    Ok((dir, outcomes))
+}
+
 /// Install a platform's firmware into `dest_dir`, verifying each file's MD5 against RomM's record.
 pub async fn install_bios(
     client: &RommClient,
@@ -166,6 +203,29 @@ pub async fn install_bios(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env(id: &str, root: &str) -> EmuEnv {
+        EmuEnv { profile: crate::profiles::get(id).unwrap(), data_root: PathBuf::from(root), retroarch: None, core: None }
+    }
+
+    #[test]
+    fn a_standalone_emulators_bios_folder_is_under_its_data() {
+        assert_eq!(env("pcsx2", "/data/pcsx2").bios_dir().unwrap(), PathBuf::from("/data/pcsx2/bios"));
+    }
+
+    #[test]
+    fn retroarch_keeps_bios_files_in_its_own_system_folder() {
+        let root = std::path::Path::new("/ra");
+        let mut e = env("retroarch", "/ra");
+        e.retroarch = Some(crate::retroarch::layout(root, crate::paths::Os::Linux, &crate::paths::PathCtx::default()));
+        assert_eq!(e.bios_dir().unwrap(), e.retroarch.as_ref().unwrap().system);
+    }
+
+    #[test]
+    fn an_emulator_with_no_bios_rule_has_no_folder_to_name() {
+        let err = env("dolphin", "/data/dolphin").bios_dir().unwrap_err().to_string();
+        assert_eq!(err, "Dolphin has no known BIOS folder");
+    }
 
     #[test]
     fn launch_file_prefers_playlist_then_cue_over_bin() {

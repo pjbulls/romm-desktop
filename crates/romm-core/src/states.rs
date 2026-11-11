@@ -17,7 +17,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde::Serialize;
 
 use crate::api::types::StateInfo;
@@ -25,7 +24,7 @@ use crate::api::RommClient;
 use crate::error::{Error, Result};
 use crate::profiles::SaveMode;
 use crate::retroarch;
-use crate::saves::{backup_file, md5_file, mtime_ns};
+use crate::saves::{self, backup_file, md5_file, mtime_ns};
 use crate::state::{save_key, state_key, LocalRom, State, StateRecord};
 use crate::sync::{ConflictPolicy, EmuEnv};
 
@@ -58,6 +57,20 @@ pub struct StateReport {
 }
 
 impl StateReport {
+    /// Adds `other` to this report, to total up several games. Every field is named on purpose: a
+    /// field added to the report is a compile error here until it is counted, so it can't be left
+    /// out of a total.
+    pub fn merge(&mut self, other: StateReport) {
+        let StateReport { uploaded, downloaded, archived, conflicts, skipped, failed, unchanged } = other;
+        self.uploaded.extend(uploaded);
+        self.downloaded.extend(downloaded);
+        self.archived.extend(archived);
+        self.conflicts.extend(conflicts);
+        self.skipped.extend(skipped);
+        self.failed.extend(failed);
+        self.unchanged += unchanged;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.uploaded.is_empty()
             && self.downloaded.is_empty()
@@ -209,6 +222,18 @@ struct Ctx<'a> {
     emu: String,
 }
 
+/// `emu`'s states for `rom` as the server lists them, by file name. What a conflict archived
+/// (`CONFLICT_MARK`) and what the server no longer has on disk are not states to sync.
+async fn server_states(client: &RommClient, rom: &LocalRom, emu: &str) -> Result<BTreeMap<String, StateInfo>> {
+    Ok(client
+        .list_states(rom.rom_id)
+        .await?
+        .into_iter()
+        .filter(|s| s.emulator.as_deref() == Some(emu) && !s.missing_from_fs && !s.file_name.contains(CONFLICT_MARK))
+        .map(|s| (s.file_name.clone(), s))
+        .collect())
+}
+
 pub async fn sync_states(
     client: &RommClient,
     db: &mut State,
@@ -223,13 +248,7 @@ pub async fn sync_states(
         return Ok(report);
     }
     let emu = env.profile.id.clone();
-    let server: BTreeMap<String, StateInfo> = client
-        .list_states(rom.rom_id)
-        .await?
-        .into_iter()
-        .filter(|s| s.emulator.as_deref() == Some(emu.as_str()) && !s.missing_from_fs && !s.file_name.contains(CONFLICT_MARK))
-        .map(|s| (s.file_name.clone(), s))
-        .collect();
+    let server = server_states(client, rom, &emu).await?;
     let locals = local_states(env, rom, db);
     let names: BTreeSet<String> = server.keys().chain(locals.keys()).cloned().collect();
 
@@ -379,8 +398,7 @@ async fn adopt_server(
         }
     };
     if target.is_file() {
-        let stamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let dir = ctx.backup_dir.join(stamp).join(&ctx.emu).join("states");
+        let dir = ctx.backup_dir.join(saves::stamp()).join(&ctx.emu).join("states");
         backup_file(&target, &dir, name)?;
     }
     std::fs::rename(&tmp, &target)?;
@@ -421,7 +439,7 @@ async fn resolve_conflict(
             upload(ctx, db, name, path, h, Some(s.id), None, report).await?;
         }
         ConflictPolicy::KeepBoth => {
-            let archive = format!("{name}{CONFLICT_MARK}{}", Utc::now().format("%Y%m%dT%H%M%S"));
+            let archive = format!("{name}{CONFLICT_MARK}{}", saves::stamp());
             if let Err(e) = upload(ctx, db, name, path, h, None, Some(&archive), report).await {
                 discard(&downloaded);
                 return Err(e);
@@ -474,14 +492,8 @@ pub async fn overview(client: Option<&RommClient>, db: &State, rom: &LocalRom, e
         return Ok(vec![]);
     }
     let emu = env.profile.id.clone();
-    let server: BTreeMap<String, StateInfo> = match client {
-        Some(c) => c
-            .list_states(rom.rom_id)
-            .await?
-            .into_iter()
-            .filter(|s| s.emulator.as_deref() == Some(emu.as_str()) && !s.missing_from_fs && !s.file_name.contains(CONFLICT_MARK))
-            .map(|s| (s.file_name.clone(), s))
-            .collect(),
+    let server = match client {
+        Some(c) => server_states(c, rom, &emu).await?,
         None => BTreeMap::new(),
     };
     let locals = local_states(env, rom, db);
@@ -527,6 +539,25 @@ mod tests {
     }
     fn base(hash: &str, updated: &str, size: u64) -> StateRecord {
         StateRecord { server_id: Some(1), local_hash: hash.into(), server_updated_at: updated.into(), server_size: size, ..Default::default() }
+    }
+
+    #[test]
+    fn merging_state_reports_adds_every_outcome_and_keeps_their_order() {
+        let one = |s: &str| vec![s.to_string()];
+        let mut total = StateReport {
+            uploaded: one("u"), downloaded: one("d"), archived: one("a"), conflicts: one("c"), skipped: one("s"), failed: one("f"), unchanged: 1,
+        };
+        total.merge(StateReport {
+            uploaded: one("u2"), downloaded: one("d2"), archived: one("a2"), conflicts: one("c2"), skipped: one("s2"), failed: one("f2"), unchanged: 4,
+        });
+        assert_eq!(total.uploaded, ["u", "u2"]);
+        assert_eq!(total.downloaded, ["d", "d2"]);
+        // A total over many games must still say a local state was archived, or skipped for its size.
+        assert_eq!(total.archived, ["a", "a2"]);
+        assert_eq!(total.conflicts, ["c", "c2"]);
+        assert_eq!(total.skipped, ["s", "s2"]);
+        assert_eq!(total.failed, ["f", "f2"]);
+        assert_eq!(total.unchanged, 5);
     }
 
     #[test]

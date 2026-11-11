@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::saves::write_atomic;
+use crate::saves::{self, write_atomic};
 use crate::unit::Identity;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -49,6 +50,21 @@ pub struct SaveRecord {
     /// only there), so Sigil alone would call it unchanged. Cleared once it has been transferred.
     #[serde(default)]
     pub dirty: bool,
+}
+
+impl SaveRecord {
+    /// The server and this machine now hold the same save: remember what was exchanged, so later
+    /// changes are measured from here. `save_id` is kept when the server didn't say which save it
+    /// was; a missing `updated_at` is taken to be now, so the save can never look newer than the
+    /// server's copy.
+    pub fn mark_synced(&mut self, hash: &str, save_id: Option<i64>, server_updated_at: Option<String>) {
+        self.last_hash = Some(hash.to_string());
+        if save_id.is_some() {
+            self.server_save_id = save_id;
+        }
+        self.server_updated_at = server_updated_at.or_else(|| Some(saves::iso(SystemTime::now())));
+        self.dirty = false;
+    }
 }
 
 /// What a state file looked like at its last successful sync (the server exposes no hash).
@@ -97,6 +113,11 @@ pub fn state_key(rom_id: i64, emulator: &str, name: &str) -> String {
 }
 
 impl State {
+    /// The record for `emulator`'s save of `rom_id`, created if there is none yet.
+    pub fn save_record(&mut self, rom_id: i64, emulator: &str) -> &mut SaveRecord {
+        self.saves.entry(save_key(rom_id, emulator)).or_default()
+    }
+
     pub fn sigil_state(&self, key: &str) -> Option<Vec<u8>> {
         use base64::Engine;
         let b64 = self.sigil.get(key)?;
@@ -164,6 +185,44 @@ mod tests {
         assert_eq!(s.saves["7:ppsspp"].last_hash.as_deref(), Some("h"));
         assert_eq!(s.saves["7:ppsspp"].server_save_id, Some(5));
         assert!(s.sigil.is_empty());
+    }
+
+    #[test]
+    fn marking_a_save_synced_records_what_was_exchanged_and_clears_dirty() {
+        let mut r = SaveRecord { dirty: true, ..Default::default() };
+        r.mark_synced("h1", Some(42), Some("2026-01-02T03:04:05Z".into()));
+        assert_eq!(r.last_hash.as_deref(), Some("h1"));
+        assert_eq!(r.server_save_id, Some(42));
+        assert_eq!(r.server_updated_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+        assert!(!r.dirty);
+    }
+
+    #[test]
+    fn a_server_that_names_no_save_leaves_the_known_id_alone() {
+        let mut r = SaveRecord { server_save_id: Some(7), ..Default::default() };
+        r.mark_synced("h2", None, Some("2026-01-02T03:04:05Z".into()));
+        assert_eq!(r.server_save_id, Some(7));
+    }
+
+    #[test]
+    fn a_missing_server_time_is_now_so_the_save_cannot_look_newer_than_the_server_copy() {
+        let mut r = SaveRecord::default();
+        let before = saves::iso(SystemTime::now());
+        r.mark_synced("h3", Some(1), None);
+        let after = saves::iso(SystemTime::now());
+        let t = r.server_updated_at.expect("a time is recorded");
+        // The format is fixed-width and zero-padded, so a string comparison is a time comparison.
+        assert!(before <= t && t <= after, "{before} <= {t} <= {after}");
+    }
+
+    #[test]
+    fn save_record_creates_the_entry_once_and_keeps_it() {
+        let mut s = State::default();
+        s.save_record(3, "dolphin").mark_synced("a", Some(9), Some("t".into()));
+        s.save_record(3, "dolphin").dirty = true;
+        assert_eq!(s.saves.len(), 1);
+        let rec = &s.saves["3:dolphin"];
+        assert_eq!((rec.last_hash.as_deref(), rec.server_save_id, rec.dirty), (Some("a"), Some(9), true));
     }
 
     #[test]

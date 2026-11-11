@@ -9,6 +9,7 @@ use romm_core::profiles;
 use romm_core::retroarch;
 use romm_core::saves::md5_bytes;
 use romm_core::state::{state_key, LocalRom, State, StateRecord};
+use romm_core::session::SyncCtx;
 use romm_core::states::{overview, sync_states, StateOptions, StateStatus};
 use romm_core::sync::{ConflictPolicy, EmuEnv};
 use serde_json::{json, Value};
@@ -353,4 +354,91 @@ fn screenshots_stored_next_to_ppsspp_states_are_ignored() {
     assert!(env.state_ignored("ULUS10336_1.01_0.jpg") && env.state_ignored("x.PNG"));
     assert!(!env.state_ignored("ULUS10336_1.01_0.ppst"));
     assert!(!diff_env("dolphin", t.path()).state_ignored("GALE01.s01"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// SyncCtx::sync_game: one round over a game's saves, then its states
+// ---------------------------------------------------------------------------------------------
+
+async fn mock_empty_negotiate(server: &MockServer) {
+    Mock::given(method("POST")).and(path("/api/sync/negotiate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"session_id": 42, "operations": []}))).mount(server).await;
+    Mock::given(method("POST")).and(path_regex(r"^/api/sync/sessions/\d+/complete$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(server).await;
+}
+
+#[tokio::test]
+async fn a_round_syncs_the_saves_and_then_the_states() {
+    let server = MockServer::start().await;
+    mock_empty_negotiate(&server).await;
+    mock_list(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(st(5, "Zelda.state1", 2, "T1", "retroarch"))).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v1");
+    let (c, bak, o) = (client(&server), t.path().join("bak"), opts());
+    let ctx = SyncCtx { client: &c, device_id: "dev", backup_dir: &bak, policy: ConflictPolicy::KeepBoth, states: Some(&o) };
+    let mut db = State::default();
+
+    let round = ctx.sync_game(&mut db, &rom("Zelda"), &env, None).await;
+
+    round.saves.expect("the saves half ran");
+    assert_eq!(round.states.expect("states were on").expect("the states half ran").uploaded, ["Zelda.state1"]);
+    assert_eq!(reqs(&server, "POST", "/api/sync/negotiate").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_round_with_states_off_never_asks_the_server_about_them() {
+    let server = MockServer::start().await;
+    mock_empty_negotiate(&server).await;
+    mock_list(&server, vec![st(1, "Zelda.state1", 3, "T1", "retroarch")]).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v1");
+    let (c, bak) = (client(&server), t.path().join("bak"));
+    let ctx = SyncCtx { client: &c, device_id: "dev", backup_dir: &bak, policy: ConflictPolicy::KeepBoth, states: None };
+
+    let round = ctx.sync_game(&mut State::default(), &rom("Zelda"), &env, None).await;
+
+    assert!(round.saves.is_ok());
+    assert!(round.states.is_none(), "states were not asked for");
+    assert!(reqs(&server, "GET", "/api/states").await.is_empty() && reqs(&server, "POST", "/api/states").await.is_empty());
+}
+
+#[tokio::test]
+async fn saves_that_cannot_be_synced_do_not_stop_the_states() {
+    // The saves half fails outright (the server answers 500 to the negotiation). The states half is
+    // independent and must still run: neither is lost because the other was.
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/sync/negotiate")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    mock_list(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(st(5, "Zelda.state1", 2, "T1", "retroarch"))).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v1");
+    let (c, bak, o) = (client(&server), t.path().join("bak"), opts());
+    let ctx = SyncCtx { client: &c, device_id: "dev", backup_dir: &bak, policy: ConflictPolicy::KeepBoth, states: Some(&o) };
+
+    let round = ctx.sync_game(&mut State::default(), &rom("Zelda"), &env, None).await;
+
+    assert!(round.saves.is_err(), "the failure is reported, not raised");
+    assert_eq!(round.states.expect("states were on").expect("and ran").uploaded, ["Zelda.state1"]);
+}
+
+#[tokio::test]
+async fn states_that_cannot_be_synced_do_not_discard_the_saves_result() {
+    let server = MockServer::start().await;
+    mock_empty_negotiate(&server).await;
+    Mock::given(method("GET")).and(path("/api/states")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    let (c, bak, o) = (client(&server), t.path().join("bak"), opts());
+    let ctx = SyncCtx { client: &c, device_id: "dev", backup_dir: &bak, policy: ConflictPolicy::KeepBoth, states: Some(&o) };
+
+    let round = ctx.sync_game(&mut State::default(), &rom("Zelda"), &env, None).await;
+
+    assert!(round.saves.is_ok(), "the saves were synced and that stands");
+    assert!(round.states.expect("states were on").is_err());
 }

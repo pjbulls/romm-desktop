@@ -58,6 +58,44 @@ fn leaf(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
 
+/// Everything one game's sync needs besides the game: who to talk to and as which device, where
+/// backups go, how a conflict is settled, and whether states are synced along with the saves.
+#[derive(Clone, Copy)]
+pub struct SyncCtx<'a> {
+    pub client: &'a RommClient,
+    pub device_id: &'a str,
+    pub backup_dir: &'a Path,
+    pub policy: ConflictPolicy,
+    /// `None` leaves save states alone.
+    pub states: Option<&'a StateOptions>,
+}
+
+/// What one round of syncing a game did: its saves, then its states. A failure is kept, not
+/// raised, and one failing does not stop the other from being tried; what a failure means (a
+/// note, an exit code, a failed job) is for the caller to say.
+#[derive(Debug)]
+pub struct GameSync {
+    pub saves: Result<SyncReport>,
+    /// `None` when states were not synced.
+    pub states: Option<Result<StateReport>>,
+}
+
+impl SyncCtx<'_> {
+    /// Syncs `rom`'s saves, then its states when `self.states` is set. `play` is recorded with the
+    /// server when the saves are synced. The caller saves `state` afterwards.
+    pub async fn sync_game(&self, state: &mut State, rom: &LocalRom, env: &EmuEnv, play: Option<PlaySession>) -> GameSync {
+        let saves = {
+            let mut s = Syncer { client: self.client, device_id: self.device_id, state: &mut *state, backup_dir: self.backup_dir.to_path_buf(), policy: self.policy };
+            s.sync_rom(rom, env, play).await
+        };
+        let states = match self.states {
+            Some(opts) => Some(states::sync_states(self.client, state, self.backup_dir, rom, env, self.policy, opts).await),
+            None => None,
+        };
+        GameSync { saves, states }
+    }
+}
+
 /// Phase 1: pull saves (and states), then snapshot the shared state folder. Failures to reach the
 /// server are recorded, not raised.
 #[allow(clippy::too_many_arguments)]
@@ -73,18 +111,15 @@ pub async fn pre_play(
     states: Option<&StateOptions>,
 ) -> Result<Pre> {
     let mut pre = Pre { pull: None, pull_error: None, state_pull: None, state_error: None, before_states: None };
-    {
-        let mut s = Syncer { client, device_id, state: &mut *state, backup_dir: backup_dir.clone(), policy };
-        match s.sync_rom(rom, env, None).await {
-            Ok(r) => pre.pull = Some(r),
-            Err(e) => pre.pull_error = Some(e.to_string()),
-        }
+    let round = SyncCtx { client, device_id, backup_dir: &backup_dir, policy, states }.sync_game(state, rom, env, None).await;
+    match round.saves {
+        Ok(r) => pre.pull = Some(r),
+        Err(e) => pre.pull_error = Some(e.to_string()),
     }
-    if let Some(opts) = states {
-        match states::sync_states(client, state, &backup_dir, rom, env, policy, opts).await {
-            Ok(r) => pre.state_pull = Some(r),
-            Err(e) => pre.state_error = Some(e.to_string()),
-        }
+    match round.states {
+        Some(Ok(r)) => pre.state_pull = Some(r),
+        Some(Err(e)) => pre.state_error = Some(e.to_string()),
+        None => {}
     }
     state.save(state_path)?;
 
@@ -151,18 +186,15 @@ pub async fn post_play(
         end_time: saves::iso(run.ended.max(run.started + Duration::from_secs(1))),
         duration_ms: run.elapsed.as_millis() as u64,
     };
-    {
-        let mut s = Syncer { client, device_id, state: &mut *state, backup_dir: backup_dir.clone(), policy };
-        match s.sync_rom(rom, env, Some(play)).await {
-            Ok(r) => out.push = Some(r),
-            Err(e) => out.push_error = Some(e.to_string()),
-        }
+    let round = SyncCtx { client, device_id, backup_dir: &backup_dir, policy, states }.sync_game(state, rom, env, Some(play)).await;
+    match round.saves {
+        Ok(r) => out.push = Some(r),
+        Err(e) => out.push_error = Some(e.to_string()),
     }
-    if let Some(opts) = states {
-        match states::sync_states(client, state, &backup_dir, rom, env, policy, opts).await {
-            Ok(r) => out.state_push = Some(r),
-            Err(e) => out.state_error = Some(e.to_string()),
-        }
+    match round.states {
+        Some(Ok(r)) => out.state_push = Some(r),
+        Some(Err(e)) => out.state_error = Some(e.to_string()),
+        None => {}
     }
     state.save(state_path)?;
     Ok(out)
