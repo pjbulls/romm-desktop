@@ -325,8 +325,32 @@ pub mod qemu {
     use std::path::Path;
     use std::process::Command;
 
-    pub fn available() -> bool {
-        Command::new("qemu-img").arg("--version").output().is_ok_and(|o| o.status.success())
+    fn runs(tool: &str) -> bool {
+        Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    /// Whether the real QEMU tools are here: `qemu-img` to judge an image, `qemu-io` to hold one open.
+    /// Both come in the `qemu-utils` package.
+    fn installed() -> bool {
+        static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *INSTALLED.get_or_init(|| runs("qemu-img") && runs("qemu-io"))
+    }
+
+    /// Call before a check that needs QEMU. `true`: go ahead.
+    ///
+    /// Without QEMU there is nothing independent to judge a disk image by, and a test that skips
+    /// itself still reports as passed, which reads as a guarantee nobody checked. So on a developer's
+    /// machine it says so and returns `false`, but where the run must not skip (`CI` is set, as GitHub
+    /// Actions does; or `ROMM_REQUIRE_QEMU`) a missing QEMU fails the test and says how to fix it.
+    pub fn require() -> bool {
+        if installed() {
+            return true;
+        }
+        let strict = std::env::var_os("CI").is_some() || std::env::var_os("ROMM_REQUIRE_QEMU").is_some();
+        assert!(!strict, "the QEMU tools (qemu-img, qemu-io) are not installed, and this run may not skip what needs them: install qemu-utils");
+        static NOTED: std::sync::Once = std::sync::Once::new();
+        NOTED.call_once(|| eprintln!("SKIPPED: the QEMU tools (qemu-img, qemu-io) are not installed, so there is no independent judge of the image"));
+        false
     }
 
     /// `qemu-img check`: every refcount, L1 and L2 entry consistent, nothing leaked or corrupt.

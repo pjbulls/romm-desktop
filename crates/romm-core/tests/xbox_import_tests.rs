@@ -108,16 +108,16 @@ fn outside(t: &Tree, prefix_lower: &str) -> Tree {
 }
 
 fn check_qemu(img: &Path) {
-    if qemu::available() {
+    if qemu::require() {
         qemu::check(img).unwrap_or_else(|e| panic!("{e}"));
     }
 }
 
 #[test]
 fn a_save_replaces_only_its_own_folder_on_every_kind_of_image() {
-    if !qemu::available() {
-        eprintln!("SKIPPED the QEMU checks: qemu-img is not installed (the rest still runs)");
-    }
+    // Without QEMU the rest still runs; only the independent check of each image is skipped (or, where
+    // skipping is not allowed, fails, as it does in `check_qemu`).
+    qemu::require();
     let m = manifest();
     let titles: Vec<String> = m["e"]["titles"].as_object().unwrap().keys().cloned().collect();
     for flavour in WRITABLE {
@@ -355,7 +355,7 @@ fn consecutive_imports_keep_a_snapshot_image_valid() {
         check_qemu(&img);
     }
     // The snapshot is still there, and still intact.
-    if qemu::available() {
+    if qemu::require() {
         let out = std::process::Command::new("qemu-img").args(["snapshot", "-l"]).arg(&img).output().unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("before-save"));
     }

@@ -101,16 +101,15 @@ mod with_qemu {
     use super::*;
     use common::QemuHolder;
 
-    fn skip() {
-        eprintln!("SKIPPED: qemu-io is not installed, so there is no real QEMU to hold an image open");
-    }
-
     #[test]
     fn a_running_qemu_is_noticed_and_a_restore_waits_for_it_to_close() {
         let t = tempfile::tempdir().unwrap();
         let img = copy_fixture(t.path(), "hdd-v3.qcow2");
         let original = std::fs::read(&img).unwrap();
-        let Some(qemu) = QemuHolder::start(&img) else { return skip() };
+        if !common::qemu::require() {
+            return;
+        }
+        let qemu = QemuHolder::start(&img).expect("qemu-io is installed, so it starts");
 
         // What xemu would be doing: the image is open read-write in QEMU.
         assert!(image_in_use(&img).is_some());
@@ -129,7 +128,16 @@ mod with_qemu {
     fn a_read_only_qemu_does_not_get_in_the_way() {
         let t = tempfile::tempdir().unwrap();
         let img = copy_fixture(t.path(), "hdd-v3.qcow2");
-        let Ok(mut child) = std::process::Command::new("qemu-io").args(["-r", "-c", "sleep 120000"]).arg(&img).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() else { return skip() };
+        if !common::qemu::require() {
+            return;
+        }
+        let mut child = std::process::Command::new("qemu-io")
+            .args(["-r", "-c", "sleep 120000"])
+            .arg(&img)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("qemu-io is installed, so it starts");
         std::thread::sleep(std::time::Duration::from_millis(800));
         let free = image_in_use(&img).is_none();
         let _ = child.kill();
@@ -139,8 +147,8 @@ mod with_qemu {
 
     #[test]
     fn while_a_restore_holds_the_image_qemu_itself_refuses_to_open_it() {
-        if std::process::Command::new("qemu-io").arg("--version").output().is_err() {
-            return skip();
+        if !common::qemu::require() {
+            return;
         }
         let t = tempfile::tempdir().unwrap();
         let img = copy_fixture(t.path(), "hdd-v3.qcow2");

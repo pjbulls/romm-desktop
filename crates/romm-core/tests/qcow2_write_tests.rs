@@ -74,8 +74,7 @@ fn file_bytes(p: &Path) -> Vec<u8> {
 
 #[test]
 fn random_writes_leave_a_disk_qemu_reads_exactly_like_the_model() {
-    if !qemu::available() {
-        eprintln!("SKIPPED: qemu-img is not installed, so there is no independent judge of the image");
+    if !qemu::require() {
         return;
     }
     for flavour in FLAVOURS {
@@ -204,7 +203,7 @@ fn a_failure_at_any_point_rolls_the_image_back_exactly() {
             disk.rollback().unwrap();
             assert_eq!(file_bytes(&img), original, "{flavour}: failure after {budget} writes was not undone exactly");
             assert!(!journal_path(&img).exists());
-            if qemu::available() {
+            if qemu::require() {
                 qemu::check(&img).unwrap_or_else(|e| panic!("{flavour}/{budget}: {e}"));
             }
         }

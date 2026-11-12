@@ -1113,7 +1113,7 @@ async fn xemu_restores_a_server_save_into_the_disk_image_and_then_agrees_with_th
     assert_eq!(after, others_before, "no other game's save may change");
     assert_eq!(x.st.saves[&save_key(7, "xemu")].last_hash.as_deref(), Some(want.as_str()));
     assert!(!romm_core::xbox::qcow2::journal_path(&x.image).exists());
-    if common::qemu::available() {
+    if common::qemu::require() {
         common::qemu::check(&x.image).unwrap();
     }
 
@@ -1384,10 +1384,10 @@ async fn xemu_open_in_a_running_qemu_is_neither_read_nor_written_until_it_is_clo
     let t = tempfile::tempdir().unwrap();
     let mut x = xemu_setup(t.path(), "4D530004");
     let original = std::fs::read(&x.image).unwrap();
-    let Some(qemu) = common::QemuHolder::start(&x.image) else {
-        eprintln!("SKIPPED: qemu-io is not installed");
+    if !common::qemu::require() {
         return;
-    };
+    }
+    let qemu = common::QemuHolder::start(&x.image).expect("qemu-io is installed, so it starts");
 
     // The server has a different save, so this sync would both read the disk and want to restore.
     let server = MockServer::start().await;
