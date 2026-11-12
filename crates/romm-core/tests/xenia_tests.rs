@@ -310,6 +310,9 @@ async fn a_fresh_machine_gets_the_save_with_its_header_and_the_next_sync_is_quie
     let header = storage.join(format!("content/{XUID}/{TITLE}/Headers/00000001/SAVE1.header"));
     assert_eq!(std::fs::read(&header).unwrap(), xenia::legacy_header(TITLE_ID, "SAVE1").unwrap());
     assert_eq!(st.saves[&save_key(7, "xenia")].last_hash.as_deref(), Some(server_hash.as_str()));
+    // What was exchanged, taken now: the sync below counts as an exchange too, and when the server gives no
+    // time it records the moment it happened, so reading this afterwards would compare against a later second.
+    let recorded = st.saves[&save_key(7, "xenia")].server_updated_at.clone().unwrap();
 
     // Syncing again must not see the restored files as a change (that would upload them straight back).
     let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&game, &env(&storage), None).await.unwrap();
@@ -317,7 +320,6 @@ async fn a_fresh_machine_gets_the_save_with_its_header_and_the_next_sync_is_quie
     let second: Value = reqs(&server, "POST", "/api/sync/negotiate").await[1].body_json().unwrap();
     assert_eq!(second["saves"][0]["content_hash"], server_hash.as_str());
     // While unchanged, what is reported back is what was last exchanged, so it can't look newer.
-    let recorded = st.saves[&save_key(7, "xenia")].server_updated_at.clone().unwrap();
     assert_eq!(second["saves"][0]["updated_at"], recorded.as_str());
     assert!(reqs(&server, "POST", "/api/saves").await.is_empty(), "no upload");
 }
