@@ -83,7 +83,7 @@ export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }
   return (
     <div className="page">
       <header className="topbar"><h1>Emulators &amp; BIOS</h1></header>
-      <p className="muted lead">If auto-detection is unsuccessful, the executable path can be set here.{onGoSettings && <> Some emulator options are exposed at <button className="link-btn" type="button" onClick={onGoSettings} data-testid="go-emulation-settings">Settings → Emulation</button>.</>}</p>
+      <p className="muted lead">If auto-detection is unsuccessful, the executable path can be set here.{onGoSettings && <> Some emulator options are exposed in <button className="link-btn" type="button" onClick={onGoSettings} data-testid="go-emulation-settings">Settings → Emulation</button>.</>}</p>
 
       <section className="stack">
         {emus.map((e) => (
@@ -138,8 +138,7 @@ export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }
         <h2>Emulator mapping</h2>
         {onHiddenChange && (
           <p className="muted small">
-            Untick a platform to hide it, and all its games, from the library. Only what is listed changes: installed games stay
-            installed and their saves keep syncing.
+            Untick a platform to hide it and its games from the interface. Games already installed remain on disk and saves keep syncing.
           </p>
         )}
         <div className="card">
