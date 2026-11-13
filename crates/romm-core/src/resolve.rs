@@ -58,10 +58,7 @@ impl<'a> Resolver<'a> {
     pub fn emu_env(&self, emu_id: &str) -> Result<(EmuEnv, Installed)> {
         let profile = profiles::get(emu_id).ok_or_else(|| Error::msg(format!("unknown emulator '{emu_id}'")))?;
         let installed = self.installed(&profile).ok_or_else(|| {
-            Error::msg(format!(
-                "{} was not found. Install it, or choose its executable under Emulators (CLI: `romm emulator-set {} <path>`)",
-                profile.name, profile.id
-            ))
+            Error::msg(format!("{} was not found.", profile.name))
         })?;
         let pctx = self.pctx.clone().with_exe_dir(installed.exe_dir());
         let root = resolve_data_root(&profile, installed.is_flatpak(), self.os, &pctx)

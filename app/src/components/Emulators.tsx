@@ -96,7 +96,7 @@ export function Emulators({ platforms, onChanged, onHiddenChange }: {
 
       <TabPanel id={tab} idPrefix="emulators">
       {tab === "executables" && <>
-        <p className="muted lead">If auto-detection is unsuccessful, the executable path can be set here. Some emulator options are exposed in <button className="link-btn" type="button" onClick={() => setTab("settings")} data-testid="go-emulator-settings">Emulator settings</button>.</p>
+        <p className="muted small">If auto-detection is unsuccessful, the executable path can be set manually here.</p>
         {!emus ? <div className="loading-row"><span className="spinner sm" /> Loading…</div> : (
           <section className="stack">
             {emus.map((e) => (

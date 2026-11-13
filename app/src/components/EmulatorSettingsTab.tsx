@@ -38,20 +38,27 @@ function ScopeCard({ sc, values, onChange }: { sc: EmulationScope; values: Emula
         </span>
       </div>
 
-      {sc.settings.map((s) => (
-        <label key={s.id}>
-          {s.label}
-          <select
-            value={chosen(values, sc.scope, s.id)}
-            onChange={(e) => onChange(setChoice(values, sc.scope, s.id, e.target.value))}
-            data-testid={`emu-${sc.scope}-${s.id}`}
-          >
-            <option value="">Don't change</option>
-            {s.choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-          </select>
-          {s.help && <span className="hint">{s.help}</span>}
-        </label>
-      ))}
+      {/* The same rows as Emulator mapping: the name (with its note under it) on the left, the dropdown on the right. */}
+      <ul className="rows">
+        {sc.settings.map((s) => (
+          <li key={s.id}>
+            <div className="row-main">
+              <span className="row-name">{s.label}</span>
+              {s.help && <span className="muted small">{s.help}</span>}
+            </div>
+            <select
+              className="choice-select"
+              value={chosen(values, sc.scope, s.id)}
+              onChange={(e) => onChange(setChoice(values, sc.scope, s.id, e.target.value))}
+              aria-label={`${s.label} for ${sc.name}`}
+              data-testid={`emu-${sc.scope}-${s.id}`}
+            >
+              <option value="">Don't change</option>
+              {s.choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+          </li>
+        ))}
+      </ul>
 
       {set > 0 && (
         <div>

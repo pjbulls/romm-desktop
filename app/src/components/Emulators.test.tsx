@@ -53,6 +53,9 @@ const SCHEMA: EmulationScope[] = [
     settings: [{
       id: "resolution", label: "Internal resolution", help: "How sharp the picture is.",
       choices: [{ value: "1", label: "1× (native)" }, { value: "3", label: "3× (about 1080p)" }],
+    }, {
+      id: "fullscreen", label: "Screen mode", help: "",
+      choices: [{ value: "on", label: "Fullscreen" }, { value: "off", label: "Windowed" }],
     }],
   },
   {
@@ -284,6 +287,45 @@ describe("Emulators & BIOS → Emulator settings", () => {
     expect(tid("emu-scope-dolphin")!.textContent).toContain("Installed");
     expect(tid("emu-scope-retroarch:flycast")!.textContent).toContain("Not installed");
     expect([...host.querySelectorAll("h3")].map((e) => e.textContent)).toEqual(["Dolphin", "RetroArch · Flycast"]);
+  });
+
+  it("lays each setting out as a row like Emulator mapping: its name on the left, its dropdown beside it", async () => {
+    await mount();
+    await goto("settings");
+    const card = tid("emu-scope-dolphin")!;
+    const rows = [...card.querySelectorAll("ul.rows > li")];
+    expect(rows.map((r) => r.querySelector(".row-main .row-name")!.textContent)).toEqual(["Internal resolution", "Screen mode"]);
+    // The dropdown is a sibling of the name in the same row, not a control stacked under a label.
+    expect(rows[0].querySelector(":scope > select.choice-select")).toBe(tid("emu-dolphin-resolution"));
+    expect(rows[1].querySelector(":scope > select.choice-select")).toBe(tid("emu-dolphin-fullscreen"));
+    expect(card.querySelector("label")).toBeNull();
+  });
+
+  it("uses the same dropdown as the Emulator mapping rows, so the two tabs look alike", async () => {
+    await mount();
+    await goto("mapping");
+    const mapping = q("[aria-label='Emulator for GameCube']")!.className;
+    await goto("settings");
+    expect(tid("emu-dolphin-resolution")!.className).toBe(mapping);
+    expect(tid("emu-dolphin-resolution")!.closest("ul")!.className).toBe(q("ul.rows")!.className);
+  });
+
+  it("puts a setting's note under its name, in the same column", async () => {
+    await mount();
+    await goto("settings");
+    const note = [...host.querySelectorAll("ul.rows > li")].find((r) => r.textContent?.includes("How sharp the picture is."))!;
+    expect(note.querySelector(".row-main")!.textContent).toBe("Internal resolutionHow sharp the picture is.");
+    expect(note.querySelector(":scope > select")).not.toBeNull(); // still beside it, not inside it
+    // A setting with no note has just its name.
+    expect([...host.querySelectorAll("ul.rows > li")].find((r) => r.textContent?.includes("Screen mode"))!.querySelector(".row-main")!.textContent).toBe("Screen mode");
+  });
+
+  it("names each dropdown for screen readers by its emulator too, since several have the same setting", async () => {
+    await mount();
+    await goto("settings");
+    expect(tid("emu-dolphin-resolution")!.getAttribute("aria-label")).toBe("Internal resolution for Dolphin");
+    expect(tid("emu-retroarch:flycast-resolution")!.getAttribute("aria-label")).toBe("Internal resolution for RetroArch · Flycast");
+    expect(tid("emu-dolphin-fullscreen")!.getAttribute("aria-label")).toBe("Screen mode for Dolphin");
   });
 
   it("starts every setting on 'Don't change' and offers the emulator's own choices after it", async () => {
