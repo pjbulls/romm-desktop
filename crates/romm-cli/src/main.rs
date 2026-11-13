@@ -8,11 +8,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use romm_core::api::{missing_scopes, RommClient};
 use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::detect::{self, Installed};
+use romm_core::report::TransferReport;
 use romm_core::resolve::Resolver;
 use romm_core::session::SyncCtx;
 use romm_core::state::State;
-use romm_core::sync::{ConflictPolicy, EmuEnv, SyncReport};
-use romm_core::states::{self, StateOptions, StateReport, StateStatus};
+use romm_core::sync::{ConflictPolicy, EmuEnv};
+use romm_core::states::{self, StateOptions, StateStatus};
 use romm_core::{library, profiles, retroarch, session, unit, xbox};
 
 #[derive(Parser)]
@@ -214,45 +215,38 @@ fn progress_printer(label: String) -> impl FnMut(u64, Option<u64>) {
     }
 }
 
-fn print_report(r: &SyncReport) {
-    for f in &r.uploaded {
-        println!("  ↑ uploaded   {f}");
-    }
-    for f in &r.downloaded {
-        println!("  ↓ downloaded {f}");
-    }
-    for f in &r.archived {
-        println!("  ⎘ archived your local copy on the server as {f}");
-    }
-    for c in &r.conflicts {
-        println!("  ! conflict   {} ({})", c.file_name, c.reason.as_deref().unwrap_or("both sides changed"));
-    }
-    for f in &r.failed {
-        println!("  ✗ failed     {f}");
-    }
-    if r.uploaded.is_empty() && r.downloaded.is_empty() && r.conflicts.is_empty() && r.failed.is_empty() {
-        println!("  saves are up to date");
-    }
+/// Which kind of sync a report is about; it decides the wording.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Saves,
+    States,
 }
 
-fn print_state_report(r: &StateReport) {
+fn print_report(r: &TransferReport, kind: Kind) {
+    let (what, noun) = match kind {
+        Kind::Saves => ("", "copy"),
+        Kind::States => ("state ", "state"),
+    };
     for f in &r.uploaded {
-        println!("  ↑ state uploaded   {f}");
+        println!("  ↑ {what}uploaded   {f}");
     }
     for f in &r.downloaded {
-        println!("  ↓ state downloaded {f}");
+        println!("  ↓ {what}downloaded {f}");
     }
     for f in &r.archived {
-        println!("  ⎘ archived your local state on the server as {f}");
+        println!("  ⎘ archived your local {noun} on the server as {f}");
     }
-    for f in &r.conflicts {
-        println!("  ! state conflict   {f}");
+    for c in &r.conflicts {
+        println!("  ! {what}conflict   {} ({})", c.file_name, c.reason.as_deref().unwrap_or("both sides changed"));
     }
     for f in &r.skipped {
-        println!("  – state skipped (too large) {f}");
+        println!("  – {what}skipped (too large) {f}");
     }
     for f in &r.failed {
-        println!("  ✗ state failed     {f}");
+        println!("  ✗ {what}failed     {f}");
+    }
+    if kind == Kind::Saves && r.uploaded.is_empty() && r.downloaded.is_empty() && r.conflicts.is_empty() && r.failed.is_empty() {
+        println!("  saves are up to date");
     }
 }
 
@@ -469,19 +463,19 @@ async fn main() -> Result<()> {
             if let Some(e) = &out.pull_error {
                 println!("(couldn't sync before launch — offline? {e})");
             } else if let Some(r) = &out.pull {
-                print_report(r);
+                print_report(r, Kind::Saves);
             }
             if let Some(r) = &out.state_pull {
-                print_state_report(r);
+                print_report(r, Kind::States);
             }
             println!("Played for {}s", out.elapsed.as_secs());
             if let Some(e) = &out.push_error {
                 println!("Couldn't sync saves ({e}), will try again on the next `romm sync`.");
             } else if let Some(r) = &out.push {
-                print_report(r);
+                print_report(r, Kind::Saves);
             }
             if let Some(r) = &out.state_push {
-                print_state_report(r);
+                print_report(r, Kind::States);
             }
             if let Some(e) = &out.state_error {
                 println!("Couldn't sync save states ({e}), will try again on the next `romm sync`.");
@@ -515,7 +509,7 @@ async fn main() -> Result<()> {
                 match &round.saves {
                     Ok(r) => {
                         any_failed |= !r.failed.is_empty();
-                        print_report(r)
+                        print_report(r, Kind::Saves)
                     }
                     Err(e) => {
                         any_failed = true;
@@ -525,7 +519,7 @@ async fn main() -> Result<()> {
                 match &round.states {
                     Some(Ok(r)) => {
                         any_failed |= !r.failed.is_empty();
-                        print_state_report(r)
+                        print_report(r, Kind::States)
                     }
                     Some(Err(e)) => {
                         any_failed = true;

@@ -15,6 +15,7 @@ use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::diagnostics::{self, LogFile, Watchdog};
 use romm_core::emu_settings;
 use romm_core::library::{self, BiosStatus};
+use romm_core::report::TransferReport;
 use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
 use romm_core::states::{self, StateOptions, StateReport, StateView};
@@ -385,20 +386,35 @@ fn game_dto(r: &Rom, db: &State) -> GameDto {
     }
 }
 
+/// What one kind of sync did, by file name: what the frontend lists.
 #[derive(Serialize, Default, Clone)]
-#[serde(rename_all = "camelCase")]
-struct SyncSummary {
+struct TransferDto {
     uploaded: Vec<String>,
     downloaded: Vec<String>,
     archived: Vec<String>,
     conflicts: Vec<String>,
+    skipped: Vec<String>,
     failed: Vec<String>,
-    state_uploaded: Vec<String>,
-    state_downloaded: Vec<String>,
-    state_archived: Vec<String>,
-    state_conflicts: Vec<String>,
-    state_skipped: Vec<String>,
-    state_failed: Vec<String>,
+}
+
+impl TransferDto {
+    fn add(&mut self, r: &TransferReport) {
+        // Every field is named so that one added to the report has to be decided about here; a
+        // hand-copied list once left out what was archived.
+        let TransferReport { uploaded, downloaded, archived, conflicts, skipped, failed, unchanged: _ } = r;
+        self.uploaded.extend(uploaded.iter().cloned());
+        self.downloaded.extend(downloaded.iter().cloned());
+        self.archived.extend(archived.iter().cloned());
+        self.conflicts.extend(conflicts.iter().map(|c| c.file_name.clone()));
+        self.skipped.extend(skipped.iter().cloned());
+        self.failed.extend(failed.iter().cloned());
+    }
+}
+
+#[derive(Serialize, Default, Clone)]
+struct SyncSummary {
+    saves: TransferDto,
+    states: TransferDto,
 }
 
 impl SyncSummary {
@@ -410,19 +426,10 @@ impl SyncSummary {
     }
 
     fn add_saves(&mut self, r: &SyncReport) {
-        self.uploaded.extend(r.uploaded.iter().cloned());
-        self.downloaded.extend(r.downloaded.iter().cloned());
-        self.archived.extend(r.archived.iter().cloned());
-        self.conflicts.extend(r.conflicts.iter().map(|c| c.file_name.clone()));
-        self.failed.extend(r.failed.iter().cloned());
+        self.saves.add(r);
     }
     fn add_states(&mut self, r: &StateReport) {
-        self.state_uploaded.extend(r.uploaded.iter().cloned());
-        self.state_downloaded.extend(r.downloaded.iter().cloned());
-        self.state_archived.extend(r.archived.iter().cloned());
-        self.state_conflicts.extend(r.conflicts.iter().cloned());
-        self.state_skipped.extend(r.skipped.iter().cloned());
-        self.state_failed.extend(r.failed.iter().cloned());
+        self.states.add(r);
     }
 }
 
@@ -1404,12 +1411,14 @@ mod tests {
     /// One game's sync, as `sync_one` hands it to `sync_game` and `sync_all`.
     fn game(n: &str) -> (SyncReport, StateReport) {
         let tag = |what: &str| format!("{n}.{what}");
+        let conflict = |what: &str| PendingConflict { rom_id: 1, file_name: tag(what), server_updated_at: None, reason: None };
         (
             SyncReport {
                 uploaded: vec![tag("up")],
                 downloaded: vec![tag("down")],
                 archived: vec![tag("archived")],
-                conflicts: vec![PendingConflict { rom_id: 1, file_name: tag("conflict"), server_updated_at: None, reason: None }],
+                conflicts: vec![conflict("conflict")],
+                skipped: vec![],
                 failed: vec![tag("failed")],
                 unchanged: 1,
             },
@@ -1417,7 +1426,7 @@ mod tests {
                 uploaded: vec![tag("sup")],
                 downloaded: vec![tag("sdown")],
                 archived: vec![tag("sarchived")],
-                conflicts: vec![tag("sconflict")],
+                conflicts: vec![conflict("sconflict")],
                 skipped: vec![tag("sskipped")],
                 failed: vec![tag("sfailed")],
                 unchanged: 1,
@@ -1438,17 +1447,17 @@ mod tests {
         }
         let sum = SyncSummary::of(&saves, &states);
 
-        assert_eq!(sum.uploaded, names(&["A.up", "B.up"]));
-        assert_eq!(sum.downloaded, names(&["A.down", "B.down"]));
-        assert_eq!(sum.archived, names(&["A.archived", "B.archived"]));
-        assert_eq!(sum.conflicts, names(&["A.conflict", "B.conflict"]));
-        assert_eq!(sum.failed, names(&["A.failed", "B.failed"]));
-        assert_eq!(sum.state_uploaded, names(&["A.sup", "B.sup"]));
-        assert_eq!(sum.state_downloaded, names(&["A.sdown", "B.sdown"]));
-        assert_eq!(sum.state_archived, names(&["A.sarchived", "B.sarchived"]));
-        assert_eq!(sum.state_conflicts, names(&["A.sconflict", "B.sconflict"]));
-        assert_eq!(sum.state_skipped, names(&["A.sskipped", "B.sskipped"]));
-        assert_eq!(sum.state_failed, names(&["A.sfailed", "B.sfailed"]));
+        assert_eq!(sum.saves.uploaded, names(&["A.up", "B.up"]));
+        assert_eq!(sum.saves.downloaded, names(&["A.down", "B.down"]));
+        assert_eq!(sum.saves.archived, names(&["A.archived", "B.archived"]));
+        assert_eq!(sum.saves.conflicts, names(&["A.conflict", "B.conflict"]));
+        assert_eq!(sum.saves.failed, names(&["A.failed", "B.failed"]));
+        assert_eq!(sum.states.uploaded, names(&["A.sup", "B.sup"]));
+        assert_eq!(sum.states.downloaded, names(&["A.sdown", "B.sdown"]));
+        assert_eq!(sum.states.archived, names(&["A.sarchived", "B.sarchived"]));
+        assert_eq!(sum.states.conflicts, names(&["A.sconflict", "B.sconflict"]));
+        assert_eq!(sum.states.skipped, names(&["A.sskipped", "B.sskipped"]));
+        assert_eq!(sum.states.failed, names(&["A.sfailed", "B.sfailed"]));
     }
 
     #[test]
@@ -1466,12 +1475,15 @@ mod tests {
     /// without there would make it silently `undefined` in the UI.
     #[test]
     fn the_summary_is_sent_under_the_names_the_frontend_reads() {
+        fn keys(v: &serde_json::Value) -> Vec<&str> {
+            let mut k: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+            k.sort_unstable();
+            k
+        }
         let v = serde_json::to_value(SyncSummary::default()).unwrap();
-        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["archived", "conflicts", "downloaded", "failed", "stateArchived", "stateConflicts", "stateDownloaded", "stateFailed", "stateSkipped", "stateUploaded", "uploaded"]
-        );
+        assert_eq!(keys(&v), ["saves", "states"]);
+        for lane in ["saves", "states"] {
+            assert_eq!(keys(&v[lane]), ["archived", "conflicts", "downloaded", "failed", "skipped", "uploaded"], "{lane}");
+        }
     }
 }

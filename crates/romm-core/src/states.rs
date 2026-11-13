@@ -23,6 +23,7 @@ use crate::api::types::StateInfo;
 use crate::api::RommClient;
 use crate::error::{Error, Result};
 use crate::profiles::SaveMode;
+use crate::report::{PendingConflict, TransferReport};
 use crate::retroarch;
 use crate::saves::{self, backup_file, conflict_name, md5_file, mtime_ns, CONFLICT_MARK};
 use crate::state::{save_key, state_key, LocalRom, State, StateRecord};
@@ -40,43 +41,8 @@ impl Default for StateOptions {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
-pub struct StateReport {
-    pub uploaded: Vec<String>,
-    pub downloaded: Vec<String>,
-    /// Local copies preserved on the server as `<name>.conflict-<time>`.
-    pub archived: Vec<String>,
-    pub conflicts: Vec<String>,
-    /// Too large for `max_bytes`.
-    pub skipped: Vec<String>,
-    pub failed: Vec<String>,
-    pub unchanged: usize,
-}
-
-impl StateReport {
-    /// Adds `other` to this report, to total up several games. Every field is named on purpose: a
-    /// field added to the report is a compile error here until it is counted, so it can't be left
-    /// out of a total.
-    pub fn merge(&mut self, other: StateReport) {
-        let StateReport { uploaded, downloaded, archived, conflicts, skipped, failed, unchanged } = other;
-        self.uploaded.extend(uploaded);
-        self.downloaded.extend(downloaded);
-        self.archived.extend(archived);
-        self.conflicts.extend(conflicts);
-        self.skipped.extend(skipped);
-        self.failed.extend(failed);
-        self.unchanged += unchanged;
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.uploaded.is_empty()
-            && self.downloaded.is_empty()
-            && self.archived.is_empty()
-            && self.conflicts.is_empty()
-            && self.skipped.is_empty()
-            && self.failed.is_empty()
-    }
-}
+/// What syncing a game's save states did (`skipped` lists the ones too large for `max_bytes`).
+pub type StateReport = TransferReport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
@@ -428,7 +394,12 @@ async fn resolve_conflict(
     match ctx.policy {
         ConflictPolicy::Ask => {
             discard(&downloaded);
-            report.conflicts.push(name.to_string());
+            report.conflicts.push(PendingConflict {
+                rom_id: ctx.rom.rom_id,
+                file_name: name.to_string(),
+                server_updated_at: Some(s.updated_at.clone()).filter(|u| !u.is_empty()),
+                reason: None,
+            });
         }
         ConflictPolicy::ServerWins => adopt_server(ctx, db, name, s, Some(&local), downloaded, report).await?,
         ConflictPolicy::DeviceWins => {
@@ -536,25 +507,6 @@ mod tests {
     }
     fn base(hash: &str, updated: &str, size: u64) -> StateRecord {
         StateRecord { server_id: Some(1), local_hash: hash.into(), server_updated_at: updated.into(), server_size: size, ..Default::default() }
-    }
-
-    #[test]
-    fn merging_state_reports_adds_every_outcome_and_keeps_their_order() {
-        let one = |s: &str| vec![s.to_string()];
-        let mut total = StateReport {
-            uploaded: one("u"), downloaded: one("d"), archived: one("a"), conflicts: one("c"), skipped: one("s"), failed: one("f"), unchanged: 1,
-        };
-        total.merge(StateReport {
-            uploaded: one("u2"), downloaded: one("d2"), archived: one("a2"), conflicts: one("c2"), skipped: one("s2"), failed: one("f2"), unchanged: 4,
-        });
-        assert_eq!(total.uploaded, ["u", "u2"]);
-        assert_eq!(total.downloaded, ["d", "d2"]);
-        // A total over many games must still say a local state was archived, or skipped for its size.
-        assert_eq!(total.archived, ["a", "a2"]);
-        assert_eq!(total.conflicts, ["c", "c2"]);
-        assert_eq!(total.skipped, ["s", "s2"]);
-        assert_eq!(total.failed, ["f", "f2"]);
-        assert_eq!(total.unchanged, 5);
     }
 
     #[test]

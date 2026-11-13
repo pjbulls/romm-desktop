@@ -358,43 +358,10 @@ pub fn saves_overview(env: &EmuEnv, rom: &LocalRom, db: &State) -> Result<Vec<Sa
     Ok(vec![SaveView { detail: local.detail(), name: local.file_name, size: local.size, modified: Some(saves::iso(local.modified)), status }])
 }
 
-#[derive(Debug, Clone)]
-pub struct PendingConflict {
-    pub rom_id: i64,
-    pub file_name: String,
-    pub server_updated_at: Option<String>,
-    pub reason: Option<String>,
-}
+pub use crate::report::PendingConflict;
 
-#[derive(Debug, Default)]
-pub struct SyncReport {
-    pub uploaded: Vec<String>,
-    pub downloaded: Vec<String>,
-    /// Local copies preserved as archival saves during conflict resolution.
-    pub archived: Vec<String>,
-    pub conflicts: Vec<PendingConflict>,
-    pub failed: Vec<String>,
-    pub unchanged: usize,
-}
-
-impl SyncReport {
-    pub fn is_clean(&self) -> bool {
-        self.failed.is_empty() && self.conflicts.is_empty()
-    }
-
-    /// Adds `other` to this report, to total up several games. Every field is named on purpose: a
-    /// field added to the report is a compile error here until it is counted, so it can't be left
-    /// out of a total.
-    pub fn merge(&mut self, other: SyncReport) {
-        let SyncReport { uploaded, downloaded, archived, conflicts, failed, unchanged } = other;
-        self.uploaded.extend(uploaded);
-        self.downloaded.extend(downloaded);
-        self.archived.extend(archived);
-        self.conflicts.extend(conflicts);
-        self.failed.extend(failed);
-        self.unchanged += unchanged;
-    }
-}
+/// What syncing a game's saves did.
+pub type SyncReport = crate::report::TransferReport;
 
 pub struct Syncer<'a> {
     pub client: &'a RommClient,
@@ -819,34 +786,6 @@ mod tests {
         // moved to another platform kept being described by the reading of the old one.
         let state = state_with(read_as("psp", "/roms/Game.iso"));
         assert!(cached_identity(&state, &rom("psvita", "/roms/Game.iso")).is_none());
-    }
-
-    #[test]
-    fn merging_reports_adds_every_outcome_and_keeps_their_order() {
-        let conflict = |n: &str| PendingConflict { rom_id: 1, file_name: n.into(), server_updated_at: None, reason: None };
-        let mut total = SyncReport {
-            uploaded: vec!["a".into()],
-            downloaded: vec!["b".into()],
-            archived: vec!["c".into()],
-            conflicts: vec![conflict("d")],
-            failed: vec!["e".into()],
-            unchanged: 2,
-        };
-        total.merge(SyncReport {
-            uploaded: vec!["a2".into()],
-            downloaded: vec!["b2".into()],
-            archived: vec!["c2".into()],
-            conflicts: vec![conflict("d2")],
-            failed: vec!["e2".into()],
-            unchanged: 3,
-        });
-        assert_eq!(total.uploaded, ["a", "a2"]);
-        assert_eq!(total.downloaded, ["b", "b2"]);
-        // The ones a hand-written merge forgot: a total must not lose that a local copy was archived.
-        assert_eq!(total.archived, ["c", "c2"]);
-        assert_eq!(total.conflicts.iter().map(|c| c.file_name.as_str()).collect::<Vec<_>>(), ["d", "d2"]);
-        assert_eq!(total.failed, ["e", "e2"]);
-        assert_eq!(total.unchanged, 5);
     }
 
     #[test]

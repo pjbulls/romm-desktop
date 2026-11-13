@@ -13,6 +13,7 @@ pub mod library;
 pub mod paths;
 pub mod platforms;
 pub mod profiles;
+pub mod report;
 pub mod resolve;
 pub mod retroarch;
 pub mod route;

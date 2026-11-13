@@ -211,7 +211,7 @@ async fn both_changed_with_ask_policy_touches_nothing() {
     let mut db = State::default();
     baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5);
     let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::Ask, &opts()).await.unwrap();
-    assert_eq!(rep.conflicts, ["Zelda.state1"]);
+    assert_eq!(rep.conflict_names(), ["Zelda.state1"]);
     assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"LOCAL2");
     assert_eq!(reqs(&server, "GET", "/api/states/5/content").await.len() + reqs(&server, "POST", "/api/states").await.len() + reqs(&server, "PUT", "/api/states/5").await.len(), 0);
 }

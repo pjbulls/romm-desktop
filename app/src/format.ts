@@ -35,22 +35,24 @@ export function timeAgo(iso: string | null | undefined, now: number = Date.now()
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** Plain-language lines describing what a sync did. Empty array = nothing changed. */
-export function summarizeSync(s: SyncSummary): string[] {
+export function summarizeSync({ saves, states }: SyncSummary): string[] {
   const lines: string[] = [];
   const add = (n: number, text: string) => n > 0 && lines.push(text);
-  add(s.uploaded.length, `Uploaded ${plural(s.uploaded.length, "save")}`);
-  add(s.downloaded.length, `Downloaded ${plural(s.downloaded.length, "save")}`);
-  add(s.stateUploaded.length, `Uploaded ${plural(s.stateUploaded.length, "save state")}`);
-  add(s.stateDownloaded.length, `Downloaded ${plural(s.stateDownloaded.length, "save state")}`);
-  add(s.archived.length + s.stateArchived.length, `Kept your local copy of ${plural(s.archived.length + s.stateArchived.length, "conflicting file")} on the server`);
-  add(s.conflicts.length + s.stateConflicts.length, `${plural(s.conflicts.length + s.stateConflicts.length, "conflict")} left for you to resolve`);
-  add(s.stateSkipped.length, `Skipped ${plural(s.stateSkipped.length, "state")} (over the size limit)`);
-  for (const f of [...s.failed, ...s.stateFailed]) lines.push(`Problem: ${f}`);
+  const archived = saves.archived.length + states.archived.length;
+  const conflicts = saves.conflicts.length + states.conflicts.length;
+  add(saves.uploaded.length, `Uploaded ${plural(saves.uploaded.length, "save")}`);
+  add(saves.downloaded.length, `Downloaded ${plural(saves.downloaded.length, "save")}`);
+  add(states.uploaded.length, `Uploaded ${plural(states.uploaded.length, "save state")}`);
+  add(states.downloaded.length, `Downloaded ${plural(states.downloaded.length, "save state")}`);
+  add(archived, `Kept your local copy of ${plural(archived, "conflicting file")} on the server`);
+  add(conflicts, `${plural(conflicts, "conflict")} left for you to resolve`);
+  add(states.skipped.length, `Skipped ${plural(states.skipped.length, "state")} (over the size limit)`);
+  for (const f of [...saves.failed, ...states.failed]) lines.push(`Problem: ${f}`);
   return lines;
 }
 
 export function hasProblems(s: SyncSummary): boolean {
-  return s.failed.length + s.stateFailed.length > 0;
+  return s.saves.failed.length + s.states.failed.length > 0;
 }
 
 export const SAVE_STATUS: Record<SaveStatus, { label: string; tone: "ok" | "warn" | "muted" }> = {

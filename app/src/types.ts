@@ -103,18 +103,19 @@ export interface LibraryEvent {
   error: string | null;
 }
 
-export interface SyncSummary {
+/** What one kind of sync did, by file name. Only save states are ever skipped (for their size). */
+export interface TransferSummary {
   uploaded: string[];
   downloaded: string[];
   archived: string[];
   conflicts: string[];
+  skipped: string[];
   failed: string[];
-  stateUploaded: string[];
-  stateDownloaded: string[];
-  stateArchived: string[];
-  stateConflicts: string[];
-  stateSkipped: string[];
-  stateFailed: string[];
+}
+
+export interface SyncSummary {
+  saves: TransferSummary;
+  states: TransferSummary;
 }
 
 export interface PlaySummary {

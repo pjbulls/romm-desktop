@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { formatBytes, formatDuration, normalizeCode, summarizeSync, timeAgo, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements, ACH_FILTERS } from "./format";
-import type { Achievement, SyncSummary } from "./types";
+import type { Achievement, SyncSummary, TransferSummary } from "./types";
 
-const empty = (): SyncSummary => ({
-  uploaded: [], downloaded: [], archived: [], conflicts: [], failed: [],
-  stateUploaded: [], stateDownloaded: [], stateArchived: [], stateConflicts: [], stateSkipped: [], stateFailed: [],
-});
+const lane = (): TransferSummary => ({ uploaded: [], downloaded: [], archived: [], conflicts: [], skipped: [], failed: [] });
+const empty = (): SyncSummary => ({ saves: lane(), states: lane() });
 
 describe("formatBytes", () => {
   it("scales units", () => {
@@ -51,10 +49,10 @@ describe("summarizeSync", () => {
   });
   it("pluralises and reports problems", () => {
     const s = empty();
-    s.uploaded = ["a.srm"];
-    s.stateDownloaded = ["x.state1", "x.state2"];
-    s.stateConflicts = ["x.state3"];
-    s.failed = ["boom"];
+    s.saves.uploaded = ["a.srm"];
+    s.states.downloaded = ["x.state1", "x.state2"];
+    s.states.conflicts = ["x.state3"];
+    s.saves.failed = ["boom"];
     expect(summarizeSync(s)).toEqual([
       "Uploaded 1 save",
       "Downloaded 2 save states",
@@ -64,8 +62,8 @@ describe("summarizeSync", () => {
   });
   it("counts archived saves and states together", () => {
     const s = empty();
-    s.archived = ["a"];
-    s.stateArchived = ["b"];
+    s.saves.archived = ["a"];
+    s.states.archived = ["b"];
     expect(summarizeSync(s)).toEqual(["Kept your local copy of 2 conflicting files on the server"]);
   });
 });
