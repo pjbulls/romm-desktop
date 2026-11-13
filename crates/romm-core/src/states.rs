@@ -24,12 +24,9 @@ use crate::api::RommClient;
 use crate::error::{Error, Result};
 use crate::profiles::SaveMode;
 use crate::retroarch;
-use crate::saves::{self, backup_file, md5_file, mtime_ns};
+use crate::saves::{self, backup_file, conflict_name, md5_file, mtime_ns, CONFLICT_MARK};
 use crate::state::{save_key, state_key, LocalRom, State, StateRecord};
 use crate::sync::{ConflictPolicy, EmuEnv};
-
-/// Archived copies kept during conflict resolution carry this marker and are never synced back.
-pub const CONFLICT_MARK: &str = ".conflict-";
 
 #[derive(Debug, Clone)]
 pub struct StateOptions {
@@ -398,7 +395,7 @@ async fn adopt_server(
         }
     };
     if target.is_file() {
-        let dir = ctx.backup_dir.join(saves::stamp()).join(&ctx.emu).join("states");
+        let dir = saves::backup_dir_for(ctx.backup_dir, &ctx.emu).join("states");
         backup_file(&target, &dir, name)?;
     }
     std::fs::rename(&tmp, &target)?;
@@ -439,7 +436,7 @@ async fn resolve_conflict(
             upload(ctx, db, name, path, h, Some(s.id), None, report).await?;
         }
         ConflictPolicy::KeepBoth => {
-            let archive = format!("{name}{CONFLICT_MARK}{}", saves::stamp());
+            let archive = conflict_name(name);
             if let Err(e) = upload(ctx, db, name, path, h, None, Some(&archive), report).await {
                 discard(&downloaded);
                 return Err(e);

@@ -95,6 +95,23 @@ pub fn stamp() -> String {
     Utc::now().format("%Y%m%dT%H%M%S").to_string()
 }
 
+/// Archived copies kept during conflict resolution carry this marker in their name and are never
+/// synced back.
+pub const CONFLICT_MARK: &str = ".conflict-";
+
+/// What a local copy that lost a conflict is called when it is kept on the server: `base`, the
+/// marker, then a time stamp (`Zelda.state1.conflict-20260109T143000`). A save gives `base`
+/// without its extension and puts the extension after the stamp.
+pub fn conflict_name(base: &str) -> String {
+    format!("{base}{CONFLICT_MARK}{}", stamp())
+}
+
+/// Where what a sync is about to overwrite is copied first: `<backups>/<stamp>/<emulator>`. Each
+/// occasion gets a folder of its own, so a later backup can't overwrite an earlier one.
+pub fn backup_dir_for(backups: &Path, emulator: &str) -> PathBuf {
+    backups.join(stamp()).join(emulator)
+}
+
 fn rel_string(root: &Path, p: &Path) -> String {
     p.strip_prefix(root)
         .unwrap_or(p)
@@ -271,6 +288,22 @@ mod tests {
         assert_eq!(s.len(), 15, "{s}");
         assert_eq!(s.as_bytes()[8], b'T', "{s}");
         assert!(s.bytes().enumerate().all(|(i, b)| i == 8 || b.is_ascii_digit()), "{s}");
+    }
+
+    #[test]
+    fn a_conflict_name_is_the_base_then_the_marker_then_a_stamp() {
+        let n = conflict_name("Zelda.state1");
+        let stamp_part = n.strip_prefix("Zelda.state1.conflict-").unwrap_or_else(|| panic!("{n}"));
+        assert_eq!(stamp_part.len(), 15, "{n}");
+        assert!(n.contains(CONFLICT_MARK), "what the state sync filters out must be what is written: {n}");
+    }
+
+    #[test]
+    fn a_backup_folder_is_the_stamp_then_the_emulator_under_the_backups() {
+        let d = backup_dir_for(Path::new("/b"), "dolphin");
+        assert_eq!(d.parent().and_then(Path::parent), Some(Path::new("/b")), "{d:?}");
+        assert_eq!(d.file_name().and_then(|n| n.to_str()), Some("dolphin"));
+        assert_eq!(d.parent().and_then(|p| p.file_name()).map(|n| n.len()), Some(15), "{d:?}");
     }
 
     fn write(p: &Path, s: &str) {

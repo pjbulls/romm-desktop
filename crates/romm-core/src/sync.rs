@@ -551,7 +551,7 @@ impl<'a> Syncer<'a> {
                         LocalKind::Raw(p) => {
                             // Where every other backup goes (a download's is `backup/<stamp>/<emulator>`), so
                             // this one can't be overwritten by the next, and it is found in the same place.
-                            saves::backup_file(p, &self.backup_dir.join(saves::stamp()).join(&l.emulator), &l.file_name)?;
+                            saves::backup_file(p, &saves::backup_dir_for(&self.backup_dir, &l.emulator), &l.file_name)?;
                             std::fs::remove_file(p)?;
                         }
                         LocalKind::Unit(_) => {
@@ -609,7 +609,7 @@ impl<'a> Syncer<'a> {
         }
         let bytes = self.client.download_save(save_id, self.device_id, cx.session_id).await?;
         let hash = unit::content_hash(&bytes);
-        let backup = self.backup_dir.join(saves::stamp()).join(&plan.label);
+        let backup = saves::backup_dir_for(&self.backup_dir, &plan.label);
 
         let name = match &plan.kind {
             Kind::Xbox { image, save_id: title } => {
@@ -747,9 +747,8 @@ impl<'a> Syncer<'a> {
             }
             ConflictPolicy::ServerWins => self.download(cx, server_id, op.server_updated_at.clone(), report).await,
             ConflictPolicy::KeepBoth => {
-                let stamp = saves::stamp();
                 let ext = Path::new(&local.file_name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-                let archive_name = upload_name(&format!("{}.conflict-{stamp}", name_base(cx.rom, cx.plan)), &ext);
+                let archive_name = upload_name(&saves::conflict_name(&name_base(cx.rom, cx.plan)), &ext);
                 // 1. preserve the local copy on the server as an archival save (no slot, never paired)
                 self.upload(cx, local, None, archive_name, report).await?;
                 // 2. then adopt the server's version; download() also backs the local save up on disk
