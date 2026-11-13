@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Drives the real RomM Desktop app to check per-system emulator choices: each system's dropdown
 offers only what can play it, picks persist (UI and config file), and the backend refuses the rest.
+It also checks the page's last tab, Emulator settings, saves to the config only when asked.
 
 Run with:  DRIVER=drive_choices.py tests/e2e/run.sh
 The fake server has GameCube, PlayStation and PSP. Dolphin and DuckStation are "installed"
@@ -47,7 +48,8 @@ def invoke(command, args):
 
 def open_emulators():
     d.click(d.find("[data-testid=nav-emulators]"))
-    d.wait_css("[data-testid=emu-dolphin]")
+    d.wait_css("[data-testid=emu-dolphin]")                 # the page opens on its Executables tab
+    d.click(d.find("[data-testid=tab-mapping]"))            # the platform dropdowns are on Emulator mapping
     d.wait(lambda: select_info("GameCube"), 10, "platform dropdowns")
 
 d = WD()
@@ -119,6 +121,23 @@ try:
     check("refusals changed nothing", "platform_emulators" not in config() or not config()["platform_emulators"], str(config()))
     status, msg = invoke("set_platform_choice", "{slug: 'psx', choice: 'retroarch:pcsx_rearmed'}")
     check("a valid choice is still accepted", status == "ok" and saved("retroarch_cores", "psx") == "pcsx_rearmed", f"{status} {msg}")
+
+    print("== Emulator settings, the last tab of the page")
+    open_emulators()
+    d.click(d.find("[data-testid=tab-settings]"))
+    d.wait_css("[data-testid=emu-scope-dolphin]", 10)
+    check("nothing is chosen until the user picks", "emulator_settings" not in config(), str(config()))
+    d.js("const s = document.querySelector('[data-testid=\"emu-dolphin-resolution\"]');"
+         "Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, '3');"
+         "s.dispatchEvent(new Event('change', {bubbles: true}));")
+    check("the tab shows an unsaved change", d.js("return !!document.querySelector('[data-testid=tab-settings] .tab-dot')"))
+    time.sleep(0.5)
+    check("nothing is written until Save is pressed", "emulator_settings" not in config(), str(config()))
+    d.click(d.find("[data-testid=save-emulator-settings]"))
+    d.wait(lambda: config().get("emulator_settings", {}).get("dolphin", {}).get("resolution") == "3", 10, "emulator settings saved to config.toml")
+    check("saved choice is recorded for Dolphin only", config().get("emulator_settings") == {"dolphin": {"resolution": "3"}}, str(config().get("emulator_settings")))
+    check("saving them left the emulator choices alone", saved("platform_emulators", "psx") == "retroarch", str(config()))
+    check("the unsaved-change mark is gone", not d.js("return !!document.querySelector('[data-testid=tab-settings] .tab-dot')"))
 except Exception as e:
     traceback.print_exc()
     check("scenario completed without an unexpected error", False, str(e)[:200])

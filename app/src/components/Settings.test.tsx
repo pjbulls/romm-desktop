@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EmulationScope, Settings as S, SettingsTab, Status } from "../types";
+import type { Settings as S, SettingsTab, Status } from "../types";
 
 /**
  * Mounts the real Settings page against a fake Tauri backend. What this guards: the page is split
@@ -36,46 +36,28 @@ const status = { serverUrl: "https://romm.example", deviceName: "Desk", version:
 
 const SAVED: S = {
   romDir: "/games", syncStates: true, maxStateMb: 512, conflictPolicy: "keep_both", deviceName: null,
-  acceptInvalidCerts: false, platformEmulators: {}, emulatorSettings: {},
+  acceptInvalidCerts: false, platformEmulators: {},
 };
-
-const SCHEMA: EmulationScope[] = [
-  {
-    scope: "dolphin", emulatorId: "dolphin", name: "Dolphin", core: null, installed: true, platforms: ["ngc", "wii"], changesFiles: false,
-    settings: [{
-      id: "resolution", label: "Internal resolution", help: "How sharp the picture is.",
-      choices: [{ value: "1", label: "1× (native)" }, { value: "3", label: "3× (about 1080p)" }],
-    }],
-  },
-  {
-    scope: "retroarch:flycast", emulatorId: "retroarch", name: "RetroArch · Flycast", core: "flycast", installed: false, platforms: ["dc"], changesFiles: true,
-    settings: [{
-      id: "resolution", label: "Internal resolution", help: "",
-      choices: [{ value: "640x480", label: "640×480 (native)" }, { value: "1280x960", label: "1280×960 (2×)" }],
-    }],
-  },
-];
 
 let root: Root;
 let host: HTMLElement;
 let saved: S[];
 
-function backend(opts: { settings?: S; schemaError?: string } = {}) {
+function backend(opts: { settings?: S } = {}) {
   saved = [];
   h.backend = async (cmd, args) => {
     if (cmd === "settings") return structuredClone(opts.settings ?? SAVED);
-    if (cmd === "emulation_schema") return opts.schemaError ? Promise.reject(opts.schemaError) : structuredClone(SCHEMA);
     if (cmd === "save_settings") { saved.push(structuredClone(args.settings)); return undefined; }
     throw new Error(`unexpected command ${cmd}`);
   };
 }
 
-async function mount(initialTab?: SettingsTab) {
+async function mount() {
   await act(async () => {
     root.render(
       <StoreProvider>
         <GamepadProvider>
-          <div className="main"><Settings status={status} onDisconnected={() => {}} initialTab={initialTab} /></div>
+          <div className="main"><Settings status={status} onDisconnected={() => {}} /></div>
         </GamepadProvider>
       </StoreProvider>,
     );
@@ -89,14 +71,6 @@ const click = (el: Element | null) => act(async () => { (el as HTMLElement).clic
 const goto = async (tab: SettingsTab) => { await click(tid(`tab-${tab}`)); await flush(); };
 const selected = () => [...host.querySelectorAll("[role=tab]")].filter((t) => t.getAttribute("aria-selected") === "true").map((t) => t.getAttribute("data-testid"));
 const hasDot = (tab: SettingsTab) => !!tid(`tab-${tab}`)?.querySelector(".tab-dot");
-
-async function choose(testid: string, value: string) {
-  const el = tid(testid) as HTMLSelectElement;
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value);
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-}
 
 async function type(testid: string, value: string) {
   const el = tid(testid) as HTMLInputElement;
@@ -118,10 +92,10 @@ afterEach(() => {
 });
 
 describe("Settings tabs", () => {
-  it("opens on General, with the four tabs and only that tab's content", async () => {
+  it("opens on General, with its three tabs and only that tab's content", async () => {
     backend();
     await mount();
-    expect([...host.querySelectorAll("[role=tab]")].map((t) => t.textContent)).toEqual(["General", "Emulation", "Controller", "Connection"]);
+    expect([...host.querySelectorAll("[role=tab]")].map((t) => t.textContent)).toEqual(["General", "Controller", "Connection"]);
     expect(selected()).toEqual(["tab-general"]);
     expect(tid("rom-dir")).toBeTruthy();
     expect(tid("sync-states")).toBeTruthy();
@@ -149,19 +123,12 @@ describe("Settings tabs", () => {
     expect(host.textContent).toContain("Saves & save states");
   });
 
-  it("can open on a given tab", async () => {
-    backend();
-    await mount("emulation");
-    expect(selected()).toEqual(["tab-emulation"]);
-    expect(tid("emu-scope-dolphin")).toBeTruthy();
-  });
-
   it("moves between tabs with the arrow keys, wrapping at the ends", async () => {
     backend();
     await mount();
     const key = (k: string) => act(async () => { (q("[role=tab][aria-selected=true]") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true })); });
     await key("ArrowRight");
-    expect(selected()).toEqual(["tab-emulation"]);
+    expect(selected()).toEqual(["tab-controller"]);
     await key("ArrowLeft");
     await key("ArrowLeft");
     expect(selected()).toEqual(["tab-connection"]);
@@ -176,94 +143,30 @@ describe("Settings tabs", () => {
     await mount();
     await type("rom-dir", "/elsewhere");
     expect(hasDot("general")).toBe(true);
-    await goto("emulation");
+    await goto("connection");
     expect(hasDot("general")).toBe(true);
-    expect(hasDot("emulation")).toBe(false);
+    expect(hasDot("connection")).toBe(false);
     await goto("general");
     expect((tid("rom-dir") as HTMLInputElement).value).toBe("/elsewhere");
   });
 });
 
-describe("Settings → Emulation", () => {
-  it("lists what the backend describes, with each emulator's state", async () => {
+describe("emulator settings are no longer on this page", () => {
+  it("has no Emulation tab, and never asks for the emulator settings", async () => {
     backend();
-    await mount("emulation");
-    expect(host.textContent).toContain("Dolphin");
-    expect(host.textContent).toContain("RetroArch · Flycast");
-    expect(tid("emu-scope-dolphin")!.textContent).toContain("Installed");
-    expect(tid("emu-scope-retroarch:flycast")!.textContent).toContain("Not installed");
+    await mount();
+    expect(tid("tab-emulation")).toBeNull();
+    expect(h.calls.map((c) => c.cmd).filter((c) => c !== "settings")).toEqual([]);
   });
 
-  it("starts every setting on 'Don't change' and offers the emulator's own choices after it", async () => {
-    backend();
-    await mount("emulation");
-    const sel = tid("emu-dolphin-resolution") as HTMLSelectElement;
-    expect(sel.value).toBe("");
-    expect([...sel.options].map((o) => o.textContent)).toEqual(["Don't change", "1× (native)", "3× (about 1080p)"]);
-  });
-
-  it("shows what is already chosen", async () => {
-    backend({ settings: { ...SAVED, emulatorSettings: { dolphin: { resolution: "3" } } } });
-    await mount("emulation");
-    expect((tid("emu-dolphin-resolution") as HTMLSelectElement).value).toBe("3");
-    expect(tid("emu-scope-dolphin")!.textContent).toContain("1 set");
-  });
-
-  it("a choice marks the tab, saves exactly that, and clears the mark", async () => {
-    backend();
-    await mount("emulation");
-    expect((tid("save-settings") as HTMLButtonElement).disabled).toBe(true);
-
-    await choose("emu-dolphin-resolution", "3");
-    expect(hasDot("emulation")).toBe(true);
-    expect((tid("save-settings") as HTMLButtonElement).disabled).toBe(false);
-
-    await click(tid("save-settings"));
-    await flush();
-    expect(saved).toHaveLength(1);
-    expect(saved[0].emulatorSettings).toEqual({ dolphin: { resolution: "3" } });
-    expect(saved[0].romDir).toBe("/games"); // the rest of the form goes along unchanged
-    expect(hasDot("emulation")).toBe(false);
-    expect((tid("save-settings") as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it("one Save covers changes on several tabs", async () => {
+  it("saves only its own settings, so it can't overwrite emulator settings chosen on the Emulators page", async () => {
     backend();
     await mount();
     await type("rom-dir", "/new");
-    await goto("emulation");
-    await choose("emu-retroarch:flycast-resolution", "1280x960");
     await click(tid("save-settings"));
     await flush();
+    expect(saved).toHaveLength(1);
     expect(saved[0].romDir).toBe("/new");
-    expect(saved[0].emulatorSettings).toEqual({ "retroarch:flycast": { resolution: "1280x960" } });
-  });
-
-  it("putting a setting back to 'Don't change' is not a change", async () => {
-    backend({ settings: { ...SAVED, emulatorSettings: { dolphin: { resolution: "3" } } } });
-    await mount("emulation");
-    await choose("emu-dolphin-resolution", "");
-    expect(hasDot("emulation")).toBe(true);
-    await choose("emu-dolphin-resolution", "3");
-    expect(hasDot("emulation")).toBe(false);
-  });
-
-  it("resets everything for one emulator", async () => {
-    backend({ settings: { ...SAVED, emulatorSettings: { dolphin: { resolution: "3" }, "retroarch:flycast": { resolution: "1280x960" } } } });
-    await mount("emulation");
-    await click(tid("emu-scope-dolphin")!.querySelector(".link-btn"));
-    expect((tid("emu-dolphin-resolution") as HTMLSelectElement).value).toBe("");
-    expect((tid("emu-retroarch:flycast-resolution") as HTMLSelectElement).value).toBe("1280x960");
-    await click(tid("save-settings"));
-    await flush();
-    expect(saved[0].emulatorSettings).toEqual({ "retroarch:flycast": { resolution: "1280x960" } });
-  });
-
-  it("a failure to load the options is said plainly and leaves the rest of Settings working", async () => {
-    backend({ schemaError: "backend went away" });
-    await mount("emulation");
-    expect(q("[role=alert]")!.textContent).toContain("backend went away");
-    await goto("general");
-    expect(tid("rom-dir")).toBeTruthy();
+    expect(Object.keys(saved[0])).not.toContain("emulatorSettings");
   });
 });

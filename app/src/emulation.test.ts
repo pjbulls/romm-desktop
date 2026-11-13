@@ -4,7 +4,7 @@ import type { Settings } from "./types";
 
 const base: Settings = {
   romDir: "/roms", syncStates: true, maxStateMb: 512, conflictPolicy: "keep_both", deviceName: null,
-  acceptInvalidCerts: false, platformEmulators: {}, emulatorSettings: {},
+  acceptInvalidCerts: false, platformEmulators: {},
 };
 
 describe("choosing emulator settings", () => {
@@ -57,14 +57,13 @@ describe("which tabs have unsaved changes", () => {
   });
 
   it("marks only the tab a change belongs to", () => {
-    expect([...dirtyTabs({ ...base, emulatorSettings: { pcsx2: { resolution: "3" } } }, base)]).toEqual(["emulation"]);
     expect([...dirtyTabs({ ...base, acceptInvalidCerts: true }, base)]).toEqual(["connection"]);
     expect([...dirtyTabs({ ...base, romDir: "/elsewhere" }, base)]).toEqual(["general"]);
     expect([...dirtyTabs({ ...base, maxStateMb: 64 }, base)]).toEqual(["general"]);
   });
 
   it("marks several at once", () => {
-    const form = { ...base, syncStates: false, acceptInvalidCerts: true, emulatorSettings: { xemu: { fullscreen: "on" } } };
-    expect([...dirtyTabs(form, base)].sort()).toEqual(["connection", "emulation", "general"]);
+    const form = { ...base, syncStates: false, acceptInvalidCerts: true };
+    expect([...dirtyTabs(form, base)].sort()).toEqual(["connection", "general"]);
   });
 });

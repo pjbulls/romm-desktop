@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg, pickFile } from "../api";
 import { useStore } from "../store";
-import type { Bios, Emulator, Platform } from "../types";
+import type { Bios, Emulator, EmulatorsTab, Platform } from "../types";
+import { useEmulatorSettings } from "../useEmulatorSettings";
+import { EmulatorSettingsTab } from "./EmulatorSettingsTab";
 import { PlatformChoice } from "./PlatformChoice";
+import { TabPanel, Tabs, type TabDef } from "./Tabs";
 
-export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }: {
+export function Emulators({ platforms, onChanged, onHiddenChange }: {
   platforms: Platform[];
   onChanged: () => void;
   /** Shows or hides a platform in the list the app holds, at once. Without it the rows have no show/hide checkbox. */
   onHiddenChange?: (slug: string, hidden: boolean) => void;
-  onGoSettings?: () => void;
 }) {
   const { push } = useStore();
+  const [tab, setTab] = useState<EmulatorsTab>("executables");
+  const emuSettings = useEmulatorSettings(tab === "settings");
   const [emus, setEmus] = useState<Emulator[] | null>(null);
   const [bios, setBios] = useState<Record<string, { busy: boolean; files?: Bios[]; error?: string }>>({});
 
@@ -76,43 +80,53 @@ export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }
     }
   }
 
-  if (!emus) return <div className="loading-row"><span className="spinner sm" /> Loading…</div>;
   const withBios = platforms.filter((p) => p.firmwareCount > 0 && p.emulator);
   const mappable = platforms.filter((p) => p.romCount > 0).sort((a, b) => a.name.localeCompare(b.name));
+  const tabs: TabDef<EmulatorsTab>[] = [
+    { id: "executables", label: "Executables" },
+    { id: "bios", label: "BIOS" },
+    { id: "mapping", label: "Emulator mapping" },
+    { id: "settings", label: "Emulator settings", dirty: emuSettings.dirty },
+  ];
 
   return (
     <div className="page">
       <header className="topbar"><h1>Emulators &amp; BIOS</h1></header>
-      <p className="muted lead">If auto-detection is unsuccessful, the executable path can be set here.{onGoSettings && <> Some emulator options are exposed in <button className="link-btn" type="button" onClick={onGoSettings} data-testid="go-emulation-settings">Settings → Emulation</button>.</>}</p>
+      <Tabs tabs={tabs} active={tab} onChange={setTab} label="Emulators and BIOS sections" idPrefix="emulators" />
 
-      <section className="stack">
-        {emus.map((e) => (
-          <div className="card emu" key={e.id} data-testid={`emu-${e.id}`}>
-            <div className="emu-head">
-              <h3>{e.name}</h3>
-              <span className={`chip chip-${e.installed ? "ok" : "warn"}`}>{e.installed ? (e.flatpak ? "Found (Flatpak)" : "Found") : "Not found"}</span>
-            </div>
-            {e.installed ? (
-              <dl className="kv">
-                <dt>Runs</dt><dd className="mono">{e.path}</dd>
-                <dt>Data folder</dt><dd className="mono">{e.dataDir}</dd>
-              </dl>
-            ) : <p className="muted small">{e.problem}</p>}
-            <div className="emu-platforms">
-              {e.platforms.slice(0, 14).map((s) => <span className="chip chip-muted" key={s}>{s}</span>)}
-              {e.platforms.length > 14 && <span className="muted small">+{e.platforms.length - 14} more</span>}
-            </div>
-            <div className="actions tight">
-              <button className="btn" onClick={() => choose(e)}>Choose executable…</button>
-              {e.overridePath && <button className="btn btn-ghost" onClick={() => reset(e)}>Use auto-detect</button>}
-            </div>
-          </div>
-        ))}
-      </section>
+      <TabPanel id={tab} idPrefix="emulators">
+      {tab === "executables" && <>
+        <p className="muted lead">If auto-detection is unsuccessful, the executable path can be set here. Some emulator options are exposed in <button className="link-btn" type="button" onClick={() => setTab("settings")} data-testid="go-emulator-settings">Emulator settings</button>.</p>
+        {!emus ? <div className="loading-row"><span className="spinner sm" /> Loading…</div> : (
+          <section className="stack">
+            {emus.map((e) => (
+              <div className="card emu" key={e.id} data-testid={`emu-${e.id}`}>
+                <div className="emu-head">
+                  <h3>{e.name}</h3>
+                  <span className={`chip chip-${e.installed ? "ok" : "warn"}`}>{e.installed ? (e.flatpak ? "Found (Flatpak)" : "Found") : "Not found"}</span>
+                </div>
+                {e.installed ? (
+                  <dl className="kv">
+                    <dt>Runs</dt><dd className="mono">{e.path}</dd>
+                    <dt>Data folder</dt><dd className="mono">{e.dataDir}</dd>
+                  </dl>
+                ) : <p className="muted small">{e.problem}</p>}
+                <div className="emu-platforms">
+                  {e.platforms.slice(0, 14).map((s) => <span className="chip chip-muted" key={s}>{s}</span>)}
+                  {e.platforms.length > 14 && <span className="muted small">+{e.platforms.length - 14} more</span>}
+                </div>
+                <div className="actions tight">
+                  <button className="btn" onClick={() => choose(e)}>Choose executable…</button>
+                  {e.overridePath && <button className="btn btn-ghost" onClick={() => reset(e)}>Use auto-detect</button>}
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+      </>}
 
-      <section>
-        <h2>BIOS files</h2>
-        {withBios.length === 0 ? (
+      {tab === "bios" && (
+        withBios.length === 0 ? (
           <p className="muted">None of your platforms have BIOS files on the server.</p>
         ) : (
           <div className="card">
@@ -131,11 +145,10 @@ export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }
               ))}
             </ul>
           </div>
-        )}
-      </section>
+        )
+      )}
 
-      <section>
-        <h2>Emulator mapping</h2>
+      {tab === "mapping" && <>
         {onHiddenChange && (
           <p className="muted small">
             Untick a platform to hide it and its games from the interface. Games already installed remain on disk and saves keep syncing.
@@ -153,7 +166,19 @@ export function Emulators({ platforms, onChanged, onHiddenChange, onGoSettings }
             ))}
           </ul>
         </div>
-      </section>
+      </>}
+
+      {tab === "settings" && (
+        <EmulatorSettingsTab scopes={emuSettings.scopes} error={emuSettings.error} values={emuSettings.values} onChange={emuSettings.setValues} />
+      )}
+      </TabPanel>
+
+      {tab === "settings" && (
+        <div className="savebar">
+          <button className="btn btn-primary" disabled={!emuSettings.dirty || emuSettings.busy} onClick={emuSettings.save} data-testid="save-emulator-settings">{emuSettings.busy ? "Saving…" : "Save changes"}</button>
+          {emuSettings.dirty && <button className="btn btn-ghost" onClick={emuSettings.discard}>Discard</button>}
+        </div>
+      )}
     </div>
   );
 }

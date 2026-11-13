@@ -9,12 +9,12 @@ A Windows + Linux desktop client for [RomM](https://github.com/rommapp/romm), mo
 ## What it does
 
 - **Library**: platforms, search, a scrolling grid with cover art, an *Installed* view that works offline.
-- **Hide platforms**: untick a platform under *Emulators & BIOS → Which emulator plays what* and it, with all its games, leaves the sidebar, its counts, All games, Installed and search. Only what is listed changes: installed games stay installed, their saves keep syncing, and the platform stays on that page so it can be shown again. Handy for platforms with no emulator yet.
+- **Hide platforms**: untick a platform under *Emulators & BIOS → Emulator mapping* and it, with all its games, leaves the sidebar, its counts, All games, Installed and search. Only what is listed changes: installed games stay installed, their saves keep syncing, and the platform stays on that page so it can be shown again. Handy for platforms with no emulator yet.
 - **Install / uninstall** ROMs locally.
 - **Play**: pull saves and states → launch the emulator → work out which files changed → push saves, states and playtime.
 - **Conflicts**: never lose data. Default "keep both": your version is archived on the server, the server's is used, and what's replaced locally is copied to a backups folder first.
 - **Emulators**: RetroArch, DuckStation (PS1), Dolphin, PPSSPP, PCSX2 (PS2), Azahar (3DS), xemu (original Xbox) and Xenia Canary (Xbox 360), the last two described below. Auto-detected via PATH, standard Windows locations and Flatpak, or manually locate the executable. BIOS files install into known folders.
-- **Emulator settings**: choose internal resolution (upscaling) and fullscreen once, under Settings → Emulation, and the app applies it every time you press Play. The emulators stay yours: nothing is downloaded, installed or managed. See [Emulator settings](#emulator-settings).
+- **Emulator settings**: choose internal resolution (upscaling) and fullscreen once, under Emulators & BIOS → Emulator settings, and the app applies it every time you press Play. The emulators stay yours: nothing is downloaded, installed or managed. See [Emulator settings](#emulator-settings).
 - **RetroAchievements**: each game's achievements with what you've earned, progress and points, read from your RomM server.
 - **Controller support**: browse, install, play and change settings without touching a keyboard or mouse.
 
@@ -28,7 +28,7 @@ Plug in a controller and press any button. Xbox, PlayStation and Switch pads wor
 | A (✕) | Select; on a text field it opens an **on-screen keyboard** |
 | B (○) | Back / close the panel or keyboard |
 | Start (Menu) | Play the focused game (Install if it isn't installed, inside the panel) |
-| LB / RB | Previous / next platform (on Settings: previous / next tab) |
+| LB / RB | Previous / next platform (on pages with tabs, Settings and Emulators & BIOS: previous / next tab) |
 | LT / RT | Page up / down (focus follows) |
 | Y (△) | Search |
 | X (□) | Dismiss notifications (in the keyboard: delete) |
@@ -79,7 +79,7 @@ Optional: add `me.write` to refresh RetroAchievements progress from inside the a
 
 ## Emulator settings
 
-Settings has tabs (General, Emulation, Controller, Connection). **Emulation** lets you choose how your emulators run games, and the app applies it each time you press Play here, so you don't have to open each emulator's own settings. The Emulators page links to it. You still install and update the emulators yourself, and point the app at them on the Emulators page if they aren't found.
+Emulators & BIOS has four tabs: **Executables** (where each emulator was found, and a way to point at it if it wasn't), **BIOS**, **Emulator mapping** (which emulator plays each platform, and whether the platform is shown in the library) and **Emulator settings**, which lets you choose how your emulators run games. The app applies those each time you press Play here, so you don't have to open each emulator's own settings. You still install and update the emulators yourself. The other tabs apply a change as soon as you make it; Emulator settings are saved with a Save button, and a dot on the tab marks changes not saved yet. (Settings has its own tabs: General, Controller and Connection.)
 
 | Emulator | Internal resolution | Screen mode | How it's applied |
 |---|---|---|---|
@@ -180,7 +180,7 @@ How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`me
 
 ```bash
 cargo test --workspace --lib --tests   # 344 tests, all in romm-core (against a mock RomM server)
-cd app && npm test                      # 160 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions, the Settings tabs and the Emulation tab, the whole app mounted against a fake backend (startup, loading, crashes), diagnostics reporting, achievement search and filtering
+cd app && npm test                      # 160 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions, the Settings and Emulators & BIOS tabs including emulator settings, the whole app mounted against a fake backend (startup, loading, crashes), diagnostics reporting, achievement search and filtering
 tests/e2e/run.sh                        # 36 checks driving the real app (needs xvfb + webkit2gtk-driver, debug build)
 DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
 DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
@@ -201,7 +201,7 @@ tests/smoke/psp_smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated d
 
 **Not verified, so please test**
 - Against a **real RomM server**. Everything is written from RomM's docs and source and tested against a fake server I wrote. The device-sync protocol is still changing, so pin a minimum server version. Cover art assumes `/assets/…` accepts the bearer token; if not, the grid shows placeholders.
-- **Emulator settings with the real emulators.** None of Dolphin, PCSX2, DuckStation, PPSSPP, Azahar, xemu or RetroArch has been run with them; the options and files come from source, and the stand-ins only prove the app does what it intends. Most worth testing: that Azahar's resolution actually changes (its config folder on Windows and the `\default` flag are from source only), that PPSSPP finds `SYSTEM/ppsspp.ini` where expected, and that RetroArch picks up the per-core options file it is given. The Emulation tab was tested mounted against a fake backend, not in the built app, and `drive_pad.py` was edited to switch Settings tabs with LB/RB but **has not been re-run**.
+- **Emulator settings with the real emulators.** None of Dolphin, PCSX2, DuckStation, PPSSPP, Azahar, xemu or RetroArch has been run with them; the options and files come from source, and the stand-ins only prove the app does what it intends. Most worth testing: that Azahar's resolution actually changes (its config folder on Windows and the `\default` flag are from source only), that PPSSPP finds `SYSTEM/ppsspp.ini` where expected, and that RetroArch picks up the per-core options file it is given. The Emulator settings tab was tested mounted against a fake backend, not in the built app. The e2e scripts `drive.py`, `drive_choices.py` and `drive_pad.py` were edited for the tabbed Settings and Emulators & BIOS pages (and `drive_choices.py` gained a check of the Emulator settings tab) but **have not been re-run**.
 - With **real emulators**. Launch flags and save/state folders come from each project's documented behaviour. Likeliest to need tweaks: Wii NAND roots, DuckStation/PCSX2/PPSSPP state folder names, PCSX2 state file naming. The Azahar and xemu profiles were checked against those projects' source code and docs but never run against the real emulators (xemu's save upload and restore are tested against disk images built with libfatx and QEMU, and judged by `qemu-img check`/`compare` and libfatx; one real image's titles were listed by the CLI, but nothing has been run against a live RomM or a real console save); for Azahar, the Windows install locations are guesses and the save roots assume the default all-zero `sdmc` id folders (a console-imported `movable.sed` changes them). Azahar needs your console's keys in `sysdata/keys.txt` to play encrypted dumps (older Citra guides call it `aes_keys.txt`).
 - **Xenia Canary against a real install.** Launch args, storage-root rules, the `Headers/` layout and the legacy header format were read from Canary's source (`xenia_main.cc`, `content_manager.cc`, `xcontent_package_directory.cc`, `xcontent.h`) and the header's byte layout was compiled and checked against Xenia's own `static_assert`s, but no real Xenia was run. Most worth testing: that a save restored onto a fresh machine shows up in the game's own Load list (that is what the generated header is for), and the Windows install locations in the profile, which are guesses (Xenia ships as a zip). The Xbox 360 disc-image reader inside Sigil was exercised with a synthetic trimmed image, not a real XGD2/XGD3 dump.
 - **RetroAchievements against a real RomM** with a RetroAchievements key and a linked account. The response shapes come from RomM's source, not a live server. A successful Refresh (a token with `me.write`) is covered by core tests only, not in the real app.

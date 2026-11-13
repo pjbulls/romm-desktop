@@ -208,15 +208,14 @@ export interface Settings {
   deviceName: string | null;
   acceptInvalidCerts: boolean;
   platformEmulators: Record<string, string>;
-  /** What's been chosen under Settings → Emulation: scope → setting id → choice value. A missing entry means "don't change". */
-  emulatorSettings: EmulatorSettings;
 }
 
+/** What's been chosen under Emulators & BIOS → Emulator settings: scope → setting id → choice value. A missing entry means "don't change". */
 export type EmulatorSettings = Record<string, Record<string, string>>;
 
 /** Mirrors `EmulationScopeDto`: one emulator, or one RetroArch core, and what the app can control for it. */
 export interface EmulationScope {
-  /** The emulator's id, or `retroarch:<core>`; the key into `Settings.emulatorSettings`. */
+  /** The emulator's id, or `retroarch:<core>`; the key into `EmulatorSettings`. */
   scope: string;
   emulatorId: string;
   name: string;
@@ -235,7 +234,10 @@ export interface EmulationSetting {
   choices: { value: string; label: string }[];
 }
 
-export type SettingsTab = "general" | "emulation" | "controller" | "connection";
+export type SettingsTab = "general" | "controller" | "connection";
+
+/** The tabs of the Emulators & BIOS page. */
+export type EmulatorsTab = "executables" | "bios" | "mapping" | "settings";
 
 /** Mirrors `romm_core::achievements` (snake_case, passed through as-is like SaveView/StateView). */
 export type RaState = "ready" | "no_set" | "not_linked";
@@ -279,4 +281,4 @@ export type View =
   | { kind: "library"; platform: Platform | null }
   | { kind: "installed" }
   | { kind: "emulators" }
-  | { kind: "settings"; tab?: SettingsTab };
+  | { kind: "settings" };

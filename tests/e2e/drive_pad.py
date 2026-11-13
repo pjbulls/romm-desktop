@@ -63,6 +63,7 @@ def focused(): return js("""const a = document.activeElement; if (!a || a === do
 def pad_mode(): return js("return document.documentElement.classList.contains('gamepad-active')")
 def hints(): return js("const h = document.querySelector('[data-testid=hints]'); return h ? h.innerText : ''")
 def sidebar_active(): return js("const a = document.querySelector('.sidebar .nav.active'); return a ? a.innerText : ''")
+def selected_tab(): return js("return document.querySelector('[role=tab][aria-selected=true]').dataset.testid")
 def card_ids(): return js("return Array.from(document.querySelectorAll('[data-testid=game-card]')).map(c => Number(c.dataset.gameId))")
 def toasts(): return js("return Array.from(document.querySelectorAll('.toast')).map(t => t.innerText).join(' | ')")
 def wait_toast(sub, t=40): return d.wait(lambda: sub in toasts() and toasts(), t, f"toast {sub!r}")
@@ -219,6 +220,13 @@ try:
     before = js("return document.querySelector('.main').scrollTop")
     stick(3, 1.0, 0.7)
     check("right stick scrolls long pages", js("return document.querySelector('.main').scrollTop") > before + 50)
+    # Emulators & BIOS has tabs too: Executables, BIOS, Emulator mapping, Emulator settings. The platform
+    # dropdowns are on the third, and LB/RB get there.
+    check("Emulators & BIOS opens on its Executables tab", selected_tab() == "tab-executables", selected_tab())
+    press("rb"); press("rb")
+    d.wait_css("select.choice-select", 8)
+    check("RB twice reaches Emulator mapping, where the platform dropdowns are", selected_tab() == "tab-mapping" and "Emulators" in sidebar_active(), f"{selected_tab()} / {sidebar_active()}")
+    check("and the hints call it a tab", "Tab" in hints(), hints())
     nav_either(lambda f: f["tag"] == "SELECT", 45, "a platform selector")
     for _ in range(8): press("down")      # past the last control on the page
     check("Down at the end of a page stays on the page instead of jumping into the menu", js("return !document.activeElement.closest('.sidebar')"), str(focused()))
@@ -248,17 +256,13 @@ try:
     wait_toast("Settings saved", 10)
     check("changes made with the controller are saved", f"max_state_mb = {v1}" in open(f"{HOME}/rommhome/config/config.toml").read())
     shot("p04-settings")
-    # Settings has tabs: General, Emulation, Controller, Connection. LB/RB move between them here, and
-    # only here: on a page without tabs they still change platform.
-    selected_tab = lambda: js("return document.querySelector('[role=tab][aria-selected=true]').dataset.testid")
+    # Settings has tabs: General, Controller, Connection. LB/RB move between them here, and only here:
+    # on a page without tabs they still change platform.
     check("settings opens on its General tab", selected_tab() == "tab-general", selected_tab())
     press("rb")
-    d.wait_css("[data-testid=emu-scope-dolphin]", 8)
-    check("RB moves to the next settings tab, not the next platform", selected_tab() == "tab-emulation" and "Settings" in sidebar_active(), f"{selected_tab()} / {sidebar_active()}")
-    check("and the hints call it a tab", "Tab" in hints(), hints())
-    press("rb")
     d.wait_css("[data-testid=pad-status]", 8)
-    check("RB again reaches the Controller tab", selected_tab() == "tab-controller", selected_tab())
+    check("RB moves to the next settings tab, not the next platform", selected_tab() == "tab-controller" and "Settings" in sidebar_active(), f"{selected_tab()} / {sidebar_active()}")
+    check("and the hints call it a tab", "Tab" in hints(), hints())
     check("settings shows the controller and its button legend", "Xbox 360 Controller" in js("return document.querySelector('[data-testid=pad-status]').innerText"))
 
     print("== Opting out")

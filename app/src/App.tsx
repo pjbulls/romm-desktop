@@ -66,8 +66,8 @@ export default function App() {
         <ErrorBoundary key={view.kind}>
         {view.kind === "library" && <Library key={view.platform?.id ?? "all"} mode={{ kind: "library", platform: view.platform }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} onLibraryChanged={loadPlatforms} />}
         {view.kind === "installed" && <Library key="installed" mode={{ kind: "installed" }} platforms={platforms} onGoEmulators={() => setView({ kind: "emulators" })} onLibraryChanged={loadPlatforms} />}
-        {view.kind === "emulators" && <Emulators platforms={platforms} onChanged={loadPlatforms} onHiddenChange={setPlatformHidden} onGoSettings={() => setView({ kind: "settings", tab: "emulation" })} />}
-        {view.kind === "settings" && <Settings status={status} initialTab={view.tab} onDisconnected={(s) => { setStatus(s); setPlatforms([]); }} />}
+        {view.kind === "emulators" && <Emulators platforms={platforms} onChanged={loadPlatforms} onHiddenChange={setPlatformHidden} />}
+        {view.kind === "settings" && <Settings status={status} onDisconnected={(s) => { setStatus(s); setPlatforms([]); }} />}
         </ErrorBoundary>
       </main>
       <Toasts />

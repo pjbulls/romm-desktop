@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * Hiding a platform from the game browser, through the real app against a fake backend that behaves
  * like the real one: `platforms` carries each platform's `hidden`, `games` leaves hidden platforms'
  * games out, and `set_platform_hidden` is what remembers a choice. What this guards: ticking the box on
- * the Emulators page takes the platform, its count and its games out of the browser at once, the
+ * the Emulators page's mapping tab takes the platform, its count and its games out of the browser at once, the
  * platform stays on that page so it can be shown again, and a failure puts everything back.
  */
 const h = vi.hoisted(() => ({
@@ -133,7 +133,8 @@ const calls = (cmd: string) => h.calls.filter((c) => c.cmd === cmd);
 
 async function openEmulators() {
   await click(tid("nav-emulators"));
-  await until(() => !!showBox("gba"), "the Emulators page");
+  await click(tid("tab-mapping")); // the show/hide boxes are on the Emulator mapping tab
+  await until(() => !!showBox("gba"), "the Emulator mapping tab");
 }
 async function openAll() {
   await click(tid("nav-all"));

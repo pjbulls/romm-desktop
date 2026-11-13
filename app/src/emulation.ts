@@ -1,7 +1,7 @@
 import type { EmulatorSettings, Settings, SettingsTab } from "./types";
 
 /**
- * Pure helpers for Settings → Emulation. The choices are `scope → setting id → value`, where a
+ * Pure helpers for Emulators & BIOS → Emulator settings. The choices are `scope → setting id → value`, where a
  * scope is an emulator's id (or `retroarch:<core>`) and a missing entry, like an empty value,
  * means "don't change": the emulator's own setting is left alone.
  */
@@ -45,11 +45,10 @@ export function sameChoices(a: EmulatorSettings, b: EmulatorSettings): boolean {
 /** Which tabs of the Settings page hold changes that haven't been saved. */
 export function dirtyTabs(form: Settings, saved: Settings): Set<SettingsTab> {
   const out = new Set<SettingsTab>();
-  if (!sameChoices(form.emulatorSettings, saved.emulatorSettings)) out.add("emulation");
   if (form.acceptInvalidCerts !== saved.acceptInvalidCerts) out.add("connection");
   // Everything else on the page (downloads, saves and states) is the General tab's.
   const rest = (s: Settings) => {
-    const { emulatorSettings: _e, acceptInvalidCerts: _c, ...others } = s;
+    const { acceptInvalidCerts: _c, ...others } = s;
     return JSON.stringify(others);
   };
   if (rest(form) !== rest(saved)) out.add("general");

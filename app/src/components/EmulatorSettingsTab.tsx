@@ -2,11 +2,11 @@ import { chosen, clearScope, countChosen, setChoice } from "../emulation";
 import type { EmulationScope, EmulatorSettings } from "../types";
 
 /**
- * Settings → Emulation: how the user's own emulators should run games. Nothing is installed or
- * managed here (the emulators stay the user's); what is chosen is applied each time a game is
- * launched from this app. A setting left on "Don't change" is never touched.
+ * Emulators & BIOS → Emulator settings: how the user's own emulators should run games. Nothing is
+ * installed or managed here (the emulators stay the user's); what is chosen is applied each time a
+ * game is launched from this app. A setting left on "Don't change" is never touched.
  */
-export function EmulationTab({
+export function EmulatorSettingsTab({
   scopes, error, values, onChange,
 }: {
   scopes: EmulationScope[] | null;
@@ -16,10 +16,6 @@ export function EmulationTab({
 }) {
   return (
     <>
-      <section className="card form">
-        <h3>Emulator settings</h3>
-      </section>
-
       {error && <div className="card error-text" role="alert">Couldn't load emulator settings: {error}</div>}
       {!scopes && !error && <div className="loading-row"><span className="spinner sm" /> Loading…</div>}
 

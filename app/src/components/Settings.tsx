@@ -4,35 +4,26 @@ import { dirtyTabs } from "../emulation";
 import { POLICY_LABEL } from "../format";
 import { useGamepad } from "../gamepad/GamepadProvider";
 import { useStore } from "../store";
-import type { ConflictPolicy, EmulationScope, Settings as S, SettingsTab, Status } from "../types";
-import { EmulationTab } from "./EmulationTab";
+import type { ConflictPolicy, Settings as S, SettingsTab, Status } from "../types";
 import { TabPanel, Tabs, type TabDef } from "./Tabs";
 
-export function Settings({ status, onDisconnected, initialTab }: { status: Status; onDisconnected: (s: Status) => void; initialTab?: SettingsTab }) {
+export function Settings({ status, onDisconnected }: { status: Status; onDisconnected: (s: Status) => void }) {
   const { push } = useStore();
   const [saved, setSaved] = useState<S | null>(null);
   const [form, setForm] = useState<S | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
-  const [scopes, setScopes] = useState<EmulationScope[] | null>(null);
-  const [scopesError, setScopesError] = useState<string | null>(null);
+  const [tab, setTab] = useState<SettingsTab>("general");
   const pad = useGamepad();
 
   useEffect(() => {
     api.settings().then((s) => { setSaved(s); setForm(s); }).catch((e) => push("error", "Couldn't load settings", [errMsg(e)]));
   }, [push]);
 
-  // What the Emulation tab offers doesn't change while the page is open, so it's asked for once.
-  useEffect(() => {
-    api.emulationSchema().then(setScopes).catch((e) => setScopesError(errMsg(e)));
-  }, []);
-
   if (!form || !saved) return <div className="loading-row"><span className="spinner sm" /> Loading…</div>;
   const dirtyIn = dirtyTabs(form, saved);
   const dirty = dirtyIn.size > 0;
   const tabs: TabDef<SettingsTab>[] = [
     { id: "general", label: "General", dirty: dirtyIn.has("general") },
-    { id: "emulation", label: "Emulation", dirty: dirtyIn.has("emulation") },
     { id: "controller", label: "Controller" },
     { id: "connection", label: "Connection", dirty: dirtyIn.has("connection") },
   ];
@@ -101,10 +92,6 @@ export function Settings({ status, onDisconnected, initialTab }: { status: Statu
         </fieldset>
       </section>
       </>}
-
-      {tab === "emulation" && (
-        <EmulationTab scopes={scopes} error={scopesError} values={form.emulatorSettings} onChange={(v) => set("emulatorSettings", v)} />
-      )}
 
       {tab === "controller" &&
       <section className="card form" data-testid="controller-settings">

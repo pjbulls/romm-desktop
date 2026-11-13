@@ -178,6 +178,8 @@ try:
     check("PPSSPP reported as not found, with guidance", "Not found" in ppsspp, ppsspp[:120])
     shot("08-emulators")
     dismiss_toasts(); time.sleep(0.3)
+    d.click(d.find("[data-testid=tab-bios]"))      # Emulators & BIOS has tabs: Executables, BIOS, Emulator mapping, Emulator settings
+    d.wait_css("[data-testid=bios-psx]")
     d.click(d.find("[data-testid=bios-psx]"))
     d.wait(lambda: "scph5501.bin" in d.text(d.find(".page")), 15, "BIOS result")
     bios = f"{HOME}/.local/share/duckstation/bios/scph5501.bin"
