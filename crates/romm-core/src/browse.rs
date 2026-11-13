@@ -24,6 +24,17 @@ pub fn filter<'a>(roms: &'a [Rom], platform_id: Option<i64>, search: &str, hidde
         .collect()
 }
 
+/// The games of the platforms the user has hidden, in the order given, matching `search` the same way
+/// `filter` does. This is the "Hidden platforms" view: the one place these games are listed, since
+/// `filter` leaves them out of everything else. Between them the two cover every game exactly once.
+pub fn filter_hidden<'a>(roms: &'a [Rom], search: &str, hidden: &BTreeSet<String>) -> Vec<&'a Rom> {
+    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
+    roms.iter()
+        .filter(|r| hidden.contains(&r.platform_slug))
+        .filter(|r| words.is_empty() || matches_all(r, &words))
+        .collect()
+}
+
 fn matches_all(r: &Rom, words: &[String]) -> bool {
     let mut hay = String::new();
     let mut add = |s: &str| {
@@ -164,5 +175,45 @@ mod tests {
     fn hiding_a_platform_nobody_has_is_harmless_and_order_is_kept() {
         let roms = two_platforms();
         assert_eq!(ids(filter(&roms, None, "", &hidden(&["no-such-platform"]))), [1, 3, 4]);
+    }
+
+    #[test]
+    fn the_hidden_view_lists_only_the_hidden_platforms_games_in_order() {
+        let roms = two_platforms();
+        assert_eq!(ids(filter_hidden(&roms, "", &hidden(&["gba"]))), [1, 3]);
+        assert_eq!(ids(filter_hidden(&roms, "", &hidden(&["ngc"]))), [4]);
+        assert_eq!(ids(filter_hidden(&roms, "", &hidden(&["gba", "ngc"]))), [1, 3, 4]);
+    }
+
+    #[test]
+    fn the_hidden_view_is_empty_when_nothing_is_hidden_or_the_platform_has_no_games() {
+        let roms = two_platforms();
+        assert!(filter_hidden(&roms, "", &none()).is_empty());
+        assert!(filter_hidden(&roms, "", &hidden(&["no-such-platform"])).is_empty());
+    }
+
+    #[test]
+    fn a_search_in_the_hidden_view_only_finds_hidden_games_the_same_way_as_elsewhere() {
+        let roms = two_platforms();
+        // "metroid" is on both platforms; only the hidden one answers.
+        assert_eq!(ids(filter_hidden(&roms, "metroid", &hidden(&["ngc"]))), [4]);
+        assert_eq!(ids(filter_hidden(&roms, "METROID fusion", &hidden(&["gba"]))), [3]);
+        assert!(filter_hidden(&roms, "prime", &hidden(&["gba"])).is_empty());
+        // Through another version's file name, as `filter` finds it.
+        assert_eq!(ids(filter_hidden(&roms, "rubin", &hidden(&["gba"]))), [1]);
+    }
+
+    /// Hiding moves games between the two lists; it never loses or duplicates one.
+    #[test]
+    fn the_shown_list_and_the_hidden_view_together_are_every_game_exactly_once() {
+        let roms = two_platforms();
+        for h in [none(), hidden(&["gba"]), hidden(&["ngc"]), hidden(&["gba", "ngc"]), hidden(&["other"])] {
+            for q in ["", "metroid", "ruby"] {
+                let mut both = ids(filter(&roms, None, q, &h));
+                both.extend(ids(filter_hidden(&roms, q, &h)));
+                both.sort();
+                assert_eq!(both, ids(filter(&roms, None, q, &none())), "hidden {h:?}, search {q:?}");
+            }
+        }
     }
 }

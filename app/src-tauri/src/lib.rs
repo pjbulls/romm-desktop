@@ -358,6 +358,10 @@ struct GamesArgs {
     limit: i64,
     #[serde(default)]
     installed_only: bool,
+    /// The "Hidden platforms" view: only the games of platforms the user has hidden, which are
+    /// listed nowhere else.
+    #[serde(default)]
+    hidden_only: bool,
 }
 
 fn game_dto(r: &Rom, db: &State) -> GameDto {
@@ -653,7 +657,8 @@ async fn platforms(st: TauriState<'_, AppState>) -> CmdResult<Vec<PlatformDto>> 
 
 #[tauri::command]
 async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) -> CmdResult<GamesPage> {
-    // Platforms the user has hidden from the game browser: none of their games are listed, installed or not.
+    // Platforms the user has hidden from the game browser: none of their games are listed, installed or not,
+    // except in the "Hidden platforms" view (`hidden_only`).
     let hidden = st.cfg.read().await.hidden_platforms.clone();
     if args.installed_only {
         // Served from the local database so it works offline and needs no paging.
@@ -691,7 +696,12 @@ async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) ->
     // The whole library is held in memory and sliced here. A list opened from the top may refresh
     // it if it has gone stale; a request for further down must see the same list as the first.
     let loaded = st.library(&app, (args.offset == 0).then_some(LIBRARY_TTL)).await?;
-    let hits = browse::filter(&loaded.roms, args.platform_id, args.search.as_deref().unwrap_or(""), &hidden);
+    let search = args.search.as_deref().unwrap_or("");
+    let hits = if args.hidden_only {
+        browse::filter_hidden(&loaded.roms, search, &hidden)
+    } else {
+        browse::filter(&loaded.roms, args.platform_id, search, &hidden)
+    };
     let total = Some(hits.len() as i64);
     let db = st.db.lock().await;
     let items = hits.into_iter().skip(args.offset.max(0) as usize).take(args.limit.max(0) as usize).map(|r| game_dto(r, &db)).collect();

@@ -5,19 +5,24 @@ import type { Platform, Status, View } from "../types";
 
 interface Props {
   status: Status;
+  /** The platforms to list: the ones not hidden. */
   platforms: Platform[];
+  /** How many hidden platforms have games. */
+  hiddenPlatforms: number;
   view: View;
   onView: (v: View) => void;
   onDisconnected: (s: Status) => void;
 }
 
-export function Sidebar({ status, platforms, view, onView, onDisconnected }: Props) {
+export function Sidebar({ status, platforms, hiddenPlatforms, view, onView, onDisconnected }: Props) {
   const { syncingAll, push } = useStore();
   const [filter, setFilter] = useState("");
   const shown = useMemo(
     () => platforms.filter((p) => p.romCount > 0 && p.name.toLowerCase().includes(filter.toLowerCase())).sort((a, b) => a.name.localeCompare(b.name)),
     [platforms, filter],
   );
+  // The entry for hidden platforms is the last in the list, and obeys the filter like a platform's name does.
+  const hiddenEntry = hiddenPlatforms > 0 && "hidden platforms".includes(filter.trim().toLowerCase());
   const total = useMemo(() => platforms.reduce((n, p) => n + p.romCount, 0), [platforms]);
   const isLib = (p: Platform | null) => view.kind === "library" && (view.platform?.id ?? null) === (p?.id ?? null);
 
@@ -53,6 +58,11 @@ export function Sidebar({ status, platforms, view, onView, onDisconnected }: Pro
           </button>
         ))}
         {shown.length === 0 && <div className="muted small pad">No platforms</div>}
+        {hiddenEntry && (
+          <button className={`nav nav-hidden ${view.kind === "hidden" ? "active" : ""}`} onClick={() => onView({ kind: "hidden" })} title="The games of platforms you've hidden" data-testid="nav-hidden">
+            <span className="nav-name">Hidden platforms ({hiddenPlatforms})</span>
+          </button>
+        )}
       </div>
 
       <div className="nav-group bottom">

@@ -8,7 +8,7 @@ import { GameDrawer } from "./GameDrawer";
 
 const PAGE = 48;
 
-type Mode = { kind: "library"; platform: Platform | null } | { kind: "installed" };
+type Mode = { kind: "library"; platform: Platform | null } | { kind: "installed" } | { kind: "hidden" };
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -66,7 +66,7 @@ export function Library({ mode, platforms, onGoEmulators, onLibraryChanged }: Pr
       busy.current = true;
       setLoading(true);
       try {
-        const page = await api.games({ platformId, search: q || undefined, offset, limit: PAGE, installedOnly: mode.kind === "installed" });
+        const page = await api.games({ platformId, search: q || undefined, offset, limit: PAGE, installedOnly: mode.kind === "installed", hiddenOnly: mode.kind === "hidden" });
         if (g !== gen.current) return;
         remember(page.items);
         count.current = offset + page.items.length;
@@ -138,7 +138,7 @@ export function Library({ mode, platforms, onGoEmulators, onLibraryChanged }: Pr
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  const title = mode.kind === "installed" ? "Installed" : mode.platform?.name ?? "All games";
+  const title = mode.kind === "installed" ? "Installed" : mode.kind === "hidden" ? "Hidden platforms" : mode.platform?.name ?? "All games";
   const shown = mode.kind === "installed" ? items.filter((g) => isGameInstalled(g, installed)) : items;
 
   return (
@@ -149,7 +149,7 @@ export function Library({ mode, platforms, onGoEmulators, onLibraryChanged }: Pr
           <div className="muted small">{total != null ? `${total} game${total === 1 ? "" : "s"}` : "\u00a0"}</div>
         </div>
         <div className="topbar-tools">
-          {mode.kind === "library" && (
+          {mode.kind !== "installed" && (
             <button className="btn btn-ghost" onClick={refresh} disabled={refreshing || loading} title="Reload the library from the server" aria-label="Refresh library" data-testid="refresh-library">
               {refreshing ? <span className="spinner sm" /> : "↻"}
             </button>

@@ -91,6 +91,8 @@ export interface GamesArgs {
   offset: number;
   limit: number;
   installedOnly?: boolean;
+  /** Only the games of platforms the user has hidden: the "Hidden platforms" view, the one place they are listed. */
+  hiddenOnly?: boolean;
 }
 
 /** Progress of loading the whole library from the server (`romm://library`). */
@@ -280,5 +282,7 @@ export interface AchievementsView {
 export type View =
   | { kind: "library"; platform: Platform | null }
   | { kind: "installed" }
+  /** The games of every hidden platform, which are listed nowhere else. */
+  | { kind: "hidden" }
   | { kind: "emulators" }
   | { kind: "settings" };

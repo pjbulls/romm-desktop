@@ -9,7 +9,7 @@ A Windows + Linux desktop client for [RomM](https://github.com/rommapp/romm), mo
 ## What it does
 
 - **Library**: platforms, search, a scrolling grid with cover art, an *Installed* view that works offline.
-- **Hide platforms**: untick a platform under *Emulators & BIOS → Emulator mapping* and it, with all its games, leaves the sidebar, its counts, All games, Installed and search. Only what is listed changes: installed games stay installed, their saves keep syncing, and the platform stays on that page so it can be shown again. Handy for platforms with no emulator yet.
+- **Hide platforms**: untick a platform under *Emulators & BIOS → Emulator mapping* and it, with all its games, leaves the sidebar, its counts, All games, Installed and search. They are listed in one place only: the last entry of the platform list, *Hidden platforms (n)* (n is how many hidden platforms have games), which shows the games of all of them together and can be searched. Only what is listed changes: installed games stay installed, their saves keep syncing, and the platform stays on the mapping page so it can be shown again. Handy for platforms with no emulator yet.
 - **Install / uninstall** ROMs locally.
 - **Play**: pull saves and states → launch the emulator → work out which files changed → push saves, states and playtime.
 - **Conflicts**: never lose data. Default "keep both": your version is archived on the server, the server's is used, and what's replaced locally is copied to a backups folder first.

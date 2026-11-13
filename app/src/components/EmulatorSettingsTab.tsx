@@ -63,7 +63,7 @@ function ScopeCard({ sc, values, onChange }: { sc: EmulationScope; values: Emula
       {set > 0 && (
         <div>
           <button className="link-btn" type="button" onClick={() => onChange(clearScope(values, sc.scope))}>
-            Reset all to "Don't change"
+            Reset all
           </button>
         </div>
       )}

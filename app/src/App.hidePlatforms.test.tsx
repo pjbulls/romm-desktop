@@ -43,6 +43,7 @@ const PLATFORMS = [
   { id: 1, slug: "gba", name: "Game Boy Advance", romCount: 2 },
   { id: 2, slug: "arcade", name: "Arcade", romCount: 1 },
   { id: 3, slug: "snes", name: "Super Nintendo", romCount: 3 },
+  { id: 4, slug: "dc", name: "Dreamcast", romCount: 0 }, // nothing on it, so hiding it never shows up anywhere
 ];
 const game = (id: number, name: string, platformId: number, platformSlug: string, installed = false) => ({
   id, name, platformId, platformSlug, installed, sizeBytes: 1, multiFile: false, coverPath: null, versions: [], versionLabel: null,
@@ -74,8 +75,9 @@ function fakeBackend() {
         }));
       case "load_library": return GAMES.length;
       case "games": {
-        const { platformId, installedOnly, search, offset, limit } = args.args;
-        let items = GAMES.filter((g) => !hidden.has(g.platformSlug));
+        const { platformId, installedOnly, hiddenOnly, search, offset, limit } = args.args;
+        // The real backend lists a hidden platform's games in exactly one place: the hidden view.
+        let items = GAMES.filter((g) => hiddenOnly ? hidden.has(g.platformSlug) : !hidden.has(g.platformSlug));
         if (installedOnly) items = items.filter((g) => g.installed);
         if (platformId != null) items = items.filter((g) => g.platformId === platformId);
         if (search) items = items.filter((g) => g.name.toLowerCase().includes(String(search).toLowerCase()));
@@ -125,7 +127,8 @@ async function mount() {
 const q = (sel: string) => document.querySelector<HTMLElement>(sel);
 const tid = (id: string) => q(`[data-testid="${id}"]`);
 const click = (el: Element | null) => act(async () => { (el as HTMLElement).click(); });
-const sidebar = () => [...document.querySelectorAll(".platform-list .nav-name")].map((e) => e.textContent);
+const sidebar = () => [...document.querySelectorAll(".platform-list .nav:not(.nav-hidden) .nav-name")].map((e) => e.textContent);
+const hiddenEntry = () => tid("nav-hidden");
 const allCount = () => q("[data-testid=nav-all] .count")?.textContent;
 const cards = () => [...document.querySelectorAll("[data-testid=game-card]")].map((c) => c.getAttribute("aria-label")!.split(",")[0]);
 const showBox = (slug: string) => tid(`show-${slug}`) as HTMLInputElement;
@@ -279,5 +282,177 @@ describe("the open platform", () => {
     await click(tid("refresh-library"));
     await flush(); await flush();
     expect(q(".topbar h1")?.textContent).toBe("Game Boy Advance");
+  });
+});
+
+describe("the Hidden platforms entry", () => {
+  const last = <T,>(xs: T[]): T | undefined => xs[xs.length - 1];
+  const lastInList = () => last([...document.querySelectorAll(".platform-list > *")]);
+  const cardFor = (name: string) => [...document.querySelectorAll<HTMLElement>("[data-testid=game-card]")].find((c) => c.getAttribute("aria-label")!.startsWith(name))!;
+  const subtitle = () => q(".topbar .muted.small")?.textContent;
+  async function openHiddenView() {
+    await click(hiddenEntry());
+    await until(() => q(".topbar h1")?.textContent === "Hidden platforms", "the hidden view");
+    await until(() => cards().length > 0, "its games");
+  }
+  async function typeInto(selector: string, value: string) {
+    const el = q(selector) as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  it("isn't offered while nothing is hidden", async () => {
+    await mount();
+    await until(() => sidebar().length === 3, "sidebar");
+    expect(hiddenEntry()).toBeNull();
+  });
+
+  it("is the last entry of the platform list, saying how many platforms are hidden", async () => {
+    hidden = new Set(["arcade"]);
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    expect(hiddenEntry()!.textContent).toBe("Hidden platforms (1)");
+    expect(lastInList()).toBe(hiddenEntry());
+    expect(sidebar()).toEqual(["Game Boy Advance", "Super Nintendo"]);
+  });
+
+  it("counts platforms, not their games", async () => {
+    hidden = new Set(["snes"]); // three games on one platform
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    expect(hiddenEntry()!.textContent).toBe("Hidden platforms (1)");
+  });
+
+  it("counts every hidden platform that has games", async () => {
+    hidden = new Set(["arcade", "snes"]);
+    await mount();
+    await until(() => sidebar().length === 1, "sidebar");
+    expect(hiddenEntry()!.textContent).toBe("Hidden platforms (2)");
+  });
+
+  it("leaves out a hidden platform with no games, and isn't offered when that is all there is", async () => {
+    hidden = new Set(["dc"]);
+    await mount();
+    await until(() => sidebar().length === 3, "sidebar");
+    expect(hiddenEntry()).toBeNull();
+  });
+
+  it("doesn't count an empty hidden platform among the ones that have games", async () => {
+    hidden = new Set(["dc", "arcade"]);
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    expect(hiddenEntry()!.textContent).toBe("Hidden platforms (1)");
+  });
+
+  it("opens the games of every hidden platform together, and nothing else", async () => {
+    hidden = new Set(["arcade", "snes"]);
+    await mount();
+    await until(() => sidebar().length === 1, "sidebar");
+    await openHiddenView();
+    await until(() => cards().length === 4, "all four hidden games");
+    expect(cards().sort()).toEqual(["Chrono Trigger", "Pac-Man", "Super Metroid", "Zelda"]);
+    expect(subtitle()).toBe("4 games");
+    expect(hiddenEntry()!.classList.contains("active")).toBe(true);
+    expect(last(calls("games"))!.args.args).toMatchObject({ hiddenOnly: true, installedOnly: false });
+  });
+
+  it("shows which platform each game is on, and whether it is installed", async () => {
+    hidden = new Set(["arcade", "snes"]);
+    await mount();
+    await until(() => sidebar().length === 1, "sidebar");
+    await openHiddenView();
+    await until(() => cards().length === 4, "games");
+    expect(cardFor("Pac-Man").querySelector(".game-sub")!.textContent).toMatch(/^Arcade\b/); // then the size, which these fixtures give as 1 B
+    expect(cardFor("Pac-Man").dataset.installed).toBe("true");
+    expect(cardFor("Chrono Trigger").querySelector(".game-sub")!.textContent).toMatch(/^Super Nintendo\b/);
+    expect(cardFor("Chrono Trigger").dataset.installed).toBe("false");
+  });
+
+  it("is the only place those games are listed", async () => {
+    hidden = new Set(["arcade", "snes"]);
+    await mount();
+    await until(() => sidebar().length === 1, "sidebar");
+    await openAll();
+    await until(() => cards().length === 2, "the visible games");
+    expect(cards().sort()).toEqual(["Metroid Fusion", "Pokemon Ruby"]);
+    await click(tid("nav-installed"));
+    await until(() => cards().length === 1, "the installed list");
+    expect(cards()).toEqual(["Metroid Fusion"]); // Pac-Man is installed, but its platform is hidden
+    await openHiddenView();
+    await until(() => cards().length === 4, "games");
+    expect(cards()).toContain("Pac-Man");
+  });
+
+  it("searches only the hidden games", async () => {
+    hidden = new Set(["snes"]);
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    await openHiddenView();
+    await until(() => cards().length === 3, "games");
+    await typeInto("[data-testid=search]", "metroid");
+    // "Metroid Fusion" matches too, but it is on a platform that isn't hidden.
+    await until(() => cards().length === 1, "the search result");
+    expect(cards()).toEqual(["Super Metroid"]);
+  });
+
+  it("obeys the platform filter the way a platform's name does", async () => {
+    hidden = new Set(["snes"]);
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    await typeInto("input[aria-label='Filter platforms']", "hidden");
+    expect(hiddenEntry()).not.toBeNull();
+    await typeInto("input[aria-label='Filter platforms']", "game boy");
+    expect(hiddenEntry()).toBeNull();
+    expect(sidebar()).toEqual(["Game Boy Advance"]);
+    await typeInto("input[aria-label='Filter platforms']", "");
+    expect(hiddenEntry()).not.toBeNull();
+  });
+
+  it("is in the controller's platform cycle, after the last platform", async () => {
+    hidden = new Set(["snes"]);
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    const cycle = [...document.querySelectorAll(".sidebar .nav-group:not(.bottom) .nav, .sidebar .platform-list .nav")];
+    expect(last(cycle)).toBe(hiddenEntry());
+  });
+
+  it("appears at once when a platform is hidden on the Emulators page, and goes when the last one is shown again", async () => {
+    await mount();
+    await until(() => sidebar().length === 3, "sidebar");
+    expect(hiddenEntry()).toBeNull();
+    await openEmulators();
+
+    // The RomM server is slow to answer the refetch the page asks for afterwards.
+    let release!: () => void;
+    platformsGate = new Promise<void>((r) => { release = r; });
+    await click(showBox("snes"));
+    await flush();
+    expect(hiddenEntry()!.textContent).toBe("Hidden platforms (1)");
+    await click(showBox("arcade"));
+    await flush();
+    expect(hiddenEntry()!.textContent).toBe("Hidden platforms (2)");
+
+    await click(showBox("snes"));
+    await click(showBox("arcade"));
+    await flush();
+    expect(hiddenEntry()).toBeNull();
+    release();
+    await flush(); await flush();
+    expect(hiddenEntry()).toBeNull();
+  });
+
+  it("falls back to all games when nothing it shows is hidden any more", async () => {
+    hidden = new Set(["snes"]);
+    await mount();
+    await until(() => sidebar().length === 2, "sidebar");
+    await openHiddenView();
+
+    // Shown again somewhere else (another window, a synced config); refreshing asks for the platform list again.
+    hidden.clear();
+    await click(tid("refresh-library"));
+    await until(() => q(".topbar h1")?.textContent === "All games", "falling back to all games");
+    expect(hiddenEntry()).toBeNull();
   });
 });

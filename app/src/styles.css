@@ -39,6 +39,7 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
 .nav-label { text-transform: uppercase; font-size: 11px; letter-spacing: .08em; color: var(--muted); padding: 12px 10px 2px; }
 .nav { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: 0; padding: 8px 10px; border-radius: 8px; color: var(--text); }
 .nav:hover { background: var(--panel); } .nav.active { background: var(--panel-2); font-weight: 600; }
+.platform-list .nav-hidden { margin-top: 6px; color: var(--muted); } .platform-list .nav-hidden.active { color: var(--text); }
 .nav-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav > span:first-child { flex: 1; }
 .count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

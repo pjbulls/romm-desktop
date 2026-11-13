@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { viewAfterPlatformsChange, visiblePlatforms, withHidden } from "./platforms";
+import { hiddenPlatformCount, viewAfterPlatformsChange, visiblePlatforms, withHidden } from "./platforms";
 import type { Platform, View } from "./types";
 
 const p = (slug: string, hidden = false): Platform => ({
@@ -32,6 +32,24 @@ describe("which platforms the game browser offers", () => {
   });
 });
 
+describe("the number beside Hidden platforms", () => {
+  const withGames = (slug: string, romCount: number, hidden = true): Platform => ({ ...p(slug, hidden), romCount });
+
+  it("counts hidden platforms, not their games", () => {
+    expect(hiddenPlatformCount([withGames("gba", 40), withGames("arcade", 3), withGames("snes", 900, false)])).toBe(2);
+  });
+
+  it("is zero when nothing is hidden", () => {
+    expect(hiddenPlatformCount([p("gba"), p("snes")])).toBe(0);
+    expect(hiddenPlatformCount([])).toBe(0);
+  });
+
+  it("leaves out a hidden platform with no games, since there is nothing to see there", () => {
+    expect(hiddenPlatformCount([withGames("gba", 0), withGames("arcade", 3)])).toBe(1);
+    expect(hiddenPlatformCount([withGames("gba", 0)])).toBe(0);
+  });
+});
+
 describe("what happens to the open view when platforms are hidden", () => {
   const gba = p("gba");
   const open: View = { kind: "library", platform: gba };
@@ -48,6 +66,22 @@ describe("what happens to the open view when platforms are hidden", () => {
     for (const v of [{ kind: "library", platform: null }, { kind: "installed" }, { kind: "emulators" }, { kind: "settings" }] as View[]) {
       expect(viewAfterPlatformsChange(v, [p("gba", true)])).toBe(v);
     }
+  });
+
+  describe("the Hidden platforms view", () => {
+    const hiddenView: View = { kind: "hidden" };
+
+    it("stays while some hidden platform has games", () => {
+      expect(viewAfterPlatformsChange(hiddenView, [p("gba", true), p("snes")])).toBe(hiddenView);
+    });
+
+    it("turns into all games once nothing is hidden any more", () => {
+      expect(viewAfterPlatformsChange(hiddenView, [p("gba"), p("snes")])).toEqual({ kind: "library", platform: null });
+    });
+
+    it("does too when the only hidden platforms are empty", () => {
+      expect(viewAfterPlatformsChange(hiddenView, [{ ...p("gba", true), romCount: 0 }])).toEqual({ kind: "library", platform: null });
+    });
   });
 
   it("a platform missing from the list is not treated as hidden (the list may still be loading)", () => {
