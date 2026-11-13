@@ -7,6 +7,39 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::api::types::Rom;
+use crate::state::LocalRom;
+
+/// What a search asks for: a set of words that must all appear, in any order, in the texts a game
+/// can be found by. Case does not matter. It is the one rule for every list of games (the whole
+/// library and the installed ones), so a search finds the same game wherever it is typed.
+pub struct Search {
+    words: Vec<String>,
+}
+
+impl Search {
+    pub fn new(text: &str) -> Search {
+        Search { words: text.split_whitespace().map(str::to_lowercase).collect() }
+    }
+
+    /// Nothing to look for: every game matches.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// Does every word appear in `texts`? The words may be found in different texts (a name and a
+    /// file name), but a word is never found across the end of one and the start of the next.
+    pub fn matches<'a>(&self, texts: impl IntoIterator<Item = &'a str>) -> bool {
+        if self.words.is_empty() {
+            return true;
+        }
+        let mut hay = String::new();
+        for t in texts {
+            hay.push_str(&t.to_lowercase());
+            hay.push('\n');
+        }
+        self.words.iter().all(|w| hay.contains(w.as_str()))
+    }
+}
 
 /// The games on `platform_id` (all platforms when None) matching `search`, in the order given.
 /// Platforms the user has hidden (by slug, see `Config::hidden_platforms`) show nothing, not even
@@ -16,11 +49,11 @@ use crate::api::types::Rom;
 /// file name of any of its versions. RomM's own search also finds a game through a version that
 /// isn't the one the list shows ("Pokemon Rubin" finds Ruby), and so does this.
 pub fn filter<'a>(roms: &'a [Rom], platform_id: Option<i64>, search: &str, hidden: &BTreeSet<String>) -> Vec<&'a Rom> {
-    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
+    let search = Search::new(search);
     roms.iter()
         .filter(|r| platform_id.is_none_or(|p| r.platform_id == p))
         .filter(|r| !hidden.contains(&r.platform_slug))
-        .filter(|r| words.is_empty() || matches_all(r, &words))
+        .filter(|r| search.matches(rom_texts(r)))
         .collect()
 }
 
@@ -28,28 +61,29 @@ pub fn filter<'a>(roms: &'a [Rom], platform_id: Option<i64>, search: &str, hidde
 /// `filter` does. This is the "Hidden platforms" view: the one place these games are listed, since
 /// `filter` leaves them out of everything else. Between them the two cover every game exactly once.
 pub fn filter_hidden<'a>(roms: &'a [Rom], search: &str, hidden: &BTreeSet<String>) -> Vec<&'a Rom> {
-    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
+    let search = Search::new(search);
     roms.iter()
         .filter(|r| hidden.contains(&r.platform_slug))
-        .filter(|r| words.is_empty() || matches_all(r, &words))
+        .filter(|r| search.matches(rom_texts(r)))
         .collect()
 }
 
-fn matches_all(r: &Rom, words: &[String]) -> bool {
-    let mut hay = String::new();
-    let mut add = |s: &str| {
-        hay.push_str(&s.to_lowercase());
-        hay.push('\n');
-    };
-    add(r.title());
-    add(&r.fs_name_no_ext);
-    for s in &r.sibling_roms {
-        if let Some(n) = &s.name {
-            add(n);
-        }
-        add(&s.fs_name_no_ext);
-    }
-    words.iter().all(|w| hay.contains(w.as_str()))
+/// The installed games matching `search`, in the order given, leaving out hidden platforms as
+/// `filter` does. The same rule as there: every word, in any order, in the game's name or the name
+/// of the file it was installed as.
+pub fn filter_installed<'a>(roms: impl IntoIterator<Item = &'a LocalRom>, search: &str, hidden: &BTreeSet<String>) -> Vec<&'a LocalRom> {
+    let search = Search::new(search);
+    roms.into_iter()
+        .filter(|r| !hidden.contains(&r.platform_slug))
+        .filter(|r| search.matches([r.name.as_str(), r.stem.as_str()]))
+        .collect()
+}
+
+/// What a game is found by: its name and file name, and those of its other versions.
+fn rom_texts(r: &Rom) -> impl Iterator<Item = &str> {
+    [r.title(), r.fs_name_no_ext.as_str()]
+        .into_iter()
+        .chain(r.sibling_roms.iter().flat_map(|s| s.name.as_deref().into_iter().chain(std::iter::once(s.fs_name_no_ext.as_str()))))
 }
 
 /// Games per platform id. A platform with none is absent.
@@ -215,5 +249,59 @@ mod tests {
                 assert_eq!(both, ids(filter(&roms, None, q, &none())), "hidden {h:?}, search {q:?}");
             }
         }
+    }
+
+    fn local(id: i64, platform: &str, name: &str, stem: &str) -> LocalRom {
+        LocalRom { rom_id: id, name: name.into(), platform_slug: platform.into(), stem: stem.into(), ..Default::default() }
+    }
+
+    fn installed() -> Vec<LocalRom> {
+        vec![
+            local(1, "gba", "Pokemon Ruby", "Pokemon Ruby (USA)"),
+            local(3, "gba", "Metroid Fusion", "Metroid Fusion"),
+            local(4, "ngc", "Metroid Prime", "Metroid Prime"),
+        ]
+    }
+
+    fn installed_ids(v: Vec<&LocalRom>) -> Vec<i64> {
+        v.into_iter().map(|r| r.rom_id).collect()
+    }
+
+    /// The Installed list used to be one substring of the name, so the same words in another order
+    /// found a game in All games and not here.
+    #[test]
+    fn installed_search_takes_the_words_in_any_order_like_the_library_does() {
+        let roms = installed();
+        assert_eq!(installed_ids(filter_installed(&roms, "metroid fusion", &none())), [3]);
+        assert_eq!(installed_ids(filter_installed(&roms, "fusion metroid", &none())), [3]);
+        assert_eq!(installed_ids(filter_installed(&roms, "METROID", &none())), [3, 4]);
+        assert!(filter_installed(&roms, "metroid zelda", &none()).is_empty());
+    }
+
+    #[test]
+    fn installed_search_also_finds_a_game_by_the_name_of_its_file() {
+        let roms = installed();
+        assert_eq!(installed_ids(filter_installed(&roms, "usa", &none())), [1]);
+    }
+
+    #[test]
+    fn installed_search_with_nothing_to_find_lists_everything_in_order() {
+        let roms = installed();
+        assert_eq!(installed_ids(filter_installed(&roms, "", &none())), [1, 3, 4]);
+        assert_eq!(installed_ids(filter_installed(&roms, "   ", &none())), [1, 3, 4]);
+    }
+
+    #[test]
+    fn installed_games_on_a_hidden_platform_are_not_listed_or_found() {
+        let roms = installed();
+        assert_eq!(installed_ids(filter_installed(&roms, "", &hidden(&["gba"]))), [4]);
+        assert!(filter_installed(&roms, "ruby", &hidden(&["gba"])).is_empty());
+    }
+
+    #[test]
+    fn a_word_is_not_found_across_the_end_of_one_text_and_the_start_of_the_next() {
+        let roms = vec![local(1, "gba", "Poke", "mon")];
+        assert!(filter_installed(&roms, "pokemon", &none()).is_empty());
+        assert_eq!(installed_ids(filter_installed(&roms, "poke mon", &none())), [1]);
     }
 }

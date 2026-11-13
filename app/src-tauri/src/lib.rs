@@ -663,13 +663,7 @@ async fn games(app: AppHandle, st: TauriState<'_, AppState>, args: GamesArgs) ->
     if args.installed_only {
         // Served from the local database so it works offline and needs no paging.
         let db = st.db.lock().await;
-        let needle = args.search.clone().unwrap_or_default().to_lowercase();
-        let roms: Vec<&LocalRom> = db
-            .roms
-            .values()
-            .filter(|r| !hidden.contains(&r.platform_slug))
-            .filter(|r| needle.is_empty() || r.name.to_lowercase().contains(&needle))
-            .collect();
+        let roms: Vec<&LocalRom> = browse::filter_installed(db.roms.values(), args.search.as_deref().unwrap_or(""), &hidden);
         // Two installed copies of one game (USA and Japan) would otherwise be identical cards.
         let file_names: Vec<String> = roms.iter().map(|r| r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
         let entries: Vec<(&str, &str, &str)> = roms.iter().zip(&file_names).map(|(r, f)| (r.platform_slug.as_str(), r.name.as_str(), f.as_str())).collect();
