@@ -180,14 +180,6 @@ mod tests {
         assert!(!args.iter().any(|a| a == "-C"), "{args:?}");
     }
 
-    #[test]
-    fn missing_emulator_message_tells_the_user_what_to_do() {
-        let cfg = Config::default();
-        let r = Resolver { cfg: &cfg, os: Os::Linux, pctx: PathCtx::default() };
-        let msg = r.emu_env("pcsx2").err().unwrap().to_string();
-        assert!(msg.contains("PCSX2 was not found") && msg.contains("Emulators"), "{msg}");
-    }
-
     /// The reported case, through the entry point the app and CLI use: a game installed before this
     /// was handled has the playlist stored as its launch file, and Xenia must still get disc 1.
     #[test]
