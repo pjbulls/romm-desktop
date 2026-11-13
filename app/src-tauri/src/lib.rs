@@ -10,11 +10,12 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use romm_core::achievements::{self, AchievementsView};
 use romm_core::api::types::{Me, Platform, Rom};
-use romm_core::api::{missing_scopes, RommClient};
+use romm_core::api::RommClient;
 use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::diagnostics::{self, LogFile, Watchdog};
 use romm_core::emu_settings;
 use romm_core::library::{self, BiosStatus};
+use romm_core::login::{self, Credentials};
 use romm_core::report::TransferReport;
 use romm_core::resolve::Resolver;
 use romm_core::state::{LocalRom, State};
@@ -562,24 +563,11 @@ async fn status(st: TauriState<'_, AppState>) -> CmdResult<StatusDto> {
 
 #[tauri::command]
 async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<StatusDto> {
-    let (raw, scopes) = match (args.code.as_deref().filter(|c| !c.trim().is_empty()), args.token.as_deref().filter(|t| !t.trim().is_empty())) {
-        (Some(code), None) => {
-            let t = RommClient::exchange_pair_code(&args.server, code, args.insecure)
-                .await
-                .map_err(|e| match e.status() {
-                    Some(404) => "That pairing code wasn't recognised. Codes are single-use and expire after 5 minutes, so create a fresh one in RomM (Profile → Client API Tokens → Pair).".to_string(),
-                    Some(401) | Some(403) => format!("The server refused the request: {e}"),
-                    _ => format!("Couldn't reach the server or pair with it: {e}"),
-                })?;
-            (t.raw_token, Some(t.scopes))
-        }
-        (None, Some(t)) => (t.trim().to_string(), None),
-        _ => return Err("Enter either a pairing code or a token.".into()),
-    };
-    let client = RommClient::new(&args.server, Some(raw.clone()), args.insecure).map_err(s)?;
-    client.platforms().await.map_err(|e| format!("The server accepted the token but listing platforms failed: {e}"))?;
+    let credentials = Credentials::from_inputs(args.code.as_deref(), args.token.as_deref()).map_err(s)?;
+    let connected = login::connect(&args.server, credentials, args.insecure).await.map_err(s)?;
+    let client = connected.client.clone();
 
-    store_token(&st.dirs, &raw).map_err(s)?;
+    store_token(&st.dirs, &connected.token).map_err(s)?;
     let url = client.base_url().to_string();
     st.update_cfg(|c| c.set_server(&url, args.insecure, args.device_name.clone().filter(|n| !n.trim().is_empty()))).await?;
     *st.client.write().await = Some(client.clone());
@@ -587,17 +575,7 @@ async fn login(st: TauriState<'_, AppState>, args: LoginArgs) -> CmdResult<Statu
     st.forget_library().await;
     st.device_id(&client).await?;
 
-    let mut warnings = vec![];
-    if let Some(scopes) = scopes {
-        let missing = missing_scopes(&scopes);
-        if !missing.is_empty() {
-            warnings.push(format!(
-                "This token is missing scopes the app needs ({}). Create a new token with them in RomM → Profile → Client API Tokens.",
-                missing.join(", ")
-            ));
-        }
-    }
-    Ok(status_of(&st, warnings).await)
+    Ok(status_of(&st, connected.scope_warning().into_iter().collect()).await)
 }
 
 #[tauri::command]

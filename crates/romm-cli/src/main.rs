@@ -5,9 +5,10 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use romm_core::api::{missing_scopes, RommClient};
+use romm_core::api::RommClient;
 use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::detect::{self, Installed};
+use romm_core::login::{self, Credentials};
 use romm_core::report::TransferReport;
 use romm_core::resolve::Resolver;
 use romm_core::session::SyncCtx;
@@ -323,28 +324,16 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Xbox { .. } => unreachable!("handled before the app config is loaded"),
         Cmd::Login { server, code, token, insecure, device_name } => {
-            let (raw, scopes) = match (code, token) {
-                (Some(code), None) => {
-                    let t = RommClient::exchange_pair_code(&server, &code, insecure)
-                        .await
-                        .context("pairing failed (codes are single-use and expire after 5 minutes)")?;
-                    (t.raw_token, Some(t.scopes))
-                }
-                (None, Some(t)) => (t, None),
-                _ => bail!("give either --code or --token"),
-            };
-            let client = RommClient::new(&server, Some(raw.clone()), insecure)?;
-            client.platforms().await.context("the token was accepted but listing platforms failed")?;
+            let credentials = Credentials::from_inputs(code.as_deref(), token.as_deref())?;
+            let connected = login::connect(&server, credentials, insecure).await?;
+            let client = &connected.client;
             app.cfg.set_server(client.base_url(), insecure, device_name);
-            store_token(&app.dirs, &raw)?;
+            store_token(&app.dirs, &connected.token)?;
             app.cfg.save(&app.dirs)?;
-            if let Some(scopes) = scopes {
-                let missing = missing_scopes(&scopes);
-                if !missing.is_empty() {
-                    eprintln!("warning: this token lacks scopes romm needs: {missing:?}\n         create a new token with them in RomM → Profile → Client API Tokens");
-                }
+            if let Some(w) = connected.scope_warning() {
+                eprintln!("warning: {w}");
             }
-            let id = app.device_id(&client).await?;
+            let id = app.device_id(client).await?;
             println!("Connected to {} (device {id})", client.base_url());
         }
 

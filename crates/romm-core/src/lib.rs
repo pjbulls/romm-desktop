@@ -10,6 +10,7 @@ pub mod emu_settings;
 pub mod error;
 pub mod launch;
 pub mod library;
+pub mod login;
 pub mod paths;
 pub mod platforms;
 pub mod profiles;

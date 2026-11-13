@@ -26,6 +26,12 @@ pub fn missing_scopes(granted: &[String]) -> Vec<&'static str> {
     REQUIRED_SCOPES.iter().copied().filter(|needed| !granted.iter().any(|g| g == needed)).collect()
 }
 
+/// A pairing code as RomM wants it: letters and digits, upper case. RomM shows it as `1234-5678`
+/// and people paste it with the dash or with spaces.
+pub fn normalize_pair_code(input: &str) -> String {
+    input.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_uppercase()
+}
+
 /// How long to wait before each retry of a call that is safe to repeat (see `send_retrying`).
 const RETRY_WAITS_MS: [u64; 2] = [150, 450];
 
@@ -196,7 +202,7 @@ impl RommClient {
         let resp = client
             .http
             .post(client.url(&["client-tokens", "exchange"])?)
-            .json(&serde_json::json!({ "code": code.trim() }))
+            .json(&serde_json::json!({ "code": normalize_pair_code(code) }))
             .send()
             .await?;
         Ok(Self::check(resp).await?.json().await?)
@@ -558,6 +564,13 @@ impl RommClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pair_code_is_letters_and_digits_in_upper_case() {
+        assert_eq!(normalize_pair_code(" 1234-5678 "), "12345678");
+        assert_eq!(normalize_pair_code("ab cd"), "ABCD");
+        assert_eq!(normalize_pair_code("12345678"), "12345678");
+    }
 
     fn granted(scopes: &[&str]) -> Vec<String> {
         scopes.iter().map(|s| s.to_string()).collect()
