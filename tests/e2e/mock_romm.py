@@ -9,6 +9,17 @@ TOKEN = 'rmm_e2etoken'
 SCOPES = ["me.read","platforms.read","roms.read","firmware.read","assets.read","assets.write","devices.read","devices.write"]
 BIOS = b"FAKE-PS1-BIOS-IMAGE"
 
+def rom_header(rom_id):
+    """The first bytes of a disc. The app reads a GameCube's id from offset 0 (GALE01 is Super Smash Bros. Melee)
+    and tells a GameCube from a Wii by the magic at 0x1C; without them it can't tell which game's save to cut out
+    of a memory card. Only Melee is ever played here, so only it gets one."""
+    if rom_id != 7:
+        return b''
+    h = bytearray(0x20)
+    h[0:6] = b'GALE01'
+    h[0x1C:0x20] = (0xC2339F3D).to_bytes(4, 'big')
+    return bytes(h)
+
 def mkrom(i, name, plat, slug, fs_stem=None):
     fs = (fs_stem or name.replace(':', '')) + {'ngc': '.iso', 'psx': '.cue', 'psp': '.iso'}[slug]
     return dict(id=i, name=name, fs_name=fs, fs_name_no_ext=fs.rsplit('.', 1)[0], fs_size_bytes=2_000_000, platform_id=plat,
@@ -125,7 +136,9 @@ class H(BaseHTTPRequestHandler):
         m = re.match(r'/api/roms/(\d+)/content/', p)
         if m:   # paced so the progress bar is visible
             total = 2_000_000; self.send_response(200); self.send_header('Content-Length', str(total)); self.end_headers()
-            for _ in range(20): self.wfile.write(b'R' * (total // 20)); self.wfile.flush(); time.sleep(0.05)
+            chunk, head = total // 20, rom_header(int(m.group(1)))
+            for n in range(20):
+                self.wfile.write((head + b'R' * (chunk - len(head))) if n == 0 else b'R' * chunk); self.wfile.flush(); time.sleep(0.05)
             return
         if p.startswith('/assets/') and '/retroachievements/badges/' in p: return self.send(200, raw=cover_png(7), ctype='image/png')
         if p.startswith('/assets/'):

@@ -11,7 +11,8 @@
 //!   when it has the image open read-write (measured against a real QEMU process; read-only opens
 //!   take 100, 201 and 203). Byte 101 is its permission to write, so a conflicting lock there means
 //!   someone can write. Taking the same locks makes QEMU itself refuse to open the image, which is
-//!   what `qemu-img` does for a running VM.
+//!   what `qemu-img` does for a running VM. A "someone has it" answer is asked again for a moment
+//!   before it is believed: a process being spawned briefly holds a copy of every open file.
 //! * **Elsewhere** nothing is detected and nothing is held; the in-use flag in the image header is
 //!   all that is left.
 //!
@@ -61,6 +62,29 @@ mod sys {
         Ok(fl.l_type as libc::c_int != libc::F_UNLCK)
     }
 
+    /// How many times, and how far apart, a "yes" is asked again before it is believed.
+    const SETTLE_ASKS: u32 = 12;
+    const SETTLE_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// [`another_writer`], but a "yes" is believed only after asking again for about a tenth of a second.
+    ///
+    /// These locks belong to an open file description, and a process being spawned (an emulator,
+    /// `qemu-img`) holds a copy of every file this one has open from the fork until it execs. Spawning
+    /// on one thread while another has just let go of the image therefore makes it look held, for a few
+    /// milliseconds, by something that does not have it. A program that really has the image open (xemu)
+    /// keeps its locks for as long as it runs, so asking again tells the two apart. "No" is answered at once.
+    pub fn another_writer_settled(f: &File) -> io::Result<bool> {
+        for ask in 1..=SETTLE_ASKS {
+            if !another_writer(f)? {
+                return Ok(false);
+            }
+            if ask < SETTLE_ASKS {
+                std::thread::sleep(SETTLE_PAUSE);
+            }
+        }
+        Ok(true)
+    }
+
     /// Takes the locks a read-write QEMU takes, for as long as `f` stays open. `Ok(false)` if
     /// someone else's locks forbid it; `Ok(true)` if it is held, or if this filesystem has no such
     /// locks (some network shares), where QEMU does without them too.
@@ -97,7 +121,7 @@ pub fn in_use(path: &Path) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn in_use_here(path: &Path) -> Option<String> {
     let f = File::open(path).ok()?;
-    match sys::another_writer(&f) {
+    match sys::another_writer_settled(&f) {
         Ok(true) => Some("another program has it open".into()),
         _ => None,
     }
@@ -141,7 +165,7 @@ fn open_exclusive_here(path: &Path) -> XboxResult<File> {
 fn open_exclusive_here(path: &Path) -> XboxResult<File> {
     let f = OpenOptions::new().read(true).write(true).open(path)?;
     // A filesystem that cannot answer is treated as having no writer, as QEMU would.
-    if sys::another_writer(&f).unwrap_or(false) || !sys::hold(&f).map_err(XboxError::Io)? {
+    if sys::another_writer_settled(&f).unwrap_or(false) || !sys::hold(&f).map_err(XboxError::Io)? {
         return Err(in_use_error(path, "close it and try again"));
     }
     Ok(f)
@@ -150,4 +174,79 @@ fn open_exclusive_here(path: &Path) -> XboxResult<File> {
 #[cfg(not(any(target_os = "linux", windows)))]
 fn open_exclusive_here(path: &Path) -> XboxResult<File> {
     Ok(OpenOptions::new().read(true).write(true).open(path)?)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn image() -> (tempfile::TempDir, std::path::PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("hdd.qcow2");
+        std::fs::write(&p, vec![0u8; 4096]).unwrap();
+        (t, p)
+    }
+
+    /// A process being spawned holds a copy of every file descriptor this one has open, from the fork
+    /// until it execs. An open-file-description lock is only released when the last copy is closed, so
+    /// in that gap an image this thread has just let go of still looks held by someone else. Nothing
+    /// else has it; asking again a moment later says so.
+    ///
+    /// The gap is made on purpose and long enough to be sure of: the child says it exists, then
+    /// lingers 40 ms before it execs.
+    #[test]
+    fn an_image_just_let_go_of_is_not_in_use_because_a_child_is_still_forking() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let (_dir, path) = image();
+        let held = open_exclusive(&path).expect("nobody has it");
+
+        let (mut told, tell) = std::io::pipe().unwrap();
+        let tell_fd = tell.as_raw_fd();
+        let spawner = std::thread::spawn(move || {
+            let _keep_the_pipe_open = tell;
+            let mut child = std::process::Command::new("true");
+            // SAFETY: between fork and exec only `write` and `usleep` are called, both async-signal-safe.
+            unsafe {
+                child.pre_exec(move || {
+                    libc::write(tell_fd, b"x".as_ptr().cast(), 1);
+                    libc::usleep(40_000);
+                    Ok(())
+                });
+            }
+            child.status().unwrap();
+        });
+
+        told.read_exact(&mut [0u8]).unwrap(); // the child exists, has a copy of `held`, and has not exec'd
+        drop(held); // this side has let go; the child's copy has not
+        let next = open_exclusive(&path);
+        spawner.join().unwrap();
+
+        let next = next.map(drop);
+        assert!(next.is_ok(), "an image nobody has open was refused because a child was mid-spawn: {next:?}");
+        assert!(in_use(&path).is_none());
+    }
+
+    /// The other side: something that really has the image open is still noticed, and still refused,
+    /// after being asked a few times rather than once.
+    #[test]
+    fn an_image_somebody_really_holds_is_still_in_use_and_still_refused() {
+        let (_dir, path) = image();
+        let holder = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        assert!(sys::hold(&holder).unwrap(), "the holder takes the locks a read-write QEMU takes");
+
+        let started = Instant::now();
+        assert!(in_use(&path).is_some(), "a real holder is noticed");
+        let err = open_exclusive(&path).expect_err("a real holder is refused").to_string();
+        assert!(err.contains("open in another program"), "{err}");
+        // It asked more than once before believing that: a lower bound that does not depend on load.
+        assert!(started.elapsed() >= Duration::from_millis(100), "answered at once: {:?}", started.elapsed());
+
+        drop(holder);
+        assert!(in_use(&path).is_none(), "and once it lets go, it is free again");
+        drop(open_exclusive(&path).expect("free again"));
+    }
 }

@@ -1,7 +1,37 @@
-#!/bin/sh
-# Fake Dolphin: creates a memory card and save-state slot, as if you'd played and saved.
-DATA="$HOME/.local/share/dolphin-emu"
-mkdir -p "$DATA/GC/USA" "$DATA/StateSaves"
-sleep 1
-printf "card-written-on-%s" "${FAKE_DEVICE:-e2e}" > "$DATA/GC/USA/Card A.raw"
-printf "state-slot-1-%s" "${FAKE_DEVICE:-e2e}" > "$DATA/StateSaves/GALE01.s01"
+#!/usr/bin/env python3
+"""Fake Dolphin: writes a memory card and a save-state slot, as if you'd played and saved.
+
+The card has to be a real save for the game being played. The app cuts a game's save out of a card by the
+game's id (here GALE, Super Smash Bros. Melee), so arbitrary bytes in a made-up file are not a save at all and
+nothing would be uploaded. This is Dolphin's per-game "GCI folder" card, laid out as `gci()` is in
+crates/romm-core/tests/common/mod.rs: a 0x40-byte header, then the save's blocks of 8 KiB each.
+"""
+import os
+import struct
+import time
+
+home = os.environ["HOME"]
+device = os.environ.get("FAKE_DEVICE", "e2e")
+data = f"{home}/.local/share/dolphin-emu"
+os.makedirs(f"{data}/GC/USA/Card A", exist_ok=True)
+os.makedirs(f"{data}/StateSaves", exist_ok=True)
+time.sleep(1)
+
+BLOCKS = 1
+header = bytearray(0x40)
+header[0:4] = b"GALE"                                     # game code
+header[4:6] = b"01"                                       # maker code
+header[6] = 0xFF
+header[8:8 + len(b"melee_save")] = b"melee_save"          # file name
+header[0x28:0x2C] = struct.pack(">I", 0x12345678)         # modification time
+header[0x34] = 4
+header[0x36:0x38] = struct.pack(">H", 5)
+header[0x38:0x3A] = struct.pack(">H", BLOCKS)
+header[0x3A:0x3C] = struct.pack(">H", 0xFFFF)
+# The contents say which device wrote them, so a sync between two devices has something to tell apart.
+body = f"card-written-on-{device}".encode().ljust(BLOCKS * 0x2000, b"\0")
+with open(f"{data}/GC/USA/Card A/01-GALE-melee_save.gci", "wb") as f:
+    f.write(bytes(header) + body)
+
+with open(f"{data}/StateSaves/GALE01.s01", "w") as f:
+    f.write(f"state-slot-1-{device}")

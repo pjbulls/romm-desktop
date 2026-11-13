@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Drives the real RomM Desktop app (via WebKitWebDriver) through the main user journeys."""
-import os, sys, time, traceback
+import os, re, sys, time, traceback
 sys.stdout.reconfigure(line_buffering=True)
 from wd import WD
 
@@ -148,7 +148,8 @@ try:
     d.click(d.find("[data-testid=play]"))
     t = wait_toast("played", 40)
     shot("06-after-play")
-    check("play session reports uploaded save", "Uploaded 1 save" in t, t)
+    # Not just "Uploaded 1 save": that is also the start of "Uploaded 1 save state", so it passed with no save at all.
+    check("play session reports uploaded save", re.search(r"Uploaded 1 save(?! state)", t), t)
     check("play session reports uploaded save state", "Uploaded 1 save state" in t, t)
     log = server_log()
     check("server received the memory card bundle", "SAVE-UPLOAD slot=autosave" in log)
