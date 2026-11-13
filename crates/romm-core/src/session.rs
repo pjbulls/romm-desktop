@@ -10,7 +10,7 @@
 //! hold its database lock only during the two short sync phases, not for the hours
 //! an emulator might run. `play` composes them for the CLI.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::process::Command;
@@ -96,34 +96,38 @@ impl SyncCtx<'_> {
     }
 }
 
+/// One round of syncing with each failure turned into the message that goes with it: what the
+/// two sync phases of a session keep, whichever phase it was.
+struct Folded {
+    saves: Option<SyncReport>,
+    saves_error: Option<String>,
+    states: Option<StateReport>,
+    states_error: Option<String>,
+}
+
+impl From<GameSync> for Folded {
+    fn from(round: GameSync) -> Folded {
+        let (saves, saves_error) = match round.saves {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let (states, states_error) = match round.states {
+            Some(Ok(r)) => (Some(r), None),
+            Some(Err(e)) => (None, Some(e.to_string())),
+            None => (None, None),
+        };
+        Folded { saves, saves_error, states, states_error }
+    }
+}
+
 /// Phase 1: pull saves (and states), then snapshot the shared state folder. Failures to reach the
 /// server are recorded, not raised.
-#[allow(clippy::too_many_arguments)]
-pub async fn pre_play(
-    client: &RommClient,
-    device_id: &str,
-    state: &mut State,
-    state_path: &Path,
-    backup_dir: PathBuf,
-    rom: &LocalRom,
-    env: &EmuEnv,
-    policy: ConflictPolicy,
-    states: Option<&StateOptions>,
-) -> Result<Pre> {
-    let mut pre = Pre { pull: None, pull_error: None, state_pull: None, state_error: None, before_states: None };
-    let round = SyncCtx { client, device_id, backup_dir: &backup_dir, policy, states }.sync_game(state, rom, env, None).await;
-    match round.saves {
-        Ok(r) => pre.pull = Some(r),
-        Err(e) => pre.pull_error = Some(e.to_string()),
-    }
-    match round.states {
-        Some(Ok(r)) => pre.state_pull = Some(r),
-        Some(Err(e)) => pre.state_error = Some(e.to_string()),
-        None => {}
-    }
+pub async fn pre_play(cx: &SyncCtx<'_>, state: &mut State, state_path: &Path, rom: &LocalRom, env: &EmuEnv) -> Result<Pre> {
+    let round = Folded::from(cx.sync_game(state, rom, env, None).await);
+    let mut pre = Pre { pull: round.saves, pull_error: round.saves_error, state_pull: round.states, state_error: round.states_error, before_states: None };
     state.save(state_path)?;
 
-    if states.is_some() {
+    if cx.states.is_some() {
         let roots = env.state_watch_roots();
         if !roots.is_empty() {
             pre.before_states = Some(saves::snapshot_stat(&env.data_root, &roots)?);
@@ -144,20 +148,7 @@ pub async fn run_emulator(mut cmd: Command, emulator_name: &str) -> Result<Run> 
 }
 
 /// Phase 3: attribute changed states, then push saves, states and playtime.
-#[allow(clippy::too_many_arguments)]
-pub async fn post_play(
-    client: &RommClient,
-    device_id: &str,
-    state: &mut State,
-    state_path: &Path,
-    backup_dir: PathBuf,
-    rom: &LocalRom,
-    env: &EmuEnv,
-    policy: ConflictPolicy,
-    states: Option<&StateOptions>,
-    pre: Pre,
-    run: &Run,
-) -> Result<PlayOutcome> {
+pub async fn post_play(cx: &SyncCtx<'_>, state: &mut State, state_path: &Path, rom: &LocalRom, env: &EmuEnv, pre: Pre, run: &Run) -> Result<PlayOutcome> {
     let mut out = PlayOutcome {
         pull: pre.pull,
         pull_error: pre.pull_error,
@@ -186,35 +177,53 @@ pub async fn post_play(
         end_time: saves::iso(run.ended.max(run.started + Duration::from_secs(1))),
         duration_ms: run.elapsed.as_millis() as u64,
     };
-    let round = SyncCtx { client, device_id, backup_dir: &backup_dir, policy, states }.sync_game(state, rom, env, Some(play)).await;
-    match round.saves {
-        Ok(r) => out.push = Some(r),
-        Err(e) => out.push_error = Some(e.to_string()),
-    }
-    match round.states {
-        Some(Ok(r)) => out.state_push = Some(r),
-        Some(Err(e)) => out.state_error = Some(e.to_string()),
-        None => {}
+    let round = Folded::from(cx.sync_game(state, rom, env, Some(play)).await);
+    out.push = round.saves;
+    out.push_error = round.saves_error;
+    out.state_push = round.states;
+    // A state push that failed replaces what the pull said about states; one that went well leaves it.
+    if round.states_error.is_some() {
+        out.state_error = round.states_error;
     }
     state.save(state_path)?;
     Ok(out)
 }
 
 /// pull → run → push, for callers that can hold `state` for the whole session (the CLI).
-#[allow(clippy::too_many_arguments)]
-pub async fn play(
-    client: &RommClient,
-    device_id: &str,
-    state: &mut State,
-    state_path: &Path,
-    backup_dir: PathBuf,
-    rom: &LocalRom,
-    env: &EmuEnv,
-    cmd: Command,
-    policy: ConflictPolicy,
-    states: Option<&StateOptions>,
-) -> Result<PlayOutcome> {
-    let pre = pre_play(client, device_id, state, state_path, backup_dir.clone(), rom, env, policy, states).await?;
+/// `before_launch` runs once the pull is done, just before the emulator starts.
+pub async fn play(cx: &SyncCtx<'_>, state: &mut State, state_path: &Path, rom: &LocalRom, env: &EmuEnv, cmd: Command, before_launch: impl FnOnce()) -> Result<PlayOutcome> {
+    let pre = pre_play(cx, state, state_path, rom, env).await?;
+    before_launch();
     let run = run_emulator(cmd, &env.profile.name).await?;
-    post_play(client, device_id, state, state_path, backup_dir, rom, env, policy, states, pre, &run).await
+    post_play(cx, state, state_path, rom, env, pre, &run).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(uploaded: &str) -> SyncReport {
+        SyncReport { uploaded: vec![uploaded.into()], ..Default::default() }
+    }
+
+    #[test]
+    fn a_failure_is_folded_into_its_message_and_a_success_into_its_report() {
+        let f = Folded::from(GameSync { saves: Err(Error::msg("offline")), states: Some(Ok(report("x.state1"))) });
+        assert!(f.saves.is_none());
+        assert_eq!(f.saves_error.as_deref(), Some("offline"));
+        assert_eq!(f.states.map(|r| r.uploaded), Some(vec!["x.state1".to_string()]));
+        assert!(f.states_error.is_none());
+
+        let f = Folded::from(GameSync { saves: Ok(report("a.srm")), states: Some(Err(Error::msg("too big"))) });
+        assert_eq!(f.saves.map(|r| r.uploaded), Some(vec!["a.srm".to_string()]));
+        assert!(f.saves_error.is_none());
+        assert!(f.states.is_none());
+        assert_eq!(f.states_error.as_deref(), Some("too big"));
+    }
+
+    #[test]
+    fn states_that_were_not_synced_are_neither_a_report_nor_an_error() {
+        let f = Folded::from(GameSync { saves: Ok(SyncReport::default()), states: None });
+        assert!(f.states.is_none() && f.states_error.is_none());
+    }
 }

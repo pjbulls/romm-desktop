@@ -965,10 +965,11 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
         let (env, cmd, tuning) = (prepared.env, prepared.command, prepared.tuning);
         let backups = st.dirs.backups_dir();
         let state_file = st.dirs.state_file();
+        let cx = SyncCtx { client: &client, device_id: &device, backup_dir: &backups, policy, states: opts.as_ref() };
         let run: CmdResult<PlaySummary> = async {
             let pre = {
                 let mut db = st.db.lock().await;
-                session::pre_play(&client, &device, &mut db, &state_file, backups.clone(), &rom, &env, policy, opts.as_ref()).await.map_err(s)?
+                session::pre_play(&cx, &mut db, &state_file, &rom, &env).await.map_err(s)?
             };
             emit_job::<()>(&app, "romm://play", rom_id, "running", None, None);
             // The emulator settings chosen under Emulators & BIOS → Emulator settings, written just before it starts.
@@ -984,7 +985,7 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
             emit_job::<()>(&app, "romm://play", rom_id, "saving", None, None);
             let out = {
                 let mut db = st.db.lock().await;
-                session::post_play(&client, &device, &mut db, &state_file, backups, &rom, &env, policy, opts.as_ref(), pre, &run).await.map_err(s)?
+                session::post_play(&cx, &mut db, &state_file, &rom, &env, pre, &run).await.map_err(s)?
             };
             let mut sync = SyncSummary::default();
             let mut notes = tuning_notes;

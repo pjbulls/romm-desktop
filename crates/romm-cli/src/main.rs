@@ -450,15 +450,20 @@ async fn main() -> Result<()> {
                 .cloned()
                 .ok_or_else(|| anyhow!("game {rom_id} isn't installed, run `romm install {rom_id}`"))?;
             let prepared = app.resolver().prepare(&rom)?;
-            let (env, cmd) = (prepared.env, prepared.command);
-            // Settings chosen in the desktop app (Emulators & BIOS → Emulator settings) apply here too.
-            for note in prepared.tuning.apply(&app.dirs.emulator_config_backups()) {
-                println!("({note})");
-            }
+            let (env, cmd, tuning) = (prepared.env, prepared.command, prepared.tuning);
 
             println!("Syncing saves, then launching {} in {}…", rom.name, env.profile.name);
             let st_opts = app.state_opts(no_states);
-            let out = session::play(&c, &device, &mut state, &app.dirs.state_file(), app.dirs.backups_dir(), &rom, &env, cmd, app.policy(on_conflict), st_opts.as_ref()).await?;
+            let backups = app.dirs.backups_dir();
+            let cx = SyncCtx { client: &c, device_id: &device, backup_dir: &backups, policy: app.policy(on_conflict), states: st_opts.as_ref() };
+            // Settings chosen in the desktop app (Emulators & BIOS → Emulator settings) apply here
+            // too, written just before the emulator starts, as the app does.
+            let out = session::play(&cx, &mut state, &app.dirs.state_file(), &rom, &env, cmd, || {
+                for note in tuning.apply(&app.dirs.emulator_config_backups()) {
+                    println!("({note})");
+                }
+            })
+            .await?;
 
             if let Some(e) = &out.pull_error {
                 println!("(couldn't sync before launch — offline? {e})");

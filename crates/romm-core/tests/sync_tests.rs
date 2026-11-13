@@ -13,6 +13,7 @@ use common::*;
 use romm_core::api::RommClient;
 use romm_core::paths::{Os, PathCtx};
 use romm_core::profiles;
+use romm_core::session::SyncCtx;
 use romm_core::retroarch;
 use romm_core::route;
 use romm_core::saves;
@@ -640,9 +641,9 @@ async fn psp_play_session_uploads_exactly_the_unit_argosy_uploads() {
     let c = client(&server);
     let mut st = State::default();
     let state_path = t.path().join("state.json");
-    let out = romm_core::session::play(&c, DEVICE, &mut st, &state_path, t.path().join("bak"), &r, &env, cmd, ConflictPolicy::KeepBoth, None)
-        .await
-        .unwrap();
+    let backups = t.path().join("bak");
+    let cx = SyncCtx { client: &c, device_id: DEVICE, backup_dir: &backups, policy: ConflictPolicy::KeepBoth, states: None };
+    let out = romm_core::session::play(&cx, &mut st, &state_path, &r, &env, cmd, || {}).await.unwrap();
     assert!(out.pull_error.is_none() && out.push_error.is_none(), "{out:?}");
 
     // What went up: every folder of the game, each under its own name. No `SAVEDATA/` prefix, no
@@ -871,9 +872,9 @@ async fn offline_play_still_runs_and_the_save_is_sent_by_the_next_sync() {
     let dead = RommClient::new("http://127.0.0.1:9", Some("rmm_test".into()), false).unwrap();
     let mut st = State::default();
     let state_path = t.path().join("state.json");
-    let out = romm_core::session::play(&dead, DEVICE, &mut st, &state_path, t.path().join("bak"), &r, &env, cmd, ConflictPolicy::KeepBoth, None)
-        .await
-        .unwrap();
+    let backups = t.path().join("bak");
+    let cx = SyncCtx { client: &dead, device_id: DEVICE, backup_dir: &backups, policy: ConflictPolicy::KeepBoth, states: None };
+    let out = romm_core::session::play(&cx, &mut st, &state_path, &r, &env, cmd, || {}).await.unwrap();
     assert!(out.pull_error.is_some() && out.push_error.is_some(), "{out:?}");
     // Nothing reached the server, so nothing may be marked as synced.
     assert!(st.sigil.is_empty() && st.saves.is_empty());
@@ -960,7 +961,9 @@ async fn emulator_that_fails_to_start_is_an_error() {
     let c = client(&server);
     let mut st = State::default();
     let cmd = tokio::process::Command::new(t.path().join("does-not-exist"));
-    let err = romm_core::session::play(&c, DEVICE, &mut st, &t.path().join("s.json"), t.path().join("bak"), &rom("Kingdom Hearts", "ps2"), &env, cmd, ConflictPolicy::KeepBoth, None)
+    let backups = t.path().join("bak");
+    let cx = SyncCtx { client: &c, device_id: DEVICE, backup_dir: &backups, policy: ConflictPolicy::KeepBoth, states: None };
+    let err = romm_core::session::play(&cx, &mut st, &t.path().join("s.json"), &rom("Kingdom Hearts", "ps2"), &env, cmd, || {})
         .await
         .unwrap_err();
     assert!(err.to_string().to_lowercase().contains("launch") || err.to_string().to_lowercase().contains("start") || !err.to_string().is_empty());

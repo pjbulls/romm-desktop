@@ -333,7 +333,9 @@ async fn dolphin_session_attributes_a_new_state_file_and_uploads_it() {
     let c = client(&server);
     let mut db = State::default();
     let r = rom("Melee");
-    let out = romm_core::session::play(&c, "dev", &mut db, &t.path().join("s.json"), t.path().join("bak"), &r, &env, cmd, ConflictPolicy::KeepBoth, Some(&opts())).await.unwrap();
+    let (backups, state_opts) = (t.path().join("bak"), opts());
+    let cx = SyncCtx { client: &c, device_id: "dev", backup_dir: &backups, policy: ConflictPolicy::KeepBoth, states: Some(&state_opts) };
+    let out = romm_core::session::play(&cx, &mut db, &t.path().join("s.json"), &r, &env, cmd, || {}).await.unwrap();
 
     assert_eq!(out.changed_states, ["GALE01.s01"], "another game's existing state must not be attributed to this one");
     assert_eq!(out.state_push.as_ref().unwrap().uploaded, ["GALE01.s01"]);
