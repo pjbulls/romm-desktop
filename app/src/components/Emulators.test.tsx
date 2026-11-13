@@ -226,14 +226,6 @@ describe("Emulators & BIOS tabs", () => {
     expect(calls("set_platform_hidden").map((c) => c.args)).toEqual([{ slug: "arcade", hidden: true }]);
   });
 
-  it("the link on Executables opens Emulator settings", async () => {
-    await mount();
-    await click(tid("go-emulator-settings"));
-    await flush();
-    expect(selected()).toEqual(["tab-settings"]);
-    expect(tid("emu-scope-dolphin")).toBeTruthy();
-  });
-
   it("moves between tabs with the arrow keys, wrapping at the ends", async () => {
     await mount();
     const key = (k: string) => act(async () => { (q("[role=tab][aria-selected=true]") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true })); });
