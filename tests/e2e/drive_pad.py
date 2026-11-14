@@ -67,6 +67,16 @@ def selected_tab(): return js("return document.querySelector('[role=tab][aria-se
 def card_ids(): return js("return Array.from(document.querySelectorAll('[data-testid=game-card]')).map(c => Number(c.dataset.gameId))")
 def toasts(): return js("return Array.from(document.querySelectorAll('.toast')).map(t => t.innerText).join(' | ')")
 def wait_toast(sub, t=40): return d.wait(lambda: sub in toasts() and toasts(), t, f"toast {sub!r}")
+def reach_platform_selector():
+    """Each row of Emulator mapping is a platform's visibility checkbox with its dropdown beside it, so Down and Up
+    only walk the checkboxes; a dropdown is reached by getting onto a row and pressing Right."""
+    nav_either(lambda f: f["type"] == "checkbox" or f["tag"] == "SELECT", 45, "a platform row")
+    if focused()["tag"] != "SELECT":
+        press("right")
+    f = focused()
+    if f is None or f["tag"] != "SELECT":
+        raise TimeoutError(f"Right from a platform's checkbox did not reach its dropdown; focus {f}")
+
 def nav_either(pred, limit=40, what="target"):
     """Reach an element by pressing Down then Up, checking at every step, wherever focus happened to land."""
     for key in ("down", "up"):
@@ -227,10 +237,10 @@ try:
     d.wait_css("select.choice-select", 8)
     check("RB twice reaches Emulator mapping, where the platform dropdowns are", selected_tab() == "tab-mapping" and "Emulators" in sidebar_active(), f"{selected_tab()} / {sidebar_active()}")
     check("and the hints call it a tab", "Tab" in hints(), hints())
-    nav_either(lambda f: f["tag"] == "SELECT", 45, "a platform selector")
+    reach_platform_selector()
     for _ in range(8): press("down")      # past the last control on the page
     check("Down at the end of a page stays on the page instead of jumping into the menu", js("return !document.activeElement.closest('.sidebar')"), str(focused()))
-    nav_either(lambda f: f["tag"] == "SELECT", 45, "a platform selector")
+    reach_platform_selector()
     sel_before = js("return document.activeElement.value")
     press("right")
     sel_after = js("return document.activeElement.value")
