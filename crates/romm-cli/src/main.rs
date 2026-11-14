@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use romm_core::api::RommClient;
 use romm_core::config::{register_device, store_token, AppDirs, Config};
-use romm_core::detect::{self, Installed};
+use romm_core::detect::Installed;
 use romm_core::login::{self, Credentials};
 use romm_core::report::TransferReport;
 use romm_core::resolve::Resolver;
@@ -15,7 +15,7 @@ use romm_core::session::SyncCtx;
 use romm_core::state::State;
 use romm_core::sync::{ConflictPolicy, EmuEnv};
 use romm_core::states::{self, StateOptions, StateStatus};
-use romm_core::{library, profiles, retroarch, session, unit, xbox};
+use romm_core::{library, platforms, profiles, session, unit, xbox};
 
 #[derive(Parser)]
 #[command(name = "romm", version, about = "Sync ROMs, BIOS files and saves with RomM and launch them in your emulators")]
@@ -395,11 +395,7 @@ async fn main() -> Result<()> {
             for p in profiles::builtin() {
                 match app.emu_env(&p.id) {
                     Ok((env, inst)) => {
-                        let how = match &inst.kind {
-                            detect::InstallKind::Native(x) => x.display().to_string(),
-                            detect::InstallKind::Flatpak(id) => format!("flatpak {id}"),
-                        };
-                        println!("✓ {:<12} {how}\n    data: {}", p.name, env.data_root.display());
+                        println!("✓ {:<12} {}\n    data: {}", p.name, inst.describe(), env.data_root.display());
                         if let Some(l) = &env.retroarch {
                             if l.sort_saves_by_core || l.sort_saves_by_content {
                                 println!("    note: RetroArch sorts saves into subfolders");
@@ -408,13 +404,11 @@ async fn main() -> Result<()> {
                     }
                     Err(_) => println!("✗ {:<12} not found, set it with `romm emulator-set {} <path>`", p.name, p.id),
                 }
-                let claims: Vec<_> = p.platforms.iter().map(String::as_str).collect();
+                let claims = platforms::handled_by(&p);
                 if !claims.is_empty() {
                     println!("    plays: {}", claims.join(", "));
                 }
             }
-            let cores: Vec<_> = retroarch::supported_slugs().collect();
-            println!("RetroArch default platforms: {}", cores.join(", "));
         }
 
         Cmd::EmulatorSet { id, path } => {

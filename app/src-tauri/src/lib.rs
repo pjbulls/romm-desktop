@@ -12,6 +12,7 @@ use romm_core::achievements::{self, AchievementsView};
 use romm_core::api::types::{Me, Platform, Rom};
 use romm_core::api::RommClient;
 use romm_core::config::{register_device, store_token, AppDirs, Config};
+use romm_core::detect::Installed;
 use romm_core::diagnostics::{self, LogFile, Watchdog};
 use romm_core::emu_settings;
 use romm_core::library::{self, BiosStatus};
@@ -1123,15 +1124,8 @@ async fn emulators(st: TauriState<'_, AppState>) -> CmdResult<Vec<EmulatorDto>> 
                 Ok((env, inst)) => (Some(inst), None, Some(env.data_root.display().to_string())),
                 Err(e) => (None, Some(e.to_string()), None),
             };
-            let path = inst.as_ref().map(|i| match &i.kind {
-                romm_core::detect::InstallKind::Native(x) => x.display().to_string(),
-                romm_core::detect::InstallKind::Flatpak(id) => format!("flatpak run {id}"),
-            });
-            let platforms = if p.id == profiles::RETROARCH {
-                retroarch::supported_slugs().map(String::from).collect()
-            } else {
-                p.platforms.clone()
-            };
+            let path = inst.as_ref().map(Installed::describe);
+            let platforms = plat::handled_by(&p);
             EmulatorDto {
                 override_path: cfg.emulator_paths.get(&p.id).map(|x| x.display().to_string()),
                 flatpak: inst.as_ref().is_some_and(|i| i.is_flatpak()),

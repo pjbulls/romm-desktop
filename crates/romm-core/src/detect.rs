@@ -23,6 +23,13 @@ impl Installed {
     pub fn is_flatpak(&self) -> bool {
         matches!(self.kind, InstallKind::Flatpak(_))
     }
+    /// How the emulator is started, in words: the path of its program, or the flatpak it is run as.
+    pub fn describe(&self) -> String {
+        match &self.kind {
+            InstallKind::Native(p) => p.display().to_string(),
+            InstallKind::Flatpak(id) => format!("flatpak run {id}"),
+        }
+    }
     /// Directory containing the executable (for portable-mode data dirs).
     pub fn exe_dir(&self) -> Option<PathBuf> {
         match &self.kind {
@@ -103,6 +110,14 @@ pub fn detect(
 mod tests {
     use super::*;
     use crate::profiles;
+
+    #[test]
+    fn an_install_is_described_as_the_path_to_run_or_the_flatpak_to_run() {
+        let native = Installed { profile_id: "dolphin".into(), kind: InstallKind::Native(PathBuf::from("/opt/dolphin/dolphin-emu")) };
+        assert_eq!(native.describe(), "/opt/dolphin/dolphin-emu");
+        let flatpak = Installed { profile_id: "dolphin".into(), kind: InstallKind::Flatpak("org.DolphinEmu.dolphin-emu".into()) };
+        assert_eq!(flatpak.describe(), "flatpak run org.DolphinEmu.dolphin-emu");
+    }
 
     fn touch(p: &Path) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();

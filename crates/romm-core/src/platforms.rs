@@ -66,6 +66,15 @@ pub fn choices_for(slug: &str) -> Vec<Choice> {
     out
 }
 
+/// The platforms `profile` plays: the ones it lists, or for RetroArch every platform it has a core for.
+pub fn handled_by(profile: &profiles::Profile) -> Vec<String> {
+    if profile.id == RETROARCH {
+        retroarch::supported_slugs().map(String::from).collect()
+    } else {
+        profile.platforms.clone()
+    }
+}
+
 /// Can this emulator play this platform at all?
 pub fn can_play(slug: &str, emulator: &str) -> bool {
     if emulator == RETROARCH {
@@ -154,6 +163,18 @@ pub fn set_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_emulator_handles_the_platforms_it_lists_and_retroarch_every_one_it_has_a_core_for() {
+        let dolphin = profiles::get("dolphin").unwrap();
+        assert_eq!(handled_by(&dolphin), dolphin.platforms);
+        assert!(!handled_by(&dolphin).is_empty());
+
+        let ra = profiles::get(RETROARCH).unwrap();
+        let slugs = handled_by(&ra);
+        assert!(slugs.iter().any(|s| s == "snes"), "{slugs:?}");
+        assert!(slugs.iter().all(|s| can_play(s, RETROARCH)), "{slugs:?}");
+    }
 
     #[test]
     fn maps_requested_consoles() {
