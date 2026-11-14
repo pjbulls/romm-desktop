@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { sameHint, type HintCtx } from "./hintCtx";
 import { OnScreenKeyboard } from "../components/OnScreenKeyboard";
 import { useStore } from "../store";
 import { initialState, mergeSnapshots, step, type Action, type Snapshot } from "./input";
@@ -148,14 +149,6 @@ function readPads(): { id: string; snap: Snapshot }[] {
 }
 
 // ---------------------------------------------------------------------------------- hints
-
-interface HintCtx {
-  kind: "osk" | "dialog" | "card" | "text" | "generic";
-  primary: "" | "Play" | "Install";
-  toasts: boolean;
-  /** The page has tabs, so LB/RB switch tab rather than platform. */
-  tabs: boolean;
-}
 
 function hintContext(osk: boolean): HintCtx {
   const toasts = document.querySelectorAll(".toast").length > 0;
@@ -357,7 +350,7 @@ export function GamepadProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(t);
       t = window.setTimeout(() => {
         const h = hintContext(!!oskRef.current);
-        setHint((p) => (p.kind === h.kind && p.primary === h.primary && p.toasts === h.toasts ? p : h));
+        setHint((p) => (sameHint(p, h) ? p : h));
       }, 40);
     };
     document.addEventListener("focusin", refresh);
@@ -432,7 +425,7 @@ export function GamepadProvider({ children }: { children: ReactNode }) {
         lastMaintain = now;
         maintain();
         const h = hintContext(!!oskRef.current);
-        setHint((p) => (p.kind === h.kind && p.primary === h.primary && p.toasts === h.toasts ? p : h));
+        setHint((p) => (sameHint(p, h) ? p : h));
       }
     };
 
