@@ -37,6 +37,40 @@ pub struct PlayOutcome {
     pub changed_states: Vec<String>,
 }
 
+impl PlayOutcome {
+    /// What to tell the player when the sync before launch failed.
+    pub fn pull_note(&self) -> Option<String> {
+        self.pull_error.as_ref().map(|e| format!("Couldn't sync before launch (offline?): {e}"))
+    }
+
+    /// What to tell the player when the saves couldn't be uploaded afterwards.
+    pub fn push_note(&self) -> Option<String> {
+        self.push_error.as_ref().map(|e| format!("Couldn't upload saves: {e}. They're tracked and will upload on the next sync."))
+    }
+
+    /// What to tell the player when the save states couldn't be synced.
+    pub fn states_note(&self) -> Option<String> {
+        self.state_error.as_ref().map(|e| format!("Save states weren't synced: {e}"))
+    }
+
+    /// Every note for the player, in the order things happened.
+    pub fn notes(&self) -> Vec<String> {
+        [self.pull_note(), self.push_note(), self.states_note()].into_iter().flatten().collect()
+    }
+
+    /// What the syncs did, the saves and the states each totalled over the pull and the push.
+    pub fn reports(&self) -> (SyncReport, StateReport) {
+        let (mut saves, mut states) = (SyncReport::default(), StateReport::default());
+        for r in [&self.pull, &self.push].into_iter().flatten() {
+            saves.merge(r.clone());
+        }
+        for r in [&self.state_pull, &self.state_push].into_iter().flatten() {
+            states.merge(r.clone());
+        }
+        (saves, states)
+    }
+}
+
 /// Everything `pre_play` learned, handed to `post_play`.
 pub struct Pre {
     pub pull: Option<SyncReport>,
@@ -201,6 +235,46 @@ pub async fn play(cx: &SyncCtx<'_>, state: &mut State, state_path: &Path, rom: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::TransferReport;
+
+    fn outcome() -> PlayOutcome {
+        PlayOutcome {
+            pull: None,
+            pull_error: None,
+            push: None,
+            push_error: None,
+            state_pull: None,
+            state_push: None,
+            state_error: None,
+            exit_code: Some(0),
+            elapsed: Duration::from_secs(5),
+            changed_states: vec![],
+        }
+    }
+
+    #[test]
+    fn a_session_that_went_well_has_nothing_to_tell_the_player() {
+        assert!(outcome().notes().is_empty());
+    }
+
+    #[test]
+    fn each_failure_has_a_note_and_the_notes_come_in_the_order_things_happened() {
+        let out = PlayOutcome { pull_error: Some("no route".into()), push_error: Some("timed out".into()), state_error: Some("too big".into()), ..outcome() };
+        let notes = out.notes();
+        assert_eq!(notes.len(), 3);
+        assert!(notes[0].starts_with("Couldn't sync before launch") && notes[0].ends_with("no route"), "{notes:?}");
+        assert!(notes[1].starts_with("Couldn't upload saves: timed out"), "{notes:?}");
+        assert!(notes[2].starts_with("Save states weren't synced: too big"), "{notes:?}");
+    }
+
+    #[test]
+    fn the_pull_and_the_push_are_totalled_per_kind() {
+        let up = |n: &str| TransferReport { uploaded: vec![n.into()], ..Default::default() };
+        let out = PlayOutcome { pull: Some(up("a.srm")), push: Some(up("b.srm")), state_push: Some(up("c.state1")), ..outcome() };
+        let (saves, states) = out.reports();
+        assert_eq!(saves.uploaded, ["a.srm", "b.srm"]);
+        assert_eq!(states.uploaded, ["c.state1"]);
+    }
 
     fn report(uploaded: &str) -> SyncReport {
         SyncReport { uploaded: vec![uploaded.into()], ..Default::default() }

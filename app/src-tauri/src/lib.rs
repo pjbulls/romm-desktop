@@ -966,24 +966,10 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
                 let mut db = st.db.lock().await;
                 session::post_play(&cx, &mut db, &state_file, &rom, &env, pre, &run).await.map_err(s)?
             };
-            let mut sync = SyncSummary::default();
+            let (saves, states) = out.reports();
             let mut notes = tuning_notes;
-            for r in [&out.pull, &out.push].into_iter().flatten() {
-                sync.add_saves(r);
-            }
-            for r in [&out.state_pull, &out.state_push].into_iter().flatten() {
-                sync.add_states(r);
-            }
-            if let Some(e) = &out.pull_error {
-                notes.push(format!("Couldn't sync before launch (offline?): {e}"));
-            }
-            if let Some(e) = &out.push_error {
-                notes.push(format!("Couldn't upload saves: {e}. They're tracked and will upload on the next sync."));
-            }
-            if let Some(e) = &out.state_error {
-                notes.push(format!("Save states weren't synced: {e}"));
-            }
-            Ok(PlaySummary { played_secs: out.elapsed.as_secs(), exit_code: out.exit_code, notes, sync })
+            notes.extend(out.notes());
+            Ok(PlaySummary { played_secs: out.elapsed.as_secs(), exit_code: out.exit_code, notes, sync: SyncSummary::of(&saves, &states) })
         }
         .await;
         match run {
@@ -995,7 +981,7 @@ async fn play_game(app: AppHandle, st: TauriState<'_, AppState>, rom_id: i64) ->
 }
 
 async fn sync_one(st: &AppState, client: &RommClient, device: &str, rom: &LocalRom, cfg: &Config, opts: Option<&StateOptions>) -> CmdResult<(SyncReport, StateReport)> {
-    let (env, _) = Resolver::new(cfg).env_for_platform(&rom.platform_slug).map_err(s)?;
+    let env = Resolver::new(cfg).env_for_sync(&rom.platform_slug).map_err(s)?;
     let mut db = st.db.lock().await;
     let backups = st.dirs.backups_dir();
     let round = SyncCtx { client, device_id: device, backup_dir: &backups, policy: cfg.conflict_policy, states: opts }.sync_game(&mut db, rom, &env, None).await;
@@ -1093,13 +1079,7 @@ async fn game_details(st: TauriState<'_, AppState>, rom_id: i64, platform_slug: 
         saves = saves_overview(env, rom, &db).map_err(s)?;
         if states_enabled {
             let client = st.client.read().await.clone();
-            match states::overview(client.as_ref(), &db, rom, env).await {
-                Ok(v) => states_v = v,
-                Err(e) => {
-                    states_error = Some(e.to_string());
-                    states_v = states::overview(None, &db, rom, env).await.map_err(s)?;
-                }
-            }
+            (states_v, states_error) = states::overview_or_local(client.as_ref(), &db, rom, env).await.map_err(s)?;
         }
     }
     Ok(DetailsDto {
@@ -1186,23 +1166,9 @@ async fn emulation_schema(st: TauriState<'_, AppState>) -> CmdResult<Vec<Emulati
 
 #[tauri::command]
 async fn set_emulator_path(st: TauriState<'_, AppState>, id: String, path: Option<String>) -> CmdResult<()> {
-    if profiles::get(&id).is_none() {
-        return Err(format!("unknown emulator '{id}'"));
-    }
-    if let Some(p) = &path {
-        if !PathBuf::from(p).is_file() {
-            return Err(format!("{p} is not a file"));
-        }
-    }
-    st.update_cfg(|c| match path {
-        Some(p) => {
-            c.emulator_paths.insert(id, PathBuf::from(p));
-        }
-        None => {
-            c.emulator_paths.remove(&id);
-        }
-    })
-    .await
+    let mut cfg = st.cfg.write().await;
+    cfg.set_emulator_path(&id, path.map(PathBuf::from)).map_err(s)?;
+    cfg.save(&st.dirs).map_err(s)
 }
 
 /// `choice` is a `Choice::value()`: `dolphin`, `retroarch:gambatte`, or None/"" for Automatic.

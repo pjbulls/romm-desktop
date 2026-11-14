@@ -80,6 +80,28 @@ impl Config {
         self.device_id = None;
     }
 
+    /// Chooses the program that runs `emulator` (a profile id), or goes back to finding it by
+    /// itself when `path` is None. An unknown emulator or a path that isn't a file is refused and
+    /// nothing changes. The caller saves the configuration.
+    pub fn set_emulator_path(&mut self, emulator: &str, path: Option<PathBuf>) -> Result<()> {
+        if crate::profiles::get(emulator).is_none() {
+            let known: Vec<String> = crate::profiles::builtin().into_iter().map(|p| p.id).collect();
+            return Err(Error::msg(format!("unknown emulator '{emulator}' (known: {})", known.join(", "))));
+        }
+        match path {
+            Some(path) => {
+                if !path.is_file() {
+                    return Err(Error::msg(format!("{} is not a file", path.display())));
+                }
+                self.emulator_paths.insert(emulator.to_string(), path);
+            }
+            None => {
+                self.emulator_paths.remove(emulator);
+            }
+        }
+        Ok(())
+    }
+
     /// A client for the server and token saved at login. The errors say what is missing and leave
     /// it to the caller to say how to log in.
     pub fn client(&self, dirs: &AppDirs) -> Result<RommClient> {
@@ -201,6 +223,26 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_emulator_path_is_kept_only_for_a_known_emulator_and_a_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("dolphin-emu");
+        std::fs::write(&exe, b"").unwrap();
+        let mut c = Config::default();
+
+        c.set_emulator_path("dolphin", Some(exe.clone())).unwrap();
+        assert_eq!(c.emulator_paths.get("dolphin"), Some(&exe));
+
+        let err = c.set_emulator_path("nope", Some(exe.clone())).unwrap_err().to_string();
+        assert!(err.starts_with("unknown emulator 'nope' (known: ") && err.contains("dolphin"), "{err}");
+        let err = c.set_emulator_path("dolphin", Some(dir.path().join("missing"))).unwrap_err().to_string();
+        assert!(err.ends_with("is not a file"), "{err}");
+        assert_eq!(c.emulator_paths.get("dolphin"), Some(&exe), "a refused change leaves what was there");
+
+        c.set_emulator_path("dolphin", None).unwrap();
+        assert!(c.emulator_paths.is_empty(), "None goes back to detection");
+    }
 
     fn dirs_in(t: &tempfile::TempDir) -> AppDirs {
         AppDirs { config_dir: t.path().join("c"), data_dir: t.path().join("d") }

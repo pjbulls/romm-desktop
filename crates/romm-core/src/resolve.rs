@@ -17,6 +17,25 @@ use crate::state::LocalRom;
 use crate::sync::EmuEnv;
 use crate::platforms;
 
+/// Why a game can't be synced on this machine. The two are kept apart because a caller syncing
+/// everything has different things to say about them: with no emulator set for a platform there is
+/// nothing here to keep its saves, which is not worth a word; an emulator that is set but can't be
+/// used is a problem the user will want to hear about.
+#[derive(Debug)]
+pub enum Unsyncable {
+    /// No emulator is set for the game's platform.
+    NoEmulator(String),
+    /// One is set, but it isn't installed or its data folder can't be worked out.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for Unsyncable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Unsyncable::NoEmulator(why) | Unsyncable::Unavailable(why)) = self;
+        f.write_str(why)
+    }
+}
+
 pub struct Resolver<'a> {
     pub cfg: &'a Config,
     pub os: Os,
@@ -84,6 +103,12 @@ impl<'a> Resolver<'a> {
         Ok((env, installed))
     }
 
+    /// The emulator environment for syncing a game on `slug`, or why it can't be synced here.
+    pub fn env_for_sync(&self, slug: &str) -> std::result::Result<EmuEnv, Unsyncable> {
+        self.emulator_for(slug).map_err(|e| Unsyncable::NoEmulator(e.to_string()))?;
+        self.env_for_platform(slug).map(|(env, _)| env).map_err(|e| Unsyncable::Unavailable(e.to_string()))
+    }
+
     /// Everything needed to launch an installed game.
     pub fn prepare(&self, rom: &LocalRom) -> Result<Prepared> {
         let emu_id = self.emulator_for(&rom.platform_slug)?;
@@ -118,6 +143,37 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolver<'a>(cfg: &'a Config, home: &std::path::Path) -> Resolver<'a> {
+        Resolver { cfg, os: Os::Linux, pctx: PathCtx { home: Some(home.into()), xdg_data: Some(home.join("share")), xdg_config: Some(home.join("cfg")), ..Default::default() } }
+    }
+
+    #[test]
+    fn a_game_can_be_synced_when_its_emulator_is_there() {
+        let t = tempfile::tempdir().unwrap();
+        let exe = t.path().join("dolphin-emu");
+        std::fs::write(&exe, "").unwrap();
+        let mut cfg = Config::default();
+        cfg.emulator_paths.insert("dolphin".into(), exe);
+        let env = resolver(&cfg, t.path()).env_for_sync("ngc").unwrap();
+        assert_eq!(env.profile.id, "dolphin");
+    }
+
+    #[test]
+    fn a_platform_with_no_emulator_and_an_emulator_that_is_missing_are_told_apart() {
+        let t = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        let r = resolver(&cfg, t.path());
+
+        let none = r.env_for_sync("no-such-platform").unwrap_err();
+        assert!(matches!(none, Unsyncable::NoEmulator(_)), "{none:?}");
+        assert!(none.to_string().contains("no-such-platform"), "{none}");
+
+        // Xenia has no fixed install place on Linux, so with no path chosen it isn't found.
+        let missing = r.env_for_sync("xbox360").unwrap_err();
+        assert!(matches!(missing, Unsyncable::Unavailable(_)), "{missing:?}");
+        assert!(missing.to_string().contains("was not found"), "{missing}");
+    }
 
     #[test]
     fn prepare_builds_a_command_for_an_overridden_emulator() {

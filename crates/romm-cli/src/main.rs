@@ -10,7 +10,7 @@ use romm_core::config::{register_device, store_token, AppDirs, Config};
 use romm_core::detect::Installed;
 use romm_core::login::{self, Credentials};
 use romm_core::report::TransferReport;
-use romm_core::resolve::Resolver;
+use romm_core::resolve::{Resolver, Unsyncable};
 use romm_core::session::SyncCtx;
 use romm_core::state::State;
 use romm_core::sync::{ConflictPolicy, EmuEnv};
@@ -194,10 +194,6 @@ impl App {
 
     fn policy(&self, flag: Option<OnConflict>) -> ConflictPolicy {
         flag.map(Into::into).unwrap_or(self.cfg.conflict_policy)
-    }
-
-    fn emulator_for(&self, slug: &str) -> Result<String> {
-        Ok(self.resolver().emulator_for(slug)?)
     }
 }
 
@@ -412,13 +408,7 @@ async fn main() -> Result<()> {
         }
 
         Cmd::EmulatorSet { id, path } => {
-            if profiles::get(&id).is_none() {
-                bail!("unknown emulator '{id}' (known: {})", profiles::builtin().iter().map(|p| p.id.clone()).collect::<Vec<_>>().join(", "));
-            }
-            if !path.is_file() {
-                bail!("{} is not a file", path.display());
-            }
-            app.cfg.emulator_paths.insert(id.clone(), path);
+            app.cfg.set_emulator_path(&id, Some(path))?;
             app.cfg.save(&app.dirs)?;
             println!("Saved, run `romm emulators` to check.");
         }
@@ -448,8 +438,8 @@ async fn main() -> Result<()> {
             })
             .await?;
 
-            if let Some(e) = &out.pull_error {
-                println!("(couldn't sync before launch — offline? {e})");
+            if let Some(note) = out.pull_note() {
+                println!("{note}");
             } else if let Some(r) = &out.pull {
                 print_report(r, Kind::Saves);
             }
@@ -457,16 +447,16 @@ async fn main() -> Result<()> {
                 print_report(r, Kind::States);
             }
             println!("Played for {}s", out.elapsed.as_secs());
-            if let Some(e) = &out.push_error {
-                println!("Couldn't sync saves ({e}), will try again on the next `romm sync`.");
+            if let Some(note) = out.push_note() {
+                println!("{note}");
             } else if let Some(r) = &out.push {
                 print_report(r, Kind::Saves);
             }
             if let Some(r) = &out.state_push {
                 print_report(r, Kind::States);
             }
-            if let Some(e) = &out.state_error {
-                println!("Couldn't sync save states ({e}), will try again on the next `romm sync`.");
+            if let Some(note) = out.states_note() {
+                println!("{note}");
             }
         }
 
@@ -481,11 +471,10 @@ async fn main() -> Result<()> {
             let (backups, state_opts) = (app.dirs.backups_dir(), app.state_opts(no_states));
             let mut any_failed = false;
             for rom in roms {
-                if app.emulator_for(&rom.platform_slug).is_err() {
-                    continue;
-                }
-                let env = match app.env_for_platform(&rom.platform_slug) {
-                    Ok((e, _)) => e,
+                let env = match Resolver::new(&app.cfg).env_for_sync(&rom.platform_slug) {
+                    Ok(env) => env,
+                    // Nothing here keeps this platform's saves, so there is nothing to sync or to say.
+                    Err(Unsyncable::NoEmulator(_)) => continue,
                     Err(e) => {
                         println!("{}: skipped ({e})", rom.name);
                         continue;
@@ -527,13 +516,10 @@ async fn main() -> Result<()> {
             let state = app.state()?;
             let rom = state.roms.get(&rom_id).cloned().ok_or_else(|| anyhow!("game {rom_id} isn't installed"))?;
             let (env, _) = app.env_for_platform(&rom.platform_slug)?;
-            let views = match states::overview(Some(&c), &state, &rom, &env).await {
-                Ok(v) => v,
-                Err(e) => {
-                    println!("(server unreachable: {e}; showing local files only)");
-                    states::overview(None, &state, &rom, &env).await?
-                }
-            };
+            let (views, unreachable) = states::overview_or_local(Some(&c), &state, &rom, &env).await?;
+            if let Some(why) = unreachable {
+                println!("(server unreachable: {why}; showing local files only)");
+            }
             if views.is_empty() {
                 println!("No save states for {} yet.", rom.name);
             }

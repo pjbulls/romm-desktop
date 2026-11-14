@@ -10,7 +10,7 @@ use romm_core::retroarch;
 use romm_core::saves::md5_bytes;
 use romm_core::state::{state_key, LocalRom, State, StateRecord};
 use romm_core::session::SyncCtx;
-use romm_core::states::{overview, sync_states, StateOptions, StateStatus};
+use romm_core::states::{overview, overview_or_local, sync_states, StateOptions, StateStatus};
 use romm_core::sync::{ConflictPolicy, EmuEnv};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex, query_param};
@@ -306,6 +306,23 @@ async fn overview_reports_each_status_without_changing_anything() {
     // Offline: local files only.
     let off = overview(None, &db, &rom("Zelda"), &env).await.unwrap();
     assert!(off.iter().all(|v| matches!(v.status, StateStatus::LocalOnly | StateStatus::ServerOnly)));
+}
+
+#[tokio::test]
+async fn an_unreachable_server_leaves_the_local_states_and_says_why() {
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state6"), b"only here");
+    let db = State::default();
+    let dead = RommClient::new("http://127.0.0.1:9", Some("rmm_test".into()), false).unwrap();
+
+    let (views, why) = overview_or_local(Some(&dead), &db, &rom("Zelda"), &env).await.unwrap();
+    assert_eq!(views.iter().map(|v| (v.name.as_str(), v.status)).collect::<Vec<_>>(), [("Zelda.state6", StateStatus::LocalOnly)]);
+    assert!(why.is_some_and(|w| !w.is_empty()), "the caller needs the reason to tell the user");
+
+    // Asked for local files only, there is nothing to explain.
+    let (_, why) = overview_or_local(None, &db, &rom("Zelda"), &env).await.unwrap();
+    assert!(why.is_none());
 }
 
 #[cfg(unix)]

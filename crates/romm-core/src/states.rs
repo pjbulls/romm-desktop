@@ -498,6 +498,15 @@ pub async fn overview(client: Option<&RommClient>, db: &State, rom: &LocalRom, e
     Ok(out)
 }
 
+/// `overview`, falling back to the local files alone when the server can't be asked. The second
+/// part is why the server wasn't consulted, for the caller to tell the user.
+pub async fn overview_or_local(client: Option<&RommClient>, db: &State, rom: &LocalRom, env: &EmuEnv) -> Result<(Vec<StateView>, Option<String>)> {
+    match overview(client, db, rom, env).await {
+        Ok(views) => Ok((views, None)),
+        Err(e) => Ok((overview(None, db, rom, env).await?, Some(e.to_string()))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
