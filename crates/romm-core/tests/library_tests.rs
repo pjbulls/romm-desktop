@@ -3,7 +3,7 @@ use std::io::Write;
 use romm_core::api::types::{Platform, Rom};
 use romm_core::api::RommClient;
 use romm_core::config::Config;
-use romm_core::library::{install_bios, install_platform_bios, install_rom, BiosStatus};
+use romm_core::library::{extract_zip, install_bios, install_platform_bios, install_rom, BiosStatus};
 use romm_core::paths::{Os, PathCtx};
 use romm_core::resolve::Resolver;
 use romm_core::saves::md5_bytes;
@@ -205,4 +205,41 @@ async fn no_download_is_attempted_when_the_emulator_is_not_installed() {
     assert!(err.contains("PCSX2 was not found"), "{err}");
     let downloads = server.received_requests().await.unwrap().iter().filter(|r| r.url.path().starts_with("/api/firmware")).count();
     assert_eq!(downloads, 0);
+}
+
+#[test]
+fn an_archive_entry_that_climbs_out_of_the_folder_is_refused_and_nothing_is_written_outside() {
+    let t = tempfile::tempdir().unwrap();
+    let zip_path = t.path().join("evil.zip");
+    let mut zw = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+    let opts = zip::write::SimpleFileOptions::default();
+    zw.start_file("ok.cue", opts).unwrap();
+    zw.write_all(b"fine").unwrap();
+    zw.start_file("../escaped.txt", opts).unwrap();
+    zw.write_all(b"nope").unwrap();
+    zw.finish().unwrap();
+
+    let dest = t.path().join("library/psx/Game");
+    let err = extract_zip(&zip_path, &dest).unwrap_err();
+    assert!(err.to_string().contains("unsafe path in ROM archive"), "{err}");
+    assert!(!dest.parent().unwrap().join("escaped.txt").exists(), "written beside the game folder");
+    assert!(!t.path().join("escaped.txt").exists());
+}
+
+#[test]
+fn a_damaged_archive_entry_is_an_error_not_a_quietly_broken_file() {
+    // Stored entry whose bytes are flipped after the CRC was written: copying to the end must notice.
+    let t = tempfile::tempdir().unwrap();
+    let zip_path = t.path().join("bad.zip");
+    let mut zw = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+    zw.start_file("disc.bin", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+    zw.write_all(&[0x55u8; 4096]).unwrap();
+    zw.finish().unwrap();
+    let mut bytes = std::fs::read(&zip_path).unwrap();
+    let at = bytes.windows(4).position(|w| w == [0x55; 4]).unwrap() + 100;
+    bytes[at] ^= 0xFF;
+    std::fs::write(&zip_path, bytes).unwrap();
+
+    let err = extract_zip(&zip_path, &t.path().join("out")).unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("checksum") || err.to_string().to_lowercase().contains("crc"), "{err}");
 }

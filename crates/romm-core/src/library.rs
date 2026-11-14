@@ -1,7 +1,7 @@
 //! Installing ROMs and BIOS/firmware files from RomM onto disk.
 
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -48,9 +48,13 @@ pub fn find_launch_file(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
-    let bytes = fs::read(zip_path)?;
-    let mut ar = zip::ZipArchive::new(Cursor::new(bytes))?;
+/// Unpacks a multi-file ROM's zip into `dest`, entry by entry, straight from the file on disk to
+/// the files it holds. Neither the archive nor any one entry is ever held in memory: a disc image
+/// is several GB, and the machine this runs on is somebody's desktop.
+pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
+    /// Large enough to keep the disk busy, small enough to be nothing next to a disc image.
+    const COPY_BUF: usize = 1 << 20;
+    let mut ar = zip::ZipArchive::new(BufReader::new(fs::File::open(zip_path)?))?;
     for i in 0..ar.len() {
         let mut entry = ar.by_index(i)?;
         let rel = entry
@@ -64,9 +68,11 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
         if let Some(p) = out.parent() {
             fs::create_dir_all(p)?;
         }
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data)?;
-        fs::write(&out, data)?;
+        // Copying to the end of the entry is also what makes the zip crate check its CRC, so a
+        // damaged archive is an error here, not a quietly broken disc image.
+        let mut file = BufWriter::with_capacity(COPY_BUF, fs::File::create(&out)?);
+        std::io::copy(&mut entry, &mut file)?;
+        file.flush()?;
     }
     Ok(())
 }
