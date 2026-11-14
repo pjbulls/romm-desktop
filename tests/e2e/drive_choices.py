@@ -39,6 +39,10 @@ def choose(platform, value):
 def config():
     return tomllib.load(open(CONFIG, "rb")) if os.path.exists(CONFIG) else {}
 def saved(table, slug): return config().get(table, {}).get(slug)
+def chosen_emulator_settings():
+    """What the user has chosen for the emulators' own settings. The config always writes the table, empty when
+    nothing is chosen (as it does the other maps), so "nothing chosen" is absent or empty, not absent."""
+    return config().get("emulator_settings") or {}
 
 def invoke(command, args):
     """Calls a backend command directly; returns ('ok', None) or ('err', message)."""
@@ -48,7 +52,11 @@ def invoke(command, args):
 
 def open_emulators():
     d.click(d.find("[data-testid=nav-emulators]"))
-    d.wait_css("[data-testid=emu-dolphin]")                 # the page opens on its Executables tab
+    # Coming from another page the Emulators page opens on its Executables tab, but clicking its own nav item
+    # while already there leaves whichever tab it was on. So say which one is wanted, rather than assume.
+    d.wait_css("[data-testid=tab-executables]")
+    d.click(d.find("[data-testid=tab-executables]"))
+    d.wait_css("[data-testid=emu-dolphin]")
     d.click(d.find("[data-testid=tab-mapping]"))            # the platform dropdowns are on Emulator mapping
     d.wait(lambda: select_info("GameCube"), 10, "platform dropdowns")
 
@@ -126,13 +134,13 @@ try:
     open_emulators()
     d.click(d.find("[data-testid=tab-settings]"))
     d.wait_css("[data-testid=emu-scope-dolphin]", 10)
-    check("nothing is chosen until the user picks", "emulator_settings" not in config(), str(config()))
+    check("nothing is chosen until the user picks", not chosen_emulator_settings(), str(config()))
     d.js("const s = document.querySelector('[data-testid=\"emu-dolphin-resolution\"]');"
          "Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, '3');"
          "s.dispatchEvent(new Event('change', {bubbles: true}));")
     check("the tab shows an unsaved change", d.js("return !!document.querySelector('[data-testid=tab-settings] .tab-dot')"))
     time.sleep(0.5)
-    check("nothing is written until Save is pressed", "emulator_settings" not in config(), str(config()))
+    check("nothing is written until Save is pressed", not chosen_emulator_settings(), str(config()))
     d.click(d.find("[data-testid=save-emulator-settings]"))
     d.wait(lambda: config().get("emulator_settings", {}).get("dolphin", {}).get("resolution") == "3", 10, "emulator settings saved to config.toml")
     check("saved choice is recorded for Dolphin only", config().get("emulator_settings") == {"dolphin": {"resolution": "3"}}, str(config().get("emulator_settings")))
