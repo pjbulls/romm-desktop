@@ -3186,7 +3186,7 @@ dependencies = [
 name = "romm-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dbus-secret-service-keyring-store",
  "directories",
@@ -3217,7 +3217,7 @@ dependencies = [
 name = "romm-desktop"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "romm-core",
  "serde",
  "serde_json",
