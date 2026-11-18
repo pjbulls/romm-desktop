@@ -1,0 +1,71 @@
+id = "xemu"
+name = "xemu"
+# Original Xbox only. Xbox 360 (`xbox360`) is a different console with a different emulator:
+# see xenia.toml.
+platforms = ["xbox"]
+
+[detect]
+linux_bins = ["xemu"]
+windows_exes = [
+  "{programfiles}/xemu/xemu.exe",
+  "{localappdata}/Programs/xemu/xemu.exe",
+]
+flatpak_id = "app.xemu.xemu"
+
+# `-dvd_path <iso>` is xemu's documented CLI argument (https://xemu.app/docs/cli/).
+# Add `-full-screen` via the per-emulator extra args if wanted.
+[launch]
+args = ["-dvd_path", "{rom}"]
+
+# xemu uses SDL_GetPrefPath("xemu", "xemu"), or the folder holding xemu.toml when
+# that file sits next to the executable (portable mode).
+[data]
+linux = ["{xdg_data}/xemu/xemu"]
+flatpak = ["{home}/.var/app/app.xemu.xemu/data/xemu/xemu"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/xemu.toml" },
+  "{appdata}/xemu/xemu",
+]
+
+# Saves are the `E:\UDATA\<title id>` folders inside the virtual hard disk (`hdd_path` in
+# xemu.toml, usually xbox_hdd.qcow2), so they are read out of the image by title id rather than
+# found as files (see `xbox`). One game's save travels as `<TITLE ID>.zip`, as Argosy's does.
+#
+# Restoring a save replaces that one folder inside the image. The write is journaled (a failure or
+# a crash puts the image back exactly), confined to that folder, and read back before it is made
+# permanent. It needs xemu closed: an image another program has open is neither read nor written,
+# and is held while it is being written so that xemu cannot open it mid-restore (see `xbox::lock`).
+[saves]
+mode = "hdd"
+
+# There is intentionally no [states] or [bios] section.
+#
+# * xemu's snapshots live inside the same disk image, so neither `diff` nor `stem` mode can see
+#   them. Syncing the whole image as one unit would turn any conflict between two devices into
+#   a whole-disk conflict.
+# * xemu takes its BIOS, boot ROM and HDD image from paths configured inside xemu
+#   itself, so there is no BIOS folder to install into.
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against xemu's config_spec.yml: `display.quality.surface_scale` (an integer, default 1) and
+# `display.window.fullscreen_on_startup` (a bool), both in `xemu.toml` in the data folder.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+choices = [
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2×" },
+  { value = "3", label = "3×" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6×" },
+]
+apply = [{ type = "toml", file = "xemu.toml", path = "display.quality.surface_scale", value = "{value}", kind = "int" }]
+
+[[settings]]
+id = "fullscreen"
+label = "Screen mode"
+choices = [
+  { value = "on", label = "Fullscreen", apply = [{ type = "toml", file = "xemu.toml", path = "display.window.fullscreen_on_startup", value = "true", kind = "bool" }] },
+  { value = "off", label = "Windowed", apply = [{ type = "toml", file = "xemu.toml", path = "display.window.fullscreen_on_startup", value = "false", kind = "bool" }] },
+]

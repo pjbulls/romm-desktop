@@ -1,0 +1,64 @@
+id = "dolphin"
+name = "Dolphin"
+platforms = ["ngc", "wii"]
+
+[detect]
+linux_bins = ["dolphin-emu"]
+windows_exes = [
+  "{programfiles}/Dolphin-x64/Dolphin.exe",
+  "{programfiles}/Dolphin/Dolphin.exe",
+  "{localappdata}/Programs/Dolphin/Dolphin.exe",
+]
+flatpak_id = "org.DolphinEmu.dolphin-emu"
+
+# -b = batch mode (no game list, exits when the game closes), -e = run this file.
+[launch]
+args = ["-b", "-e", "{rom}"]
+
+[data]
+# ~/.dolphin-emu is the legacy location and wins if it exists; new installs use XDG.
+linux = ["{home}/.dolphin-emu", { path = "{xdg_data}/dolphin-emu", fallback = true }]
+flatpak = ["{home}/.var/app/org.DolphinEmu.dolphin-emu/data/dolphin-emu"]
+windows = [
+  { path = "{exe_dir}/User", requires = "{exe_dir}/portable.txt" },
+  "{appdata}/Dolphin Emulator",
+  "{documents}/Dolphin Emulator",
+]
+
+# GameCube memory cards (raw card or per-game GCI folders) and Wii NAND save data live in shared
+# places; the game's own saves are cut out of them by game id (see unit.rs / route.rs).
+[saves]
+mode = "diff"
+
+# Save states are one file per slot in a flat folder, synced individually.
+[states]
+mode = "diff"
+dir = "StateSaves"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Dolphin takes these on its command line, so none of its files are touched: `-C <System>.<Section>.<Key>=<Value>`
+# is its own config override (UICommon/CommandLineParse.cpp). Two details that matter, both from its source:
+#   * The graphics system is named `Graphics` here (Common/Config/Config.cpp), not `GFX` as its file is. An
+#     unknown system name is skipped without a word, so a wrong one would look like it worked and do nothing.
+#   * The override sits below a game's own ini in Dolphin's layer order, so a per-game setting still wins.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+choices = [
+  { value = "0", label = "Automatic (fit the window)" },
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2× (about 720p)" },
+  { value = "3", label = "3× (about 1080p)" },
+  { value = "4", label = "4× (about 1440p)" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6× (about 4K)" },
+]
+apply = [{ type = "args", args = ["-C", "Graphics.Settings.InternalResolution={value}"] }]
+
+[[settings]]
+id = "fullscreen"
+label = "Screen mode"
+choices = [
+  { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=True"] }] },
+  { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=False"] }] },
+]

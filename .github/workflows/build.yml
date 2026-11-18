@@ -1,0 +1,148 @@
+name: build
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+
+# Nothing in this workflow writes to the repository, so the token it runs with may only read it.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with: { node-version: 22, cache: npm, cache-dependency-path: app/package-lock.json }
+      - name: System libraries for Tauri, and QEMU for the disk-image tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev libdbus-1-dev qemu-utils
+      - run: npm ci && npm test && npm run build
+        working-directory: app
+      - run: cargo test --workspace --lib --tests --locked
+      - name: OS keychain, against a real Secret Service (GNOME Keyring)
+        run: |
+          sudo apt-get install -y gnome-keyring dbus-user-session
+          dbus-run-session -- bash -ec '
+            eval "$(echo -n ci | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL
+            cargo test -p romm-core --lib --locked real_os_keychain -- --ignored
+          '
+
+  keychain-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Keychain logic (this also compiles the Credential Manager backend)
+        run: cargo test -p romm-core --lib --locked token_store
+      - name: Credential Manager, for real
+        # Runner sessions differ from a desktop login; if this fails, read the log before blaming the code.
+        continue-on-error: true
+        run: cargo test -p romm-core --lib --locked real_os_keychain -- --ignored
+
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: System library for the keychain backend (libdbus-sys)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev
+      - run: cargo build --locked -p romm-cli
+      - run: tests/smoke/psp_smoke.sh
+
+  vendor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Re-vendor at the pinned commit and require no difference
+        run: |
+          pin=$(awk '$1=="argosy-sigil"{print $2}' crates/sigil-sys/vendor/PINNED)
+          test -n "$pin" || { echo "::error::no argosy-sigil line in vendor/PINNED"; exit 1; }
+          sh crates/sigil-sys/scripts/update-vendor.sh "$pin"
+          if [ -n "$(git status --porcelain -- crates/sigil-sys/vendor)" ]; then
+            echo "::error::crates/sigil-sys/vendor differs from argosy-sigil $pin (vendored copy was edited, or PINNED is wrong)"
+            git status --short -- crates/sigil-sys/vendor
+            exit 1
+          fi
+
+  e2e:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with: { node-version: 22, cache: npm, cache-dependency-path: app/package-lock.json }
+      - name: System libraries and test tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev libdbus-1-dev xvfb webkit2gtk-driver python3-pil
+      - name: Build the app (debug, embedded frontend)
+        run: |
+          npm ci
+          npm run tauri build -- --debug --no-bundle
+        working-directory: app
+      - name: e2e drive.py
+        run: OUT=/tmp/e2e-drive tests/e2e/run.sh
+      - name: e2e drive_pad.py
+        if: ${{ !cancelled() }}
+        run: DRIVER=drive_pad.py OUT=/tmp/e2e-pad tests/e2e/run.sh
+      - name: e2e drive_choices.py
+        if: ${{ !cancelled() }}
+        run: DRIVER=drive_choices.py OUT=/tmp/e2e-choices tests/e2e/run.sh
+      - name: e2e drive_versions.py
+        if: ${{ !cancelled() }}
+        run: DRIVER=drive_versions.py OUT=/tmp/e2e-versions tests/e2e/run.sh
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: ${{ failure() }}
+        with:
+          name: e2e-logs
+          path: /tmp/e2e-*
+          if-no-files-found: warn
+
+  bundle:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with: { node-version: 22, cache: npm, cache-dependency-path: app/package-lock.json }
+      - name: System libraries for Tauri
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev libdbus-1-dev
+      - run: npm ci
+        working-directory: app
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        with:
+          projectPath: app
+      - name: Build the standalone CLI
+        run: cargo build --release --locked -p romm-cli
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: romm-desktop-${{ matrix.os }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: romm-cli-${{ matrix.os }}
+          path: |
+            target/release/romm
+            target/release/romm.exe
+          if-no-files-found: error

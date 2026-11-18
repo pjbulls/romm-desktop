@@ -1,0 +1,61 @@
+id = "duckstation"
+name = "DuckStation"
+platforms = ["psx"]
+
+[detect]
+linux_bins = ["duckstation-qt", "duckstation", "DuckStation-x64.AppImage"]
+windows_exes = [
+  "{programfiles}/DuckStation/duckstation-qt-x64-ReleaseLTCG.exe",
+  "{localappdata}/Programs/DuckStation/duckstation-qt-x64-ReleaseLTCG.exe",
+]
+
+# -batch exits when the game ends; "--" ends option parsing before the path.
+[launch]
+args = ["-batch", "--", "{rom}"]
+
+[data]
+linux = ["{xdg_data}/duckstation"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/portable.txt" },
+  "{documents}/DuckStation",
+]
+
+# Memory cards are per-game or shared depending on user settings (Card1Type); the game's card is
+# cut out of them by game id (see unit.rs / route.rs).
+[saves]
+mode = "diff"
+
+[states]
+mode = "diff"
+dir = "savestates"
+ignore_extensions = ["png", "jpg"]
+
+[bios]
+dir = "bios"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against DuckStation's source: `ResolutionScale` is in the `[GPU]` section of `settings.ini`
+# in the data folder (src/core/settings.cpp, src/core/core.cpp), 0 meaning "automatic" (by window
+# size); `-fullscreen` / `-nofullscreen` are its own flags (src/duckstation-qt/qthost.cpp).
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+choices = [
+  { value = "0", label = "Automatic (fit the window)" },
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2×" },
+  { value = "3", label = "3× (about 720p)" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5× (about 1080p)" },
+  { value = "6", label = "6× (about 1440p)" },
+  { value = "9", label = "9× (about 4K)" },
+]
+apply = [{ type = "ini", file = "settings.ini", section = "GPU", sets = [{ key = "ResolutionScale", value = "{value}" }] }]
+
+[[settings]]
+id = "fullscreen"
+label = "Screen mode"
+choices = [
+  { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-fullscreen"] }] },
+  { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-nofullscreen"] }] },
+]

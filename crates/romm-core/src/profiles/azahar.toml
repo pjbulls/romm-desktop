@@ -1,0 +1,74 @@
+id = "azahar"
+name = "Azahar"
+# `new-nintendo-3ds` is a separate RomM platform; Azahar emulates the New 3DS too.
+platforms = ["3ds", "new-nintendo-3ds"]
+
+[detect]
+# The desktop binary is `azahar` (CMake OUTPUT_NAME in src/citra_meta).
+linux_bins = ["azahar"]
+# Install locations are best guesses (Azahar ships a zip, so there is no fixed
+# default); anything else is found on PATH or via the per-emulator path override.
+windows_exes = [
+  "{localappdata}/Programs/Azahar/azahar.exe",
+  "{programfiles}/Azahar/azahar.exe",
+]
+flatpak_id = "org.azahar_emu.Azahar"
+
+# A lone path argument opens the game. When extra flags are present Azahar takes
+# the game from the LAST argument, which is where we put it (extra args come first).
+[launch]
+args = ["{rom}"]
+
+# The data root is Azahar's "user directory", which holds sdmc/, nand/ and states/.
+# Linux/Windows names come from Azahar's file_util.cpp / common_paths.h.
+[data]
+linux = ["{xdg_data}/azahar-emu"]
+flatpak = ["{home}/.var/app/org.azahar_emu.Azahar/data/azahar-emu"]
+windows = [
+  # Portable mode: a `user` folder next to the executable.
+  { path = "{exe_dir}/user", requires = "{exe_dir}/user" },
+  "{appdata}/Azahar",
+]
+
+# Azahar keeps `qt-config.ini` apart from the user directory on Linux (file_util.cpp: ConfigDir is
+# $XDG_CONFIG_HOME/azahar-emu, while the data is under $XDG_DATA_HOME). On Windows it is the `config`
+# folder inside the user directory (portable or not), which is why only Linux and Flatpak differ here.
+[config]
+linux = ["{xdg_config}/azahar-emu"]
+flatpak = ["{home}/.var/app/org.azahar_emu.Azahar/config/azahar-emu"]
+windows = [
+  { path = "{exe_dir}/user/config", requires = "{exe_dir}/user" },
+  "{appdata}/Azahar/config",
+]
+
+# Game saves live in the emulated SD card (sdmc/Nintendo 3DS/<id0>/<id1>/title/00040000/<tid>/data/
+# and extdata/); the game's save, metadata and extdata are found by title id (see unit.rs / route.rs).
+[saves]
+mode = "diff"
+
+# Save states are states/<16-hex program id>.<slot>.cst: one file per slot in a flat
+# folder, with nothing else stored alongside.
+[states]
+mode = "diff"
+dir = "states"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against Azahar's source: `resolution_factor` is in the `[Renderer]` group of `qt-config.ini`
+# (src/citra_qt/configuration/config.cpp), 0 meaning "automatic" (by window size). Every setting in
+# that file has a companion `<key>\default` flag, and while it is `true` Azahar ignores the value
+# and uses its own default, so the flag has to be set to `false` along with the value.
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+choices = [
+  { value = "0", label = "Automatic (fit the window)" },
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2×" },
+  { value = "3", label = "3×" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6×" },
+  { value = "8", label = "8×" },
+  { value = "10", label = "10×" },
+]
+apply = [{ type = "ini", root = "config", file = "qt-config.ini", section = "Renderer", sets = [{ key = "resolution_factor\\default", value = "false" }, { key = "resolution_factor", value = "{value}" }] }]

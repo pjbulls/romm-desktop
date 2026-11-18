@@ -1,0 +1,197 @@
+## Game controller
+
+Plug in a controller and press any button. Xbox, PlayStation and Switch pads work through the standard browser Gamepad API (WebKitGTK/libmanette on Linux, WebView2 on Windows), so there is nothing to install. Button hints use the glyphs of the controller you're holding.
+
+| Control | Action |
+|---|---|
+| D-pad / left stick | Move focus (spatial: Down from a card goes to the card below) |
+| A (✕) | Select; on a text field it opens an **on-screen keyboard** |
+| B (○) | Back / close the panel or keyboard |
+| Start (Menu) | Play the focused game (Install if it isn't installed, inside the panel) |
+| LB / RB | Previous / next platform (on pages with tabs, Settings and Emulators & BIOS: previous / next tab) |
+| LT / RT | Page up / down (focus follows) |
+| Y (△) | Search |
+| X (□) | Dismiss notifications (in the keyboard: delete) |
+| View (Select) | Switch between the menu and the games |
+| Right stick | Scroll |
+
+Safety rules: input is ignored while the window is in the background or an emulator is running, and after a game exits a button that's still held is ignored until released, so the press that quits your game can't trigger anything. Mouse or keyboard use hands control straight back; Settings has an off switch.
+
+## Layout
+
+```
+crates/romm-core   UI-free library: API client, emulator profiles, save + state sync, installer
+crates/romm-cli    `romm` command (same core)
+app/               Tauri 2 desktop app: React + TypeScript UI (app/src), Rust backend (app/src-tauri)
+tests/smoke        scripted CLI runs against a fake server (two "devices")
+tests/e2e          drives the real app through WebDriver under Xvfb (mouse/keyboard run + a simulated-controller run)
+```
+
+## Build
+
+Rust 1.91+ (the locked Tauri needs it; the core and CLI crates alone need 1.89, for the file locking in the standard library), Node 24+, and a C compiler (`build-essential` / MSVC). On Linux the OS keychain also needs the libdbus development files (`libdbus-1-dev`, which GTK's own dev packages already pull in). The core builds the vendored C library `crates/sigil-sys` that decides what a game's save is.
+
+```bash
+# Debian / Ubuntu: Tauri's system libraries
+sudo apt install build-essential libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+                 libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev
+
+cd app && npm install
+npm run tauri dev                 # development, hot reload
+npm run tauri build               # installers: .deb / .AppImage (Linux), .msi / .exe (Windows)
+npm run build:all                 # the same, plus the standalone CLI: target/release/romm (romm.exe on Windows)
+```
+On Windows install Rust (MSVC toolchain) and Node; WebView2 is handled by the installer. The CLI is a separate crate, so `tauri build` does not make it; `npm run build:all` (or `cargo build --release -p romm-cli` after it) puts `romm.exe` in `target\release\`, next to `romm-desktop.exe`.
+
+A GitHub Actions workflow (`.github/workflows/build.yml`) builds both installers, and uploads the standalone CLI as a separate `romm-cli-<os>` artifact.
+
+## Emulator settings
+
+Emulators & BIOS has four tabs: **Executables** (where each emulator was found, and a way to point at it if it wasn't), **BIOS**, **Emulator mapping** (which emulator plays each platform, and whether the platform is shown in the library) and **Emulator settings**, which lets you choose how your emulators run games. The app applies those each time you press Play here, so you don't have to open each emulator's own settings. You still install and update the emulators yourself. The other tabs apply a change as soon as you make it; Emulator settings are saved with a Save button, and a dot on the tab marks changes not saved yet. (Settings has its own tabs: General, Controller and Connection.)
+
+| Emulator | Internal resolution | Screen mode | How it's applied |
+|---|---|---|---|
+| Dolphin | yes | yes | command-line options (`-C …`); none of Dolphin's files are touched |
+| PCSX2 | yes | yes | `inis/PCSX2.ini`, and `-fullscreen` / `-nofullscreen` |
+| DuckStation | yes | yes | `settings.ini`, and `-fullscreen` / `-nofullscreen` |
+| PPSSPP | yes | | `SYSTEM/ppsspp.ini` |
+| Azahar | yes | | `qt-config.ini` |
+| xemu | yes | yes | `xemu.toml` |
+| RetroArch | Flycast, Mupen64Plus-Next, SwanStation | | the core's own options file (`config/<core>/<core>.opt`) |
+
+How it behaves, because it edits files that belong to the emulator:
+
+- **Nothing changes until you choose.** Every setting starts on *Don't change*, and that leaves the emulator's own value alone.
+- **Edits are minimal.** Only the one key is changed; comments, order, spacing and line endings around it stay.
+- **The original is kept.** The first version of each file the app changes is copied to `emulator-config-backups` in the app's data folder (next to `backups`) and is not replaced by later changes.
+- **It never invents a settings file.** An emulator that has never run has none, and a file made for it would make it skip its first-time setup. You're told to start the emulator once. RetroArch's per-core options file is the exception, because RetroArch creates it itself; the app seeds it from RetroArch's global options file, as RetroArch would, so your other options for that core carry over.
+- **It never stops a game starting.** A setting that can't be applied is a note shown after the game.
+- **Others can still win.** Anything typed in the Emulators page's extra arguments comes after the app's and wins, and an emulator's own per-game settings (RetroArch's per-game and per-folder option files, Dolphin's per-game ini, PPSSPP's per-game config) outrank these. RetroArch says so when it finds such files.
+- The CLI's `romm play` applies the same settings, since they are stored in the shared config.
+
+A setting is declared in the emulator's profile (`[[settings]]` in `crates/romm-core/src/profiles/*.toml`), and what it does is carried out by `emu_settings.rs`. Every option name, value, flag and file location there was read from that emulator's source, and the profile comment says which file; please keep to that, because an option the emulator doesn't recognise is usually skipped without a word.
+
+## Games with several versions
+
+A game that exists as several files on your server (USA / Europe / Japan, revisions, a translation) is **one card**, not one per file. This follows what RomM's web UI and [Argosy](https://github.com/rommapp/argosy-launcher) do.
+
+- **Which one is shown is the server's choice.** The library is requested with RomM's `group_by_meta_id`, so RomM picks the representative: the copy you marked as default in RomM (*Set default*), else a full release over a pre-release, else the best by the server's region priority, else by file name. The app doesn't second-guess it and has no setting of its own for this; change it in RomM and press ↻.
+- **Cards say when there's more.** A card with other versions carries an "N versions" badge, and counts everywhere (sidebar, header) are games, not files.
+- **The panel has a Version dropdown** (also usable with a controller: left/right steps through it). It opens on the version you have installed, otherwise on the server's pick, which is marked *default*. Install, Play, Sync, saves, save states and achievements all act on the selected version.
+- **Each version is its own ROM**, as in RomM and Argosy: its own install, its own saves and states. Installing Japan next to USA doesn't mix their saves. A game counts as installed when any version is. In the *Installed* list, two installed versions of one game show their tags (`USA`, `Japan · Rev 1`) to tell them apart.
+- **Labels** come from the file name, the trailing `(USA) (Rev 1)` groups, because RomM sends nothing more about a sibling. Real releases are listed before pre-releases (`Beta`, `Proto`, `Demo`...), translations and hacks.
+
+**Why the whole library is fetched.** Like Argosy, which syncs everything and browses locally, the app loads the grouped library (500 per page, no file lists, progress shown) and filters, searches and pages in memory. That makes the counts exact, platform switching and search instant, and a search finds a game through any of its versions (as RomM's does). The copy is reused for 10 minutes when you open a list from the top, never while you scroll, and **↻** next to the search box reloads it. If a reload fails, the previous copy stays in use.
+
+## Save and state syncing
+
+| | Saves | Save states |
+|---|---|---|
+| Protocol | RomM (negotiate → apply → complete) | Plain `/api/states` calls; RomM doesn't cover states |
+| RetroArch | `<rom>.srm` (or `.sav`), uploaded as-is; Game Boy, N64, Dreamcast and Mega-CD cores as Argosy's *save units* | `<rom>.state`, `.state1…`, `.state.auto` |
+| Others | one *save unit* per game, cut out of the emulator's own files by game id (see below) | one file per slot in the emulator's state folder, synced individually |
+| Change detection | RomM's `content_hash` vs. server, plus Sigil's own change marker | local MD5 + server `updated_at`/size |
+
+### Saves match Argosy's, byte for byte
+
+A game's save is not "whatever changed while you played". It is what [argosy-sigil](https://github.com/rommapp/argosy-sigil), the library Argosy uses, says it is, and this app embeds that same library (`crates/sigil-sys`, vendored at Argosy's pin, see its `VENDOR.md`). So a save uploaded here restores in Argosy, and the other way round:
+
+| Emulator | What travels (`<game>.zip` unless noted) |
+|---|---|
+| PPSSPP | every `SAVEDATA/<disc id>*` folder of the game, each under its own name (`ULUS10064DATA00/PARAM.SFO`, …); installed game data is not a save |
+| Dolphin (GameCube) | the game's `.gci` files, flat, whether Dolphin keeps a GCI folder or a raw card |
+| Dolphin (Wii) | the title's `data/` folder under its code |
+| DuckStation | the game's own 128 KiB card (`.mcd`), cut out of a shared card if need be |
+| PCSX2 | the game's own card |
+| Azahar | the title's save, metadata and extdata |
+| Xenia Canary | the game's `00000001/` saved-game folder, rooted at `00000001/` (see below) |
+| RetroArch | `<rom>.srm` / `.sav` as it is; Game Boy / N64 / Dreamcast / Mega-CD cores as units |
+
+The `emulator` RomM records is what Argosy records: the libretro core's name for RetroArch (`snes9x`), the emulator's id otherwise. Saves use RomM's `autosave` slot. No emulator filter is sent when syncing, so a save another client wrote under a different label is found. Each save is one file named `<rom>.<ext>`, as Argosy names it.
+
+**Sigil reads a game's id from its ROM** (disc id, title id, cart header) once and keeps it in the state file. A ROM it can't read falls back to the id in the file name (`Daxter [ULUS10064].iso`). With neither, a game whose saves are found by id (PSP, GameCube/Wii, PS1/PS2, 3DS, Xbox 360) can't have its saves located, and that game's sync reports the problem (naming the file with its id fixes it) instead of guessing; playtime is still recorded.
+
+**Shared volumes with no game id.** Sega CD backup RAM, Dreamcast VMUs and Saturn cards hold saves that name no game, so Sigil can't say whose they are until one is *claimed*. Like Argosy, this app notes which such saves exist before a game starts and, after the session, claims the ones that newly appeared for the game that was played. Nothing is claimed the first time a volume is seen, or outside a session launched here, so another game's saves are never taken.
+
+**Older versions of this app** uploaded a zip with a `romm-bundle.json` manifest and folder-relative paths, which nothing else could read. Those still restore, and the server's copy is replaced with the same save in Argosy's form straight away.
+
+**xemu saves live inside the hard disk image.** They are the `E:\UDATA\<title id>` folders in the image (`hdd_path` in `xemu.toml`, usually `xbox_hdd.qcow2`). After a game, that folder is read out of the image and uploaded as `<name>.zip`, rooted at the upper-case title id, the same unit Argosy uses on Android. When RomM holds a newer save, it is written back **into the image**, replacing that game's folder. The title id is read from the game's XBE, so discs must be XISO (xemu's docs cover converting Redump ISOs with `extract-xiso`). Because this edits a multi-GB file that is all your Xbox data, the write is built to be undoable: every overwritten byte is journaled first, so a failure rolls the image back exactly and a crash is undone the next time the image is opened; only that game's folder (and the FAT, directory and qcow2 bookkeeping it needs) is touched; and the result is read back and compared with the save before it is made permanent. The previous contents are also kept under the backup folder. **Close xemu first.** An image another program has open is neither read nor written: on Windows xemu's open image refuses a second writer (so does ours, to xemu, while a save is being put back); on Linux QEMU's own byte-range locks on the image are checked and taken, and QEMU's "in use" flag is honoured on both. On other systems only the flag is available. `romm xbox status <image>` says what it sees. Snapshots (xemu's Machine menu) are handled; images with 32/64-bit refcounts, bitmaps or external data files are refused, not written. `TDATA` (title-specific data some games use) is not included, and xemu's snapshots, which live in the same image, are not synced. `romm xbox titles <image>`, `export <image> <TITLE ID>` and `import <image> <zip>` show and move what would be synced; try `import` on a *copy* of your image first. Its BIOS and HDD image are set inside xemu itself, so there is no BIOS install either. Xbox 360 is a different console with its own emulator, below.
+
+**Xenia Canary (Xbox 360).** Xenia keeps a game's saves as a plain folder tree, `content/<profile XUID>/<title id>/00000001/<package>/…`, so this is synced the way Argosy's `Xbox360FolderHandler` does it: the game's `00000001` folder is zipped with `00000001/` as the archive root (so the content hash matches Argosy's for the same folder). The title id is read by Sigil from the game's `default.xex`, from an `.xex`, a disc image (`.iso`) or a `.zar`; a Games on Demand / STFS package can't be identified, and that game's sync says so. DLC (`00000002`) and title updates (`000B0000`) are never touched, the machine's own XUID (`0000000000000000`) is skipped, and with several profiles the most recently written one is used. Restoring replaces the whole folder (a copy of the old one is backed up first) and never invents a profile: Xenia must have created one, so start it once and sign in before the first download. A `content_root` set in `xenia-canary.config.toml` is honoured. Xenia has no save states and needs no BIOS, so neither is offered. Storage root: the exe's folder when portable (the default on Windows builds, or when `portable.txt` is beside it), otherwise `Documents\Xenia` on Windows and `~/.local/share/Xenia` on Linux. Canary has an experimental Linux build (Vulkan only).
+
+*Multi-disc games.* RomM serves them as a folder of discs plus a `.m3u` playlist, which is what gets installed and stored as the launch file. Xenia can't open a playlist (it reads it as a disc image and exits), and neither can PCSX2 (checked in its source: nothing reads a `.m3u`, and it fails with "Unable to identify the ISO image type"), so those two profiles set `no_playlists = true` and are launched on the **first disc the playlist lists** instead, in the playlist's own order. This is decided each time the game is launched, so a game installed before this was handled works without re-downloading. When the game asks for the next disc, Xenia shows its own file picker (PCSX2: use its Change Disc action): choose the next disc's file from the game's folder. Saves already followed the playlist (the game's id is read from its first disc), so they sync as one game, named after the folder. A playlist that names no first disc that exists fails with a message saying so, rather than starting Xenia on it. RetroArch and DuckStation still get the playlist as before; I haven't checked whether PPSSPP, Dolphin or Azahar accept one.
+
+*CD images with a `.cue` sheet.* PCSX2 has no cue support either (its reader carries a TODO for it, though its file dialogs list `*.cue`), so a profile with `no_cue_sheets = true` is launched on the data track's `.bin` the sheet names instead; a playlist of sheets resolves all the way to a track. "The data track" is chosen by the rule Sigil uses when it identifies the game from the sheet (the first `FILE` that has a `TRACK … MODE…` under it, so leading audio is skipped), so the file that is launched and the file the game is identified from are the same, and a test pins that. Limits that come from PCSX2, not from this tool: only that one file is opened, so CD audio tracks of a disc dumped one file per track are unavailable, and PCSX2 recognises raw 2352-byte images only in Mode 2 (what PS2 CDs use), so a Mode 1 raw `.bin` doesn't boot. A sheet that names no data file that exists fails with a message saying so.
+
+*Package headers.* Xenia keeps each save package's metadata outside the folder that is synced, in `<title id>/Headers/00000001/<package>.header`, and its save enumeration (a game's "Load" list) skips a package without one. The archive can't carry it without changing its layout and hash (and Argosy's pairing), so when a restored package has no header one is written in the legacy format Xenia still reads and upgrades itself. An existing header is never overwritten. The save's display name falls back to the package's folder name.
+
+Deletions never propagate. A state deleted locally won't resync unless the server's copy changes; one removed from the server isn't re-uploaded unless changed again.
+
+Emulator profiles are TOML in `crates/romm-core/src/profiles/`: detection, launch flags, per-OS/Flatpak/portable data folders, save and state rules. Adding an emulator is a new file, and its `platforms` list is what decides which systems offer it. RetroArch cores are the exception: they're listed per system in `CORES` in `crates/romm-core/src/retroarch.rs` (first entry is the default that "Automatic" uses).
+
+## RetroAchievements
+
+Open a game and its **Achievements** section shows the set, which ones you've earned (hardcore ones are marked), points, the highest award, and when you last earned one. Badges load as you scroll; long sets show the first few with a *Show all* button. A **search box** finds achievements by name or description (every word must match; accents and case are ignored), and a **Missable** toggle narrows the list to the ones RetroAchievements marks as missable, meaning they can be lost for good. It combines with *Earned / Locked*, so *Missable* + *Locked* is what you can still miss. The number on each button is how many you'd see if you chose it. *Missable* is greyed out for games where RetroAchievements marks none, and the search and the toggle also work before you've linked a username (to see what to watch out for before you play). Esc clears the search before it closes the panel. It also works offline, from the copy saved the last time the server answered.
+
+This app only *displays* what RomM knows. It doesn't talk to retroachievements.org and doesn't touch the emulators, so for any of this to show up:
+
+1. RomM needs a RetroAchievements API key and your game scanned and matched to a RetroAchievements game.
+2. Your **RetroAchievements username** must be set in your RomM profile. Without it you still see the achievements, just not which are earned.
+3. **Earning** them happens in the emulator: sign in to RetroAchievements inside RetroArch, DuckStation, PCSX2, PPSSPP or Dolphin. This app doesn't configure that.
+4. RomM must have fetched your progress. It does so on a schedule only if the admin turned that on (daily at 04:00 by default), or when asked. The **Refresh** button asks, and needs the optional `me.write` scope. Without it Refresh explains what to do; refreshing from RomM's own profile page works too.
+
+With `me.write` the app also asks by itself, in the background, **when a game you launched from it closes**, so what you just earned is there when you look. If that game's panel is open it updates in place. This never shows an error: failures go to the diagnostics log, and only the **Refresh** button reports problems. Without `me.write` the first refusal is logged and the app stops asking until you sign in again. Progress earned anywhere other than through this app still needs the **Refresh** button (or RomM's own schedule).
+
+How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`merged_ra_metadata`) and your progress from `GET /api/users/me` (`ra_progression`, scope `me.read`, which the token already has). RomM records what you've earned under each achievement's *badge name*, not its numeric id, so that's what the two are matched on. A few games reuse one badge for several achievements; then the number earned is right but which of the look-alikes is ticked is a best guess.
+
+## Where the token is kept
+
+The API token can read the whole library and overwrite saves, so on a normal install it is stored in the operating system's keychain (`crates/romm-core/src/token_store.rs`), protected by the user's login rather than by a file's permissions: the Credential Manager on Windows (local to the machine, not roaming), the Secret Service over D-Bus on Linux.
+
+- **Portable mode** (`ROMM_DESKTOP_HOME`) and `ROMM_DESKTOP_KEYCHAIN=off` keep a `token` file in the config folder instead, created 0600. Portable mode means everything under one folder, so it deliberately does not use the keychain; the test and smoke harnesses rely on this too.
+- **No keychain reachable** (headless box, no Secret Service running, a keyring that is locked and cannot be unlocked): signing in does not fail. The token goes to the same 0600 file and the user is told, at login, where it went and that it is not encrypted. A fallback is never silent.
+- **Writes are read back.** A token is written to the keychain and read back before anything else is removed or reported, because some stores accept a write they then do not keep.
+- **Upgrading.** A token file from an earlier version is moved into the keychain the first time it is read (and deleted only once the keychain has been read back with the same value), so nobody is signed out. If the keychain will not take it, the file stays and keeps working. The old plaintext may still exist in backups, snapshots or on an SSD's spare blocks: anyone who needs to be sure it is dead should revoke the token in RomM (Profile, Client API Tokens) and sign in again.
+- **Signing out** removes the token from both places. If it cannot be removed (a locked keychain), the app still disconnects but says so, because the token remains valid on the server. `romm logout` does the same from the CLI.
+
+## Tests
+
+```bash
+cargo test --workspace --lib --tests   # 344 tests, all in romm-core (against a mock RomM server)
+cd app && npm test                      # 160 UI tests: formatting, controller input/timing, spatial focus, on-screen keyboard, emulator picker, achievements panel, game versions, the Settings and Emulators & BIOS tabs including emulator settings, the whole app mounted against a fake backend (startup, loading, crashes), diagnostics reporting, achievement search and filtering
+tests/e2e/run.sh                        # 36 checks driving the real app (needs xvfb + webkit2gtk-driver, debug build)
+DRIVER=drive_pad.py tests/e2e/run.sh    # 50 checks driving the real app with a simulated controller
+DRIVER=drive_choices.py tests/e2e/run.sh # 26 checks on per-system emulator choices (what's offered, persistence, refusals)
+DRIVER=drive_versions.py tests/e2e/run.sh # 30 checks on games with several versions (written, not yet run: see below)
+tests/smoke/psp_smoke.sh && tests/smoke/states_smoke.sh   # CLI, two simulated devices (smoke.sh: see its header)
+```
+
+## What has and hasn't been verified
+
+**Verified**
+- Games with several versions: the version, search, count and grouping logic (unit tests), the paged fetch against a mock server (grouped, no files, one count request, duplicates dropped), the card badge and the dropdown's contents and preselection (rendered components), and the real fetch-and-label code against the e2e fake server. The e2e journey `drive_versions.py` is written but **has not been run**; the app isn't built in the environment this was written in. The Tauri crate type-checks.
+- Core logic and CLI: unit and integration tests, plus scripted two-device runs of the real binary.
+- Emulator settings: every key, section, flag and file location was read from the emulator's own source (Dolphin, PCSX2, DuckStation, PPSSPP, Azahar, xemu, RetroArch and the three cores). The INI and TOML editors are unit-tested for what they preserve, and a launch is tested end to end with stand-in emulator scripts that are really run (the arguments they receive, their settings file as seen at start-up, the original kept). Two details that would be easy to get wrong have regression tests: Dolphin's graphics system is `Graphics` on its command line, not `GFX` (an unknown name is skipped silently), and Azahar ignores `resolution_factor` unless its `\default` flag is also set to `false`.
+- UI: the real Linux app (WebKitGTK, software-rendered under Xvfb) driven through login errors, pairing, library paging and search, cover art, install with progress, play → save + state upload, installed list, emulator detection, BIOS install, settings persistence, sync all, disconnect. The screenshots above come from that run.
+- Controller navigation: the real app driven end to end with a **simulated** controller: on-screen keyboard, grid/sidebar/panel navigation, both sticks, paging, infinite-scroll loading, platform switching, install, play, Start-to-play, ignoring input while a game runs, dropdowns and number fields, saving settings, opting out. It surfaced and fixed four real bugs (focus-lift mis-navigation, Down jumping to the menu, focus parking on the search box, and a library "No games" flash).
+- RetroAchievements: matching, offline copy and refresh errors against a fake server shaped like RomM's responses (including its badge-name quirk), and the panel in the real app, with and without the `me.write` scope.
+- Windows path logic is unit-tested, and the core + CLI have been built on Windows.
+- Token storage on Linux: the keychain logic is unit-tested against an in-memory stand-in (fallbacks, migration, sign-out), a real round trip passed against GNOME Keyring in a private D-Bus session, and the real `romm` binary was run against it and a mock server: login into the keychain, upgrade from an old token file, sign-out, no D-Bus session at all, a keyring locked with no prompter available (it fails fast and falls back with a warning rather than hanging), and the opt-out.
+
+**Not verified, so please test**
+- **The Windows keychain backend** (Credential Manager, `persistence = Local`) has not been compiled or run; only the code shared with Linux has. `cargo test -p romm-core real_os_keychain -- --ignored` on a Windows desktop session runs a real round trip.
+- KWallet and KeePassXC as the Secret Service provider (only GNOME Keyring was tried), and a Linux desktop session where an unlock dialog really appears.
+- **Emulator settings with the real emulators.** None of Dolphin, PCSX2, DuckStation, PPSSPP, Azahar, xemu or RetroArch has been run with them; the options and files come from source, and the stand-ins only prove the app does what it intends. Most worth testing: that Azahar's resolution actually changes (its config folder on Windows and the `\default` flag are from source only), that PPSSPP finds `SYSTEM/ppsspp.ini` where expected, and that RetroArch picks up the per-core options file it is given. The Emulator settings tab was tested mounted against a fake backend, not in the built app. The e2e scripts `drive.py`, `drive_choices.py` and `drive_pad.py` were edited for the tabbed Settings and Emulators & BIOS pages (and `drive_choices.py` gained a check of the Emulator settings tab) but **have not been re-run**.
+- With **real emulators**. Launch flags and save/state folders come from each project's documented behaviour. Likeliest to need tweaks: Wii NAND roots, DuckStation/PCSX2/PPSSPP state folder names, PCSX2 state file naming. The Azahar and xemu profiles were checked against those projects' source code and docs but never run against the real emulators (xemu's save upload and restore are tested against disk images built with libfatx and QEMU, and judged by `qemu-img check`/`compare` and libfatx; one real image's titles were listed by the CLI, but nothing has been run against a live RomM or a real console save); for Azahar, the Windows install locations are guesses and the save roots assume the default all-zero `sdmc` id folders (a console-imported `movable.sed` changes them). Azahar needs your console's keys in `sysdata/keys.txt` to play encrypted dumps (older Citra guides call it `aes_keys.txt`).
+- Flatpak launches.
+
+**Known limits**
+- Versions: the whole library is held in memory, so a very large library takes a moment to load the first time (progress is shown) and changes made on the server show up after ↻ or 10 minutes. The Installed list works offline and therefore shows only what is installed, with no dropdown for versions you haven't. `romm games` (CLI) lists every file, not one per game. RomM links "siblings" by any shared provider id, so now and then it chains in an unrelated game (Argosy documents HeartGold/SoulSilver); such a game appears in the dropdown, with its full file name when its label would clash. The version labels are read from file names; a file with no tags is labelled by its whole name. The search is local, over names and file names, and doesn't use RomM's alternative titles.
+- Keyboard shortcuts are minimal (`/` focuses search, `Esc` closes the panel).
+- Nintendo pads are labelled as printed (their A/B are swapped relative to Xbox) but "accept" is always the bottom button; there is no swap option yet.
+- RetroArch states only interoperate when both devices use the same core and version. (Saves do interoperate with Argosy; see above.)
+- No in-app conflict-resolution dialog yet. "Leave it alone" reports conflicts without acting; the other policies resolve them automatically.
+- The token lives in the OS keychain (Windows Credential Manager; the Secret Service on Linux, i.e. GNOME Keyring, KWallet, KeePassXC), not in a file: see "Where the token is kept" below. Where there is no keychain it falls back to a 0600 file, which is not encrypted, and the user is told so. macOS has no keychain support yet and uses the file.
+- Unclaimed saves (above) are only claimed automatically, for sessions launched from here. Argosy also lets you claim one by hand; there is no equivalent yet. The claim logic is exercised against a Dreamcast VMU; Sega CD and Saturn take the same path but no BRAM/Saturn image was available to test with.
+- PS2: PCSX2's card is built and read by the same code as Argosy's, but it is the one emulator whose real card images the tests could not reproduce (a valid PS2 card needs ECC-protected data), so it is checked only for routing and the "nothing saved yet" case.
+- RetroArch core options (`.opt`) are read only for cores that travel as units, where Sigil's layout can depend on them (Genesis Plus GX's backup-RAM mode, Flycast's per-game VMUs). Argosy doesn't read them at all, so a non-default setting is honoured here but not there.

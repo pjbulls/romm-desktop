@@ -1,0 +1,53 @@
+name: audit
+on:
+  # Weekly as well as on changes: advisories are published without any commit here, and this is how
+  # a new one in an existing dependency gets noticed.
+  schedule: [{ cron: '23 5 * * 1' }]
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      # .cargo/audit.toml ignores advisories about zip on the grounds that this code never reaches the
+      # affected parts. Hold it to that, so an ignore cannot go stale without somebody noticing.
+      - name: The ignored zip advisories still do not apply
+        run: |
+          if grep -rnE 'extract_unwrapped_root_dir|ZipStreamReader|read_zipfile_from_stream|\.extract\(' --include=*.rs crates app/src-tauri/src; then
+            echo "::error::zip's extraction helpers are used above; .cargo/audit.toml ignores advisories that only hold while they are not. Re-read it (or upgrade zip to 9)."
+            exit 1
+          fi
+          if ! grep -qE '^zip = \{[^}]*default-features = false' Cargo.toml || grep -qE '^zip = .*aes' Cargo.toml; then
+            echo "::error::the workspace's zip dependency no longer has default features off and no AES; .cargo/audit.toml ignores RUSTSEC-2026-0545 on that basis."
+            exit 1
+          fi
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.23.0
+      # Fails on vulnerabilities. Unmaintained and unsound crates are printed as warnings: the ones there
+      # now come from Tauri's GTK3 bindings and cannot be changed from here (see .cargo/audit.toml).
+      - run: cargo audit
+
+  npm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      # What ships: the app bundles only these four packages, so this is the check that fails the run.
+      - name: Production dependencies
+        run: npm audit --omit=dev --package-lock-only --audit-level=high
+        working-directory: app
+      # Build and test tooling (vite, vitest) never reaches the shipped app, and an advisory there can be one
+      # nobody has fixed yet (picomatch, when this was written: no patched version exists). It is shown,
+      # so that it is seen, but does not fail the run.
+      - name: Dev tooling (informational)
+        continue-on-error: true
+        run: npm audit --package-lock-only --audit-level=high
+        working-directory: app

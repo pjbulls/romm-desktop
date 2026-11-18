@@ -1,0 +1,72 @@
+id = "pcsx2"
+name = "PCSX2"
+platforms = ["ps2"]
+
+[detect]
+linux_bins = ["pcsx2-qt", "pcsx2", "PCSX2-qt.AppImage"]
+windows_exes = [
+  "{programfiles}/PCSX2/pcsx2-qt.exe",
+  "{localappdata}/Programs/PCSX2/pcsx2-qt.exe",
+]
+flatpak_id = "net.pcsx2.PCSX2"
+
+[launch]
+args = ["-batch", "--", "{rom}"]
+# PCSX2 has no playlist support (nothing in its source reads a .m3u). Handed one, it falls through
+# VMManager::AutoDetectSource to "assume it is a disc image", looks for the ISO 9660 signature at
+# sector 16 and fails with "Unable to identify the ISO image type for 'X.m3u'". A multi-disc game
+# (stored with its playlist as the launch file) is launched on the first disc it lists instead; the
+# other discs are swapped in from PCSX2's own Change Disc action.
+no_playlists = true
+# Nor does it read a .cue sheet: its reader has "TODO: When cue support is added" (CDVDisoReader.cpp),
+# though the file dialogs list *.cue. A multi-file bin/cue game is launched on the data track's .bin,
+# which PCSX2 does take (it sniffs the sector layout; Mode 2 raw, 2336 and 2048 images are
+# recognised). A disc dumped with audio tracks plays without them: only the one file is opened.
+no_cue_sheets = true
+
+[data]
+linux = ["{xdg_config}/PCSX2"]
+flatpak = ["{home}/.var/app/net.pcsx2.PCSX2/config/PCSX2"]
+windows = [
+  { path = "{exe_dir}", requires = "{exe_dir}/portable.ini" },
+  "{documents}/PCSX2",
+]
+
+# Memory cards (file or folder cards, named by Slot1_Filename); the game's card is cut out of them
+# by game id (see unit.rs / route.rs).
+[saves]
+mode = "diff"
+
+[states]
+mode = "diff"
+dir = "sstates"
+ignore_extensions = ["png", "jpg"]
+
+[bios]
+dir = "bios"
+
+# --- Settings the app can control (see emu_settings.rs) ---------------------------------------
+# Checked against PCSX2's source: `upscale_multiplier` is a float in the `[EmuCore/GS]` section of
+# `inis/PCSX2.ini` under the data folder (pcsx2/Pcsx2Config.cpp: GSOptions, and EmuFolders::Settings),
+# and `-fullscreen` / `-nofullscreen` are its own flags (pcsx2-qt/QtHost.cpp).
+[[settings]]
+id = "resolution"
+label = "Internal resolution"
+choices = [
+  { value = "1", label = "1× (native)" },
+  { value = "2", label = "2× (about 720p)" },
+  { value = "3", label = "3× (about 1080p)" },
+  { value = "4", label = "4× (about 1440p)" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6× (about 4K)" },
+  { value = "8", label = "8×" },
+]
+apply = [{ type = "ini", file = "inis/PCSX2.ini", section = "EmuCore/GS", sets = [{ key = "upscale_multiplier", value = "{value}" }] }]
+
+[[settings]]
+id = "fullscreen"
+label = "Screen mode"
+choices = [
+  { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-fullscreen"] }] },
+  { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-nofullscreen"] }] },
+]
