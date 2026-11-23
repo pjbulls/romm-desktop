@@ -51,3 +51,13 @@ choices = [
   { value = "10", label = "10× (4800×2720)" },
 ]
 apply = [{ type = "ini", file = "SYSTEM/ppsspp.ini", section = "Graphics", sets = [{ key = "InternalResolution", value = "{value}" }] }]
+
+# --- Hardcore mode (see hardcore.rs) -------------------------------------------------------------
+# A save made while this is on goes to RomM carrying Argosy's hardcore marker. Names and defaults are
+# from PPSSPP's Core/Config.cpp: `[Achievements]` in SYSTEM/ppsspp.ini; challenge mode (its name for
+# hardcore) is on by default, achievements are off.
+[hardcore]
+file = "SYSTEM/ppsspp.ini"
+section = "Achievements"
+enabled = { key = "AchievementsEnable", default = false }
+mode = { key = "AchievementsChallengeMode", default = true }

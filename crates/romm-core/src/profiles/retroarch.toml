@@ -90,3 +90,13 @@ choices = [
   { value = "9", label = "9× (about 4K)" },
 ]
 apply = [{ type = "retroarch_option", sets = [{ key = "swanstation_GPU_ResolutionScale", value = "{value}" }] }]
+
+# --- Hardcore mode (see hardcore.rs) -------------------------------------------------------------
+# A save made while this is on goes to RomM carrying Argosy's hardcore marker. Names and defaults are
+# from RetroArch's configuration.c and config.def.h: flat keys in retroarch.cfg; hardcore is on by
+# default, achievements are off. Every core that runs under RetroArch shares these two switches.
+[hardcore]
+format = "cfg"
+file = "retroarch.cfg"
+enabled = { key = "cheevos_enable", default = false }
+mode = { key = "cheevos_hardcore_mode_enable", default = true }

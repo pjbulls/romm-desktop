@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use crate::api::types::*;
 use crate::api::RommClient;
 use crate::error::{Error, Result};
+use crate::hardcore;
 use crate::profiles::Profile;
 use crate::retroarch;
 use crate::route::{self, Kind, Plan};
@@ -101,6 +102,10 @@ pub struct LocalUnit {
     pub hash: String,
     /// Differs from what was last exchanged with the server.
     pub changed: bool,
+    /// Goes up as a hardcore save, carrying Argosy's marker (see `hardcore`). Settled by
+    /// `set_marked` once it is known how the save was made; `hash` and `size` then describe the file
+    /// as it is uploaded.
+    pub marked: bool,
 }
 
 impl LocalUnit {
@@ -119,10 +124,32 @@ impl LocalUnit {
         Ok(self.data()?.into_owned())
     }
 
+    /// The bytes as they are uploaded: the save, with Argosy's hardcore marker after it when it is a
+    /// hardcore save.
+    pub fn upload_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = self.bytes()?;
+        Ok(if self.marked { hardcore::mark(&bytes) } else { bytes })
+    }
+
+    /// Settles that this save goes up as a hardcore save. RomM hashes a zip by its entries, so the
+    /// marker leaves a zip's hash alone; any other save is hashed as the whole file, marker included.
+    fn set_marked(&mut self, marked: bool) -> Result<()> {
+        if !marked || self.marked {
+            return Ok(());
+        }
+        let data = self.data()?;
+        if !saves::is_zip(&data) {
+            self.hash = unit::content_hash(&hardcore::mark(&data));
+        }
+        self.size += hardcore::MARKER_LEN as u64;
+        self.marked = true;
+        Ok(())
+    }
+
     /// Keeps a copy in `dir`, in the form that would have been uploaded, before something replaces it.
     fn backup_to(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join(&self.file_name), self.data()?)?;
+        std::fs::write(dir.join(&self.file_name), self.upload_bytes()?)?;
         Ok(())
     }
 
@@ -154,14 +181,22 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
             let meta = std::fs::metadata(path)?;
             let hash = saves::md5_file(path)?;
             let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            // A hardcore save came down with its marker, which the emulator's file doesn't keep, and
+            // RomM hashed the whole file: the baseline is the hash of this file with the marker back.
+            let unchanged = last == Some(hash.as_str())
+                || match (rec.is_some_and(|r| r.hardcore), last) {
+                    (true, Some(l)) => l == unit::content_hash(&hardcore::mark(&std::fs::read(path)?)),
+                    _ => false,
+                };
             Ok(Some(LocalUnit {
                 emulator: plan.label.clone(),
                 slot: SLOT.into(),
                 file_name: upload_name(&rom.stem, &ext),
                 size: meta.len(),
                 modified: meta.modified()?,
-                changed: last != Some(hash.as_str()),
+                changed: !unchanged,
                 hash,
+                marked: false,
                 kind: LocalKind::Raw(path.clone()),
             }))
         }
@@ -209,6 +244,7 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                 },
                 changed: last != Some(hash.as_str()),
                 hash,
+                marked: false,
                 kind: LocalKind::Bytes(data),
             }))
         }
@@ -224,6 +260,7 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                 modified,
                 hash: u.content_hash.clone(),
                 changed: u.changed || rec.is_some_and(|r| r.dirty),
+                marked: false,
                 kind: LocalKind::Unit(u),
             }))
         }
@@ -239,6 +276,7 @@ pub fn gather(rom: &LocalRom, id: &Identity, plan: &Plan, rec: Option<&SaveRecor
                 modified: c.modified,
                 changed: last != Some(c.content_hash.as_str()),
                 hash: c.content_hash.clone(),
+                marked: false,
                 kind: LocalKind::Folder(c),
             }))
         }
@@ -395,13 +433,23 @@ impl<'a> Syncer<'a> {
                 self.claim_unowned(rom, &id, p, route, play.is_some());
             }
         }
-        let (local, unreadable) = match &plan {
+        let (mut local, mut unreadable) = match &plan {
             None => (None, None),
             Some(p) => match gather_from_state(self.state, rom, &id, p) {
                 Ok(l) => (l, None),
                 Err(e) => (None, Some(e)),
             },
         };
+        // Hardcore or casual decides how the save is uploaded, and for a plain save file its hash,
+        // so it is settled before anything is reported to the server.
+        let marking = local.as_mut().map(|l| {
+            let marked = self.decide_hardcore(rom, env, &label, l, play.is_some());
+            l.set_marked(marked)
+        });
+        if let Some(Err(e)) = marking {
+            unreadable = Some(e);
+            local = None;
+        }
         if let Some(e) = &unreadable {
             report.failed.push(format!("{}: {e}", name_base(rom, plan.as_ref())));
         }
@@ -539,7 +587,7 @@ impl<'a> Syncer<'a> {
     }
 
     async fn upload(&mut self, cx: &Cx<'_>, local: &LocalUnit, slot: Option<String>, file_name: String, report: &mut SyncReport) -> Result<()> {
-        let bytes = local.bytes()?;
+        let bytes = local.upload_bytes()?;
         let hash = unit::content_hash(&bytes);
         let params = self.upload_params(cx, &local.emulator, slot.clone(), &hash, &file_name);
         match self.client.upload_save(&params, bytes).await {
@@ -580,19 +628,22 @@ impl<'a> Syncer<'a> {
 
         let name = match &plan.kind {
             Kind::Xbox { image, save_id: title } => {
-                if !saves::is_zip(&bytes) {
+                let (body, marked) = hardcore::split(&bytes);
+                if !saves::is_zip(body) {
                     return Err(Error::msg("the server's save for this game isn't a zip of its UDATA folder, so it wasn't applied to xemu"));
                 }
                 if let Some(local) = cx.local {
                     local.backup_to(&backup)?;
                 }
                 // All or nothing, verified by reading it back; a failure leaves the disk as it was.
-                xbox::import_save(image, title, &bytes)?;
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                xbox::import_save(image, title, body)?;
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, marked);
                 upload_name(&cx.rom.stem, "zip")
             }
             Kind::Raw { path, exists } => {
-                if saves::is_zip(&bytes) {
+                // A hardcore save from Argosy ends in its marker; the emulator's save file must not.
+                let (body, marked) = hardcore::split(&bytes);
+                if saves::is_zip(body) {
                     return Err(Error::msg(format!(
                         "the server's save is a unit from a core with its own save layout; {} keeps a plain save file, so it wasn't applied",
                         plan.label
@@ -602,8 +653,8 @@ impl<'a> Syncer<'a> {
                 if *exists {
                     saves::backup_file(path, &backup, &fname)?;
                 }
-                saves::write_atomic(path, &bytes)?;
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                saves::write_atomic(path, body)?;
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, marked);
                 fname
             }
             Kind::Unit(route) => {
@@ -618,7 +669,7 @@ impl<'a> Syncer<'a> {
                 let blob = self.state.sigil_state(&route.state_key());
                 let restored = unit::restore(route, cx.id, &plan.content_name, &bytes, blob.as_deref())?;
                 self.state.set_sigil_state(&route.state_key(), &restored.state);
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, restored.hardcore_marker);
                 upload_name(&cx.rom.stem, &extension_of_unit(&bytes))
             }
             Kind::Folder { content, title_id } => {
@@ -626,9 +677,10 @@ impl<'a> Syncer<'a> {
                 if let Some(local) = cx.local {
                     local.backup_to(&backup)?;
                 }
-                let restored = xenia::restore(content, title_id, &bytes)?;
+                let (body, marked) = hardcore::split(&bytes);
+                let restored = xenia::restore(content, title_id, body)?;
                 tracing::debug!("restored {} file(s) into {}, {} header(s) written", restored.files, restored.dir.display(), restored.headers_written);
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at);
+                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, marked);
                 upload_name(&name_base(cx.rom, Some(plan)), "zip")
             }
         };
@@ -658,7 +710,7 @@ impl<'a> Syncer<'a> {
         let Some(u) = converted else {
             // Put back, but Sigil can't find it by id (the ROM couldn't be identified): leave the
             // server's copy as it was.
-            self.remember_download(cx, &plan.label, legacy_hash, save_id, None);
+            self.remember_download(cx, &plan.label, legacy_hash, save_id, None, false);
             report.downloaded.push(upload_name(&cx.rom.stem, "zip"));
             return Ok(());
         };
@@ -666,14 +718,44 @@ impl<'a> Syncer<'a> {
         let params = self.upload_params(cx, &plan.label, Some(SLOT.to_string()), &u.content_hash, &file_name);
         let saved = self.client.replace_save(save_id, &params, u.data.clone()).await?;
         let stored = saved.content_hash.clone().unwrap_or_else(|| u.content_hash.clone());
-        self.remember_download(cx, &plan.label, &stored, saved.id, saved.updated_at.clone());
+        self.remember_download(cx, &plan.label, &stored, saved.id, saved.updated_at.clone(), false);
         self.state.set_sigil_state(&route.state_key(), &u.state);
         report.downloaded.push(file_name);
         Ok(())
     }
 
-    fn remember_download(&mut self, cx: &Cx<'_>, label: &str, hash: &str, save_id: i64, server_updated_at: Option<String>) {
-        self.state.save_record(cx.rom.rom_id, label).mark_synced(hash, Some(save_id), server_updated_at);
+    /// The server's version is now this machine's too. `hardcore` is whether it came down carrying
+    /// Argosy's hardcore marker, which the save on disk doesn't keep; it is remembered so that the
+    /// marker goes back up with the save.
+    fn remember_download(&mut self, cx: &Cx<'_>, label: &str, hash: &str, save_id: i64, server_updated_at: Option<String>, hardcore: bool) {
+        let rec = self.state.save_record(cx.rom.rom_id, label);
+        rec.mark_synced(hash, Some(save_id), server_updated_at);
+        rec.hardcore = hardcore;
+    }
+
+    /// Whether the save about to be exchanged is a hardcore one, which is what Argosy wants to be told
+    /// and what it keeps apart from casual saves.
+    ///
+    /// - Unchanged since it was last exchanged: it is what that exchange made it.
+    /// - Changed during the play session that has just ended: hardcore when the emulator is set to
+    ///   play in hardcore mode. Remembered at once, so that a failed upload doesn't lose it.
+    /// - Changed outside a session (another program, or an upload that failed earlier): hardcore only
+    ///   if the session that made the changes was, as remembered. Nothing else can show a save was
+    ///   made in hardcore, and a casual save must never be passed off as one.
+    fn decide_hardcore(&mut self, rom: &LocalRom, env: &EmuEnv, label: &str, local: &LocalUnit, in_session: bool) -> bool {
+        let (was, pending) = self.state.saves.get(&save_key(rom.rom_id, label)).map_or((false, false), |r| (r.hardcore, r.pending_hardcore));
+        if !local.changed {
+            return was;
+        }
+        if !in_session {
+            return pending;
+        }
+        let hardcore = hardcore::session_is_hardcore(env);
+        // A casual session adds nothing to the state; only a hardcore one has something to remember.
+        if hardcore || self.state.saves.contains_key(&save_key(rom.rom_id, label)) {
+            self.state.save_record(rom.rom_id, label).pending_hardcore = hardcore;
+        }
+        hardcore
     }
 
     fn upload_params(&self, cx: &Cx<'_>, emulator: &str, slot: Option<String>, content_hash: &str, file_name: &str) -> UploadParams {
@@ -722,7 +804,7 @@ impl<'a> Syncer<'a> {
                 self.download(cx, server_id, op.server_updated_at.clone(), report).await
             }
             ConflictPolicy::DeviceWins => {
-                let bytes = local.bytes()?;
+                let bytes = local.upload_bytes()?;
                 let hash = unit::content_hash(&bytes);
                 let params = self.upload_params(cx, &local.emulator, Some(local.slot.clone()), &hash, &local.file_name);
                 let saved = self.client.replace_save(server_id, &params, bytes).await?;
@@ -737,7 +819,9 @@ impl<'a> Syncer<'a> {
     /// The save is now on the server: remember what was exchanged, and let Sigil's state catch up
     /// (it must not advance before this, or a failed upload would lose the change marker).
     fn record_synced(&mut self, cx: &Cx<'_>, local: &LocalUnit, hash: &str, save_id: Option<i64>, server_updated_at: Option<String>) {
-        self.state.save_record(cx.rom.rom_id, &local.emulator).mark_synced(hash, save_id, server_updated_at);
+        let rec = self.state.save_record(cx.rom.rom_id, &local.emulator);
+        rec.mark_synced(hash, save_id, server_updated_at);
+        rec.hardcore = local.marked;
         if let (LocalKind::Unit(u), Some(Plan { kind: Kind::Unit(route), .. })) = (&local.kind, cx.plan) {
             self.state.set_sigil_state(&route.state_key(), &u.state);
         }

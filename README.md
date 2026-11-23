@@ -19,6 +19,7 @@ Known emulators include:
   + More can be configured via additional [profiles](./crates/romm-core/src/profiles)
 - **Controller support**: browse, play, and configure with no mouse or keyboard (excluding file picker dialogs).
 - **Interoperable**: bidirectional save file compatibility with [Argosy](https://github.com/rommapp/argosy-launcher).
+  + **Hardcore saves**: Argosy keeps RetroAchievements hardcore saves apart from casual ones by marking the file it uploads, and won't silently replace a hardcore save with an unmarked one. A save from a hardcore Argosy session is therefore kept marked on this machine, and goes back up marked when you've played it in hardcore here too. That means RetroArch, PPSSPP, DuckStation, PCSX2 or Dolphin with achievements *and* hardcore mode enabled (read from their settings files when the session ends). A save changed any other way is uploaded as a casual save: Argosy will then ask whether to keep its hardcore save or take the new one. Azahar, xemu and Xenia have no RetroAchievements support, so their saves are never marked. Needs RomM before 5.5 (without snapshot sync), which is what this app talks to.
 
 ##  Setup
 

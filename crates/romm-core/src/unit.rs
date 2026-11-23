@@ -315,7 +315,9 @@ impl Unit {
 #[derive(Debug, Clone, Default)]
 pub struct Restored {
     pub state: Vec<u8>,
-    /// The unit ended in the hardcore marker old Argosy builds appended; it is left out of the saves.
+    /// The unit ended in the hardcore marker Argosy appends to a hardcore save (still, as of Argosy
+    /// 3.0, on servers without snapshot sync). It is left out of the saves, so it has to be kept
+    /// and put back when the save goes up again: see `hardcore`.
     pub hardcore_marker: bool,
 }
 

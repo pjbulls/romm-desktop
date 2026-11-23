@@ -59,3 +59,12 @@ choices = [
   { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-fullscreen"] }] },
   { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-nofullscreen"] }] },
 ]
+
+# --- Hardcore mode (see hardcore.rs) -------------------------------------------------------------
+# A save made while this is on goes to RomM carrying Argosy's hardcore marker. Names and defaults are
+# from DuckStation's src/core/settings.cpp: `[Cheevos]` in settings.ini, both off by default.
+[hardcore]
+file = "settings.ini"
+section = "Cheevos"
+enabled = { key = "Enabled", default = false }
+mode = { key = "ChallengeMode", default = false }

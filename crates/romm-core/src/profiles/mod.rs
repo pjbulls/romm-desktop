@@ -200,6 +200,43 @@ pub struct Setting {
     pub apply: Vec<Apply>,
 }
 
+/// How an emulator's settings file is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingsFormat {
+    /// `[Section]` headers with `key = value` lines (PPSSPP, DuckStation, PCSX2, Dolphin).
+    #[default]
+    Ini,
+    /// Flat `key = "value"` lines with no sections (RetroArch's `retroarch.cfg`).
+    Cfg,
+}
+
+/// One on/off switch in an emulator's settings, and what it is when the file doesn't mention it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Flag {
+    pub key: String,
+    /// What the emulator treats a missing key as (read from its source, not guessed).
+    pub default: bool,
+}
+
+/// Where an emulator keeps its RetroAchievements switches. A session counts as hardcore when the
+/// emulator has achievements enabled *and* hardcore mode on (see `hardcore`). An emulator with no
+/// such rule has no RetroAchievements support, so its saves are never marked.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HardcoreRule {
+    #[serde(default)]
+    pub format: SettingsFormat,
+    /// Relative to the data root.
+    pub file: String,
+    /// The `[section]` the keys are in (`ini` only).
+    #[serde(default)]
+    pub section: String,
+    /// Achievements switched on at all.
+    pub enabled: Flag,
+    /// Hardcore mode (an emulator may call it challenge mode).
+    pub mode: Flag,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -225,6 +262,9 @@ pub struct Profile {
     /// Settings the app can control (see `emu_settings`).
     #[serde(default)]
     pub settings: Vec<Setting>,
+    /// Where the emulator's RetroAchievements hardcore switch is, if it has one (see `hardcore`).
+    #[serde(default)]
+    pub hardcore: Option<HardcoreRule>,
 }
 
 impl Profile {

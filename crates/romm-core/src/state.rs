@@ -56,6 +56,16 @@ pub struct SaveRecord {
     /// only there), so Sigil alone would call it unchanged. Cleared once it has been transferred.
     #[serde(default)]
     pub dirty: bool,
+    /// The version last exchanged with the server was a hardcore save: it came down carrying
+    /// Argosy's hardcore marker, or went up with it (see `hardcore`). While the save is unchanged
+    /// it goes on being one.
+    #[serde(default)]
+    pub hardcore: bool,
+    /// The changes made since that exchange were made in a hardcore session but have not reached
+    /// the server yet (the upload failed, or the player is offline). Kept so that the next sync,
+    /// which is no longer right after the session, still marks them as the hardcore saves they are.
+    #[serde(default)]
+    pub pending_hardcore: bool,
 }
 
 impl SaveRecord {
@@ -70,6 +80,7 @@ impl SaveRecord {
         }
         self.server_updated_at = server_updated_at.or_else(|| Some(saves::iso(SystemTime::now())));
         self.dirty = false;
+        self.pending_hardcore = false;
     }
 }
 
@@ -456,5 +467,21 @@ mod tests {
         let on_disk = State::load(&p).unwrap();
         assert!(on_disk.roms.contains_key(&1) && on_disk.roms.contains_key(&2));
         assert_eq!(on_disk.saves[&save_key(1, "x")].last_hash.as_deref(), Some("h"));
+    }
+
+    #[test]
+    fn a_state_file_from_before_hardcore_saves_loads_as_casual() {
+        let old = r#"{"saves":{"7:snes9x":{"last_hash":"abc","server_save_id":11,"server_updated_at":"2026-01-02T03:04:05Z","dirty":false}}}"#;
+        let st: State = serde_json::from_str(old).unwrap();
+        let rec = &st.saves["7:snes9x"];
+        assert_eq!(rec.last_hash.as_deref(), Some("abc"));
+        assert!(!rec.hardcore && !rec.pending_hardcore);
+    }
+
+    #[test]
+    fn a_finished_exchange_clears_what_a_hardcore_session_left_pending() {
+        let mut rec = SaveRecord { pending_hardcore: true, ..Default::default() };
+        rec.mark_synced("h", Some(1), None);
+        assert!(!rec.pending_hardcore);
     }
 }

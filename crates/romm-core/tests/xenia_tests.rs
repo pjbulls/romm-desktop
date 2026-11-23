@@ -325,6 +325,36 @@ async fn a_fresh_machine_gets_the_save_with_its_header_and_the_next_sync_is_quie
 }
 
 #[tokio::test]
+async fn a_zip_carrying_argosys_hardcore_marker_is_restored_and_the_next_sync_is_quiet() {
+    // Argosy appends its marker after the archive; the marker must not stop the zip being read.
+    let (zip, server_hash) = archive_of(&[("SAVE1/data.bin", b"FROM-ARGOSY")]);
+    let marked = [zip.as_slice(), b"{\"h\":true,\"v\":1}\x10\x00\x00\x00ARGOSY\x01\x00".as_slice()].concat();
+    let server = MockServer::start().await;
+    mock_negotiate_once(&server, vec![op("download", Some(99), "Halo 3.zip")]).await;
+    mock_negotiate(&server, vec![op("no_op", Some(99), "Halo 3.zip")]).await;
+    mock_download(&server, 99, marked).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let storage = t.path().join("xenia");
+    std::fs::create_dir_all(storage.join(format!("content/{XUID}"))).unwrap();
+    let game = folder_game(&t.path().join("roms"), "Halo 3", TITLE_ID);
+    let c = client(&server);
+    let mut st = State::default();
+    let bak = t.path().join("bak");
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&game, &env(&storage), None).await.unwrap();
+    assert!(rep.is_clean() && rep.downloaded == ["Halo 3.zip"], "{rep:?}");
+    assert_eq!(std::fs::read(saved_dir(&storage).join("SAVE1/data.bin")).unwrap(), b"FROM-ARGOSY");
+    let rec = &st.saves[&save_key(7, "xenia")];
+    assert!(rec.hardcore);
+    assert_eq!(rec.last_hash.as_deref(), Some(server_hash.as_str()), "a zip's hash is its entries': same with the marker");
+
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&game, &env(&storage), None).await.unwrap();
+    assert_eq!(rep.unchanged, 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty(), "no upload");
+}
+
+#[tokio::test]
 async fn restoring_keeps_a_copy_of_what_was_there_and_leaves_dlc_alone() {
     let (zip, _) = archive_of(&[("SAVE1/data.bin", b"SERVER")]);
     let server = MockServer::start().await;

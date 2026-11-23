@@ -62,3 +62,14 @@ choices = [
   { value = "on", label = "Fullscreen", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=True"] }] },
   { value = "off", label = "Windowed", apply = [{ type = "args", args = ["-C", "Dolphin.Display.Fullscreen=False"] }] },
 ]
+
+# --- Hardcore mode (see hardcore.rs) -------------------------------------------------------------
+# A save made while this is on goes to RomM carrying Argosy's hardcore marker. Names and defaults are
+# from Dolphin's Source/Core/Core/Config/AchievementSettings.cpp: `[Achievements]` in its own
+# RetroAchievements.ini (in Config/, or the config folder beside the data one), hardcore on by
+# default once achievements are enabled.
+[hardcore]
+file = "RetroAchievements.ini"
+section = "Achievements"
+enabled = { key = "Enabled", default = false }
+mode = { key = "HardcoreEnabled", default = true }

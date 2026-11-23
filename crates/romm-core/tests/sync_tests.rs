@@ -1579,3 +1579,315 @@ async fn a_slot_emptied_on_the_server_untracks_a_unit_but_never_touches_the_emul
     assert!(!st.saves.contains_key(&save_key(7, "ppsspp")));
     assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.downloaded.is_empty(), "{rep:?}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Hardcore: Argosy's marker travels with the save (see `hardcore`)
+// ---------------------------------------------------------------------------------------------
+
+/// What Argosy appends to a hardcore save: `{"h":true,"v":1}`, its length (16) as a little-endian
+/// u32, then `ARGOSY\x01\x00`.
+const MARKER: &[u8] = b"{\"h\":true,\"v\":1}\x10\x00\x00\x00ARGOSY\x01\x00";
+
+fn marked(bytes: &[u8]) -> Vec<u8> {
+    [bytes, MARKER].concat()
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// RetroArch with achievements on and hardcore mode set as given.
+fn retroarch_hardcore_env(root: &Path, hardcore: bool) -> EmuEnv {
+    std::fs::create_dir_all(root.join("saves")).unwrap();
+    std::fs::write(root.join("retroarch.cfg"), format!("cheevos_enable = \"true\"\ncheevos_hardcore_mode_enable = \"{hardcore}\"\n")).unwrap();
+    retroarch_env(root, "snes9x")
+}
+
+async fn mock_upload_ok(server: &MockServer, hash: &str) {
+    Mock::given(method("POST")).and(path("/api/saves")).respond_with(ResponseTemplate::new(201).set_body_json(stored_json(11, "Zelda.srm", hash))).mount(server).await;
+}
+
+#[tokio::test]
+async fn a_hardcore_session_uploads_a_plain_save_file_with_argosys_marker() {
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"LOCAL").unwrap();
+    let sent = marked(b"LOCAL");
+    let md5 = saves::md5_bytes(&sent);
+
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", None, "Zelda.srm")]).await;
+    mock_upload_ok(&server, &md5).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    let mut st = State::default();
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+    assert_eq!(rep.uploaded, ["Zelda.srm"]);
+
+    // RomM hashes a plain file whole, marker included; the negotiation says what will be uploaded.
+    let neg: Value = reqs(&server, "POST", "/api/sync/negotiate").await[0].body_json().unwrap();
+    assert_eq!(neg["saves"][0]["content_hash"], md5.as_str());
+    assert_eq!(neg["saves"][0]["file_size_bytes"], 5 + MARKER.len());
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert_eq!(query(up)["content_hash"], md5);
+    assert!(contains(&up.body, &sent), "the file went up with the marker after it");
+
+    // The emulator's own file is never touched, and the record says what was sent.
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"LOCAL");
+    let rec = &st.saves[&save_key(7, "snes9x")];
+    assert!(rec.hardcore && !rec.pending_hardcore);
+    assert_eq!(rec.last_hash.as_deref(), Some(md5.as_str()));
+}
+
+#[tokio::test]
+async fn a_session_with_hardcore_off_uploads_the_plain_save_and_says_nothing_of_hardcore() {
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, false);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"LOCAL").unwrap();
+    let md5 = saves::md5_bytes(b"LOCAL");
+
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", None, "Zelda.srm")]).await;
+    mock_upload_ok(&server, &md5).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    let mut st = State::default();
+    syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert_eq!(query(up)["content_hash"], md5);
+    assert!(!contains(&up.body, b"ARGOSY"));
+    assert!(!st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn a_hardcore_save_from_argosy_is_written_without_its_marker_and_is_not_seen_as_changed() {
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_env(&ra, "snes9x"); // no achievements configured: nothing here is hardcore
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let theirs = marked(b"THEIRS");
+    let server_hash = saves::md5_bytes(&theirs);
+
+    let server = MockServer::start().await;
+    mock_negotiate_once(&server, vec![op("download", Some(11), "Zelda.srm")]).await;
+    mock_negotiate(&server, vec![op("no_op", Some(11), "Zelda.srm")]).await;
+    mock_save_content(&server, 11, theirs).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    let mut st = State::default();
+    let bak = t.path().join("bak");
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::ServerWins).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    assert_eq!(rep.downloaded, ["Zelda.srm"]);
+    // The save file is the save, not Argosy's bookkeeping.
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"THEIRS");
+    let rec = &st.saves[&save_key(7, "snes9x")];
+    assert!(rec.hardcore);
+    assert_eq!(rec.last_hash.as_deref(), Some(server_hash.as_str()));
+
+    // The file on disk hashes differently from what RomM holds (no marker), yet nothing has changed:
+    // no upload, and the server's own hash goes back to it.
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::ServerWins).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    assert_eq!(rep.unchanged, 1, "{rep:?}");
+    let second: Value = reqs(&server, "POST", "/api/sync/negotiate").await[1].body_json().unwrap();
+    assert_eq!(second["saves"][0]["content_hash"], server_hash.as_str());
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty());
+}
+
+/// A game whose last exchange was a hardcore save from Argosy, now edited on this machine.
+fn edited_hardcore_save(t: &Path, hardcore_session: bool) -> (EmuEnv, State) {
+    let ra = t.join("ra");
+    let env = retroarch_hardcore_env(&ra, hardcore_session);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"EDITED").unwrap();
+    let mut st = State::default();
+    let rec = st.save_record(7, "snes9x");
+    rec.mark_synced(&saves::md5_bytes(&marked(b"THEIRS")), Some(11), Some(SERVER_TIME.into()));
+    rec.hardcore = true;
+    (env, st)
+}
+
+#[tokio::test]
+async fn a_hardcore_save_edited_in_a_hardcore_session_goes_back_marked() {
+    let t = tempfile::tempdir().unwrap();
+    let (env, mut st) = edited_hardcore_save(t.path(), true);
+    let sent = marked(b"EDITED");
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", Some(11), "Zelda.srm")]).await;
+    mock_upload_ok(&server, &saves::md5_bytes(&sent)).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert!(contains(&up.body, &sent));
+    assert!(st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn a_hardcore_save_edited_in_a_casual_session_goes_back_as_the_casual_save_it_now_is() {
+    // The marker says "made in hardcore": it is not carried over onto progress made without it.
+    let t = tempfile::tempdir().unwrap();
+    let (env, mut st) = edited_hardcore_save(t.path(), false);
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", Some(11), "Zelda.srm")]).await;
+    mock_upload_ok(&server, &saves::md5_bytes(b"EDITED")).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert_eq!(query(up)["content_hash"], saves::md5_bytes(b"EDITED"));
+    assert!(!contains(&up.body, b"ARGOSY"));
+    assert!(!st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn a_hardcore_session_whose_upload_failed_is_still_marked_when_the_next_sync_sends_it() {
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"LOCAL").unwrap();
+    let sent = marked(b"LOCAL");
+
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", None, "Zelda.srm")]).await;
+    Mock::given(method("POST")).and(path("/api/saves")).respond_with(ResponseTemplate::new(500)).up_to_n_times(1).mount(&server).await;
+    mock_upload_ok(&server, &saves::md5_bytes(&sent)).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    let mut st = State::default();
+    let bak = t.path().join("bak");
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    let rec = &st.saves[&save_key(7, "snes9x")];
+    assert!(rec.pending_hardcore && rec.last_hash.is_none(), "nothing is synced, but how the save was made is remembered");
+
+    // Later, outside any session (and with hardcore switched off meanwhile): still sent as hardcore.
+    retroarch_hardcore_env(&ra, false);
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    assert_eq!(rep.uploaded, ["Zelda.srm"]);
+    let up = &reqs(&server, "POST", "/api/saves").await[1];
+    assert!(contains(&up.body, &sent));
+    let rec = &st.saves[&save_key(7, "snes9x")];
+    assert!(rec.hardcore && !rec.pending_hardcore);
+}
+
+#[tokio::test]
+async fn a_save_changed_outside_any_session_is_never_passed_off_as_hardcore() {
+    // Hardcore switched on, but nothing played: a copied-in save has no hardcore session behind it.
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"COPIED").unwrap();
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", None, "Zelda.srm")]).await;
+    mock_upload_ok(&server, &saves::md5_bytes(b"COPIED")).await;
+    mock_complete(&server).await;
+
+    let c = client(&server);
+    let mut st = State::default();
+    syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert!(!contains(&up.body, b"ARGOSY"));
+    assert!(!st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn psp_save_from_a_hardcore_session_on_argosy_is_restored_and_agrees_with_the_server() {
+    let t = tempfile::tempdir().unwrap();
+    let r = rom_file(&t.path().join("roms"), "Crisis Core [ULUS10064].iso", "psp");
+    let argosy_unit = {
+        let src = t.path().join("src");
+        psp_memory_stick(&src);
+        unit::collect(&psp_route(&src.join("PSP")), &unit::identify(&r.launch_path, "psp"), "x.iso", None).unwrap().unwrap()
+    };
+    // The same zip with Argosy's marker after it: RomM hashes a zip by its entries, so not the hash.
+    let theirs = marked(&argosy_unit.data);
+    assert_eq!(unit::content_hash(&theirs), PSP_HASH);
+
+    let root = t.path().join("ppsspp/PSP");
+    let name = "Crisis Core [ULUS10064].zip";
+    let server = MockServer::start().await;
+    mock_negotiate_once(&server, vec![op("download", Some(21), name)]).await;
+    mock_negotiate(&server, vec![op("no_op", Some(21), name)]).await;
+    mock_save_content(&server, 21, theirs).await;
+    mock_complete(&server).await;
+
+    let env = standalone_env("ppsspp", &root);
+    let c = client(&server);
+    let mut st = State::default();
+    let bak = t.path().join("bak");
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::ServerWins).sync_rom(&r, &env, None).await.unwrap();
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(rep.downloaded, [name]);
+    assert_eq!(std::fs::read(root.join("SAVEDATA/ULUS10064DATA00/DATA.BIN")).unwrap(), vec![b'A'; 300]);
+    let rec = &st.saves[&save_key(7, "ppsspp")];
+    assert!(rec.hardcore, "Sigil reported the marker and it was kept");
+    assert_eq!(rec.last_hash.as_deref(), Some(PSP_HASH));
+
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::ServerWins).sync_rom(&r, &env, None).await.unwrap();
+    assert_eq!(rep.unchanged, 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/saves").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_psp_hardcore_session_uploads_the_unit_with_argosys_marker_and_the_same_hash() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src");
+    psp_memory_stick(&src);
+    let root = t.path().join("ppsspp/PSP");
+    write(&root, "SYSTEM/ppsspp.ini", b"[Achievements]\nAchievementsEnable = True\nAchievementsChallengeMode = True\n");
+    let r = rom_disc(&t.path().join("roms"), "Crisis Core.iso", "psp", &psp_disc("ULUS-10064"));
+    let name = "Crisis Core.zip";
+
+    let server = MockServer::start().await;
+    mock_negotiate_once(&server, vec![]).await; // before the game
+    mock_negotiate(&server, vec![op("upload", None, name)]).await; // after it
+    Mock::given(method("POST")).and(path("/api/saves")).respond_with(ResponseTemplate::new(201).set_body_json(stored_json(21, name, PSP_HASH))).mount(&server).await;
+    mock_complete(&server).await;
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(r#"mkdir -p "$0" && cp -r "$1/PSP/." "$0/""#).arg(&root).arg(&src);
+    let env = standalone_env("ppsspp", &root);
+    let c = client(&server);
+    let mut st = State::default();
+    let backups = t.path().join("bak");
+    let cx = SyncCtx { client: &c, device_id: DEVICE, backup_dir: &backups, policy: ConflictPolicy::KeepBoth, states: None };
+    let out = romm_core::session::play(&cx, &mut st, &t.path().join("state.json"), &r, &env, cmd, || {}).await.unwrap();
+    assert!(out.pull_error.is_none() && out.push_error.is_none(), "{out:?}");
+
+    let up = &reqs(&server, "POST", "/api/saves").await[0];
+    assert!(contains(&up.body, MARKER), "the unit ends in Argosy's marker");
+    assert!(contains(&up.body, b"ULUS10064DATA00/DATA.BIN"), "and is still the unit Argosy uploads");
+    assert_eq!(query(up)["content_hash"], PSP_HASH, "a zip's hash is its entries': the marker doesn't change it");
+    assert!(st.saves[&save_key(7, "ppsspp")].hardcore);
+}
+
+#[tokio::test]
+async fn xemu_restores_a_marked_server_save_without_choking_on_the_marker() {
+    let server = MockServer::start().await;
+    let theirs = xbox_save_zip("55550001", 7);
+    let want = unit::content_hash(&theirs);
+    mock_negotiate_once(&server, vec![op("download", Some(99), "Halo.zip")]).await;
+    mock_negotiate(&server, vec![op("no_op", Some(99), "Halo.zip")]).await;
+    mock_save_content(&server, 99, marked(&theirs)).await;
+    mock_complete(&server).await;
+
+    let t = tempfile::tempdir().unwrap();
+    let mut x = xemu_setup(t.path(), "55550001");
+    let c = client(&server);
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(rep.downloaded, ["Halo.zip"]);
+    assert_eq!(unit::content_hash(&xemu_export(&x.image, "55550001").unwrap()), want);
+    assert!(x.st.saves[&save_key(7, "xemu")].hardcore);
+
+    let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
+    assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.unchanged == 1, "{rep:?}");
+}

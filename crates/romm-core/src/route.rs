@@ -189,21 +189,27 @@ fn pcsx2_options(root: &Path) -> Vec<(String, String)> {
     settings(&text, "MemoryCards", &[("Slot1_Filename", None), ("Slot2_Filename", None)])
 }
 
-/// Dolphin's `Dolphin.ini` is in `Config/` of its user folder, or, on a Linux install that splits
-/// config from data (XDG, Flatpak), in the config folder beside the data one.
-fn dolphin_options(root: &Path) -> Vec<(String, String)> {
-    let mut candidates = vec![root.join("Config/Dolphin.ini")];
+/// Where Dolphin keeps the config file `file` (`Dolphin.ini`, `RetroAchievements.ini`): in `Config/`
+/// of its user folder, or, on a Linux install that splits config from data (XDG, Flatpak), in the
+/// config folder beside the data one. Most likely first.
+pub fn dolphin_config_candidates(root: &Path, file: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![root.join("Config").join(file)];
     if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
         // .../data/dolphin-emu  ->  .../config/dolphin-emu   (Flatpak)
         if parent.file_name().is_some_and(|n| n == "data") {
             if let Some(app) = parent.parent() {
-                candidates.push(app.join("config").join(name).join("Dolphin.ini"));
+                candidates.push(app.join("config").join(name).join(file));
             }
         }
     }
     if let Some(cfg) = PathCtx::from_env().xdg_config {
-        candidates.push(cfg.join("dolphin-emu/Dolphin.ini"));
+        candidates.push(cfg.join("dolphin-emu").join(file));
     }
+    candidates
+}
+
+fn dolphin_options(root: &Path) -> Vec<(String, String)> {
+    let candidates = dolphin_config_candidates(root, "Dolphin.ini");
     let Some(text) = candidates.iter().find_map(|p| read(p)) else { return vec![] };
     settings(
         &text,
