@@ -631,7 +631,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3185,7 +3185,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
- "toml_edit 0.22.27",
+ "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
  "walkdir",
  "windows-native-keyring-store",
@@ -4359,6 +4359,7 @@ dependencies = [
  "indexmap 2.14.2",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
