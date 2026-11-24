@@ -4,10 +4,16 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The token may only read the repository. The one job that writes (`publish`, which runs only on main)
-# asks for write access for itself.
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   test:
@@ -15,47 +21,69 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm, cache-dependency-path: app/package-lock.json }
-      - name: System libraries for Tauri, and QEMU for the disk-image tests
+      - name: System libraries (Tauri), QEMU (disk-image tests), keychain and e2e tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev libdbus-1-dev qemu-utils
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev libdbus-1-dev \
+            qemu-utils gnome-keyring dbus-user-session xvfb webkit2gtk-driver python3-pil
       - run: npm ci && npm test && npm run build
         working-directory: app
       - run: cargo test --workspace --lib --tests --locked
       - name: OS keychain, against a real Secret Service (GNOME Keyring)
         run: |
-          sudo apt-get install -y gnome-keyring dbus-user-session
           dbus-run-session -- bash -ec '
             eval "$(echo -n ci | gnome-keyring-daemon --unlock --components=secrets)"
             export GNOME_KEYRING_CONTROL
-            cargo test -p romm-core --lib --locked real_os_keychain -- --ignored
+            cargo test --workspace --lib --locked real_os_keychain -- --ignored
           '
+      - name: Build the CLI (debug)
+        id: cli
+        if: ${{ !cancelled() }}
+        run: cargo build --locked -p romm-cli
+      - name: CLI smoke test
+        if: ${{ !cancelled() && steps.cli.outcome == 'success' }}
+        run: tests/smoke/psp_smoke.sh
+      - name: Build the app (debug, embedded frontend)
+        id: app
+        run: npm run tauri build -- --debug --no-bundle
+        working-directory: app
+      - name: e2e drive.py
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
+        run: OUT=/tmp/e2e-drive tests/e2e/run.sh
+      - name: e2e drive_pad.py
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
+        run: DRIVER=drive_pad.py OUT=/tmp/e2e-pad tests/e2e/run.sh
+      - name: e2e drive_choices.py
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
+        run: DRIVER=drive_choices.py OUT=/tmp/e2e-choices tests/e2e/run.sh
+      - name: e2e drive_versions.py
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
+        run: DRIVER=drive_versions.py OUT=/tmp/e2e-versions tests/e2e/run.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ failure() }}
+        with:
+          name: e2e-logs
+          path: /tmp/e2e-*
+          if-no-files-found: warn
 
   keychain-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Keychain logic (this also compiles the Credential Manager backend)
         run: cargo test -p romm-core --lib --locked token_store
       - name: Credential Manager, for real
-        # Runner sessions differ from a desktop login; if this fails, read the log before blaming the code.
         continue-on-error: true
         run: cargo test -p romm-core --lib --locked real_os_keychain -- --ignored
-
-  smoke:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-      - name: System library for the keychain backend (libdbus-sys)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev
-      - run: cargo build --locked -p romm-cli
-      - run: tests/smoke/psp_smoke.sh
 
   vendor:
     runs-on: ubuntu-24.04
@@ -72,46 +100,7 @@ jobs:
             exit 1
           fi
 
-  e2e:
-    needs: test
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with: { node-version: 22, cache: npm, cache-dependency-path: app/package-lock.json }
-      - name: System libraries and test tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libxdo-dev libdbus-1-dev xvfb webkit2gtk-driver python3-pil
-      - name: Build the app (debug, embedded frontend)
-        run: |
-          npm ci
-          npm run tauri build -- --debug --no-bundle
-        working-directory: app
-      - name: e2e drive.py
-        run: OUT=/tmp/e2e-drive tests/e2e/run.sh
-      - name: e2e drive_pad.py
-        if: ${{ !cancelled() }}
-        run: DRIVER=drive_pad.py OUT=/tmp/e2e-pad tests/e2e/run.sh
-      - name: e2e drive_choices.py
-        if: ${{ !cancelled() }}
-        run: DRIVER=drive_choices.py OUT=/tmp/e2e-choices tests/e2e/run.sh
-      - name: e2e drive_versions.py
-        if: ${{ !cancelled() }}
-        run: DRIVER=drive_versions.py OUT=/tmp/e2e-versions tests/e2e/run.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ failure() }}
-        with:
-          name: e2e-logs
-          path: /tmp/e2e-*
-          if-no-files-found: warn
-
-  # The installers: a .deb (amd64 and arm64) and a Windows .exe (NSIS). Every run uploads them as workflow
-  # artifacts; a push to main also publishes them (see `publish`). `--bundles` limits the build to these, so
-  # it no longer also makes the .rpm, AppImage and .msi nobody downloads.
   bundle:
-    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +115,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm, cache-dependency-path: app/package-lock.json }
       - name: System libraries for Tauri
@@ -172,14 +164,9 @@ jobs:
             target/release/romm.exe
           if-no-files-found: error
 
-  # Puts the newest installers on the `installers` branch, under names with no version in them:
-  #   romm-desktop_amd64.deb   romm-desktop_arm64.deb   romm-desktop_x64-setup.exe
-  # The branch is rebuilt as ONE commit and force-pushed each time, so it always holds exactly one set of
-  # installers and the repository does not grow by a set of binaries per push (committed binaries stay in
-  # git history for good). It needs every installer built and the e2e suite green: no partial sets.
   publish:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: [e2e, bundle]
+    needs: [test, bundle]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -202,14 +189,12 @@ jobs:
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$auth"
           remote() { git -c "http.extraheader=AUTHORIZATION: basic $auth" "$@"; }
-
           # If main has moved on, the run for the newer commit will publish; do not put an older build over it.
           head=$(remote ls-remote "$url" refs/heads/main | cut -f1)
           if [ "$head" != "$SOURCE_SHA" ]; then
             echo "main is now at $head, not $SOURCE_SHA; leaving the installers to that run"
             exit 0
           fi
-
           cd dist
           sha256sum -- *.deb *.exe > SHA256SUMS.txt
           {
@@ -220,11 +205,10 @@ jobs:
           {
             echo "# Installers"
             echo
-            echo "The newest build of RomM Desktop from \`main\` (commit \`$SOURCE_SHA\`), replaced by CI on every push."
-            echo "This branch is overwritten, not appended to: it has no history. \`BUILD.txt\` says which commit"
+            echo "The newest build of RomM Desktop from \`main\` (commit \`$SOURCE_SHA\`), replaced every push."
+            echo "This branch is not appended but overwritten: it has no history. \`BUILD.txt\` declares the commit that"
             echo "built these files and \`SHA256SUMS.txt\` has their checksums. The Windows installer is not signed."
           } > README.md
-
           git init -q -b installers
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
