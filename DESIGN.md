@@ -45,6 +45,17 @@ On Windows install Rust (MSVC toolchain) and Node; WebView2 is handled by the in
 
 A GitHub Actions workflow (`.github/workflows/build.yml`) builds both installers, and uploads the standalone CLI as a separate `romm-cli-<os>` artifact.
 
+## Installers
+CI builds the installers on every push to `main` and puts the newest ones on the
+[`installers`](https://github.com/pjbulls/romm-desktop/tree/installers) branch, under names with no version in them:
+
+- [`romm-desktop_amd64.deb`](https://github.com/pjbulls/romm-desktop/raw/installers/romm-desktop_amd64.deb)
+- [`romm-desktop_arm64.deb`](https://github.com/pjbulls/romm-desktop/raw/installers/romm-desktop_arm64.deb)
+- [`romm-desktop_x64-setup.exe`](https://github.com/pjbulls/romm-desktop/raw/installers/romm-desktop_x64-setup.exe) (not code-signed, so SmartScreen will warn)
+
+The branch is overwritten on each build rather than added to, so it has no history. `BUILD.txt` on it names the
+commit the files were built from, and `SHA256SUMS.txt` has their checksums.
+
 ## Emulator settings
 
 Emulators & BIOS has four tabs: **Executables** (where each emulator was found, and a way to point at it if it wasn't), **BIOS**, **Emulator mapping** (which emulator plays each platform, and whether the platform is shown in the library) and **Emulator settings**, which lets you choose how your emulators run games. The app applies those each time you press Play here, so you don't have to open each emulator's own settings. You still install and update the emulators yourself. The other tabs apply a change as soon as you make it; Emulator settings are saved with a Save button, and a dot on the tab marks changes not saved yet. (Settings has its own tabs: General, Controller and Connection.)

@@ -46,7 +46,7 @@ sudo apt-get install build-essentials pkg-config \
 
 cd app
 npm ci
-npm run tauri build --bundles deb
+npm run tauri build -- --bundles deb
 ```
 
 If you want to build the standalone CLI as well:
