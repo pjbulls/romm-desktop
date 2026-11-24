@@ -25,5 +25,5 @@ directories = "5"
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 tracing = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 tokio-util = { version = "0.7", features = ["io"] }
