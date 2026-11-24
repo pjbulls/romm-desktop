@@ -57,9 +57,8 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
     let mut ar = zip::ZipArchive::new(BufReader::new(fs::File::open(zip_path)?))?;
     for i in 0..ar.len() {
         let mut entry = ar.by_index(i)?;
-        let rel = entry
-            .enclosed_name()
-            .ok_or_else(|| Error::msg(format!("unsafe path in ROM archive: {}", entry.name())))?;
+        let rel = crate::saves::entry_path(&entry)
+            .ok_or_else(|| Error::msg(format!("unsafe path in ROM archive: {}", crate::saves::entry_label(&entry))))?;
         let out = dest.join(rel);
         if entry.is_dir() {
             fs::create_dir_all(&out)?;

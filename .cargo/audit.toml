@@ -2,28 +2,10 @@
 # found not to apply belong here, each with the reason, and `audit.yml` re-checks the reason where it can.
 
 [advisories]
-ignore = [
-    # zip 2.x, extraction helpers: RUSTSEC-2026-0367 (SUID/SGID bits kept), -0368 and -0369 (symlinks
-    # created or followed), -0429 (abort on a huge declared symlink size) are all in `ZipArchive::extract`
-    # and `ZipStreamReader::extract`, and -0548 is `ZipStreamReader` taking entry names from the wrong
-    # header. This code calls none of them: it unpacks with its own loop (`library::extract_zip`:
-    # `by_index`, `enclosed_name`, then `File::create` and `io::copy`), which creates no symlinks and
-    # applies no permission bits from the archive. `audit.yml` fails if a call to them appears.
-    "RUSTSEC-2026-0367",
-    "RUSTSEC-2026-0368",
-    "RUSTSEC-2026-0369",
-    "RUSTSEC-2026-0429",
-    "RUSTSEC-2026-0548",
-
-    # zip 2.x, AES: RUSTSEC-2026-0545 (the authentication code is not checked on short or empty AES
-    # entries). The workspace builds zip with `default-features = false, features = ["deflate"]`, so the AES
-    # code is not compiled in at all (Cargo.lock has no aes/hmac/pbkdf2 under zip), and nothing here
-    # decrypts. `audit.yml` fails if the `aes-crypto` feature is switched on.
-    "RUSTSEC-2026-0545",
-
-    # All six clear when zip is upgraded to 9.x (a major jump across about fourteen call sites, in
-    # security-sensitive code, so deliberately not bundled with unrelated work). Delete these lines then.
-]
+# Empty on purpose. The six zip 2.x advisories that used to be ignored here (RUSTSEC-2026-0367, -0368,
+# -0369, -0429, -0545 and -0548) are fixed by zip 9, which the workspace now uses, and the CI step that
+# held those ignores to their reasons went with them. An entry added here needs its reason beside it.
+ignore = []
 
 # Not ignored, but known, and warnings rather than failures: `glib` 0.18 (RUSTSEC-2024-0429, unsound
 # `VariantStrIter`) and `proc-macro-error` (RUSTSEC-2024-0370, unmaintained) come from Tauri's GTK3

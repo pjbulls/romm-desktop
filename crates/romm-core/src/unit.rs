@@ -34,7 +34,9 @@ fn zip_content_hash(bytes: &[u8]) -> Option<String> {
     let mut entries: Vec<(String, String)> = Vec::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).ok()?;
-        let name = f.name().to_string();
+        // A name that can't be read can't be hashed as RomM would (it hashes the names), so this is
+        // "no zip hash", the same as for any other archive that can't be read.
+        let name = f.name().ok()?.into_owned();
         if name.ends_with('/') {
             continue;
         }

@@ -84,7 +84,7 @@ pub fn psp_memory_stick(ms: &Path) {
 
 pub fn zip_entries(bytes: &[u8]) -> Vec<String> {
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    let mut v: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
+    let mut v: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
     v.sort();
     v
 }

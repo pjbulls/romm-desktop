@@ -144,6 +144,8 @@ With `me.write` the app also asks by itself, in the background, **when a game yo
 
 How it reads the data: the achievement list comes from `GET /api/roms/{id}` (`merged_ra_metadata`) and your progress from `GET /api/users/me` (`ra_progression`, scope `me.read`, which the token already has). RomM records what you've earned under each achievement's *badge name*, not its numeric id, so that's what the two are matched on. A few games reuse one badge for several achievements; then the number earned is right but which of the look-alikes is ticked is a best guess.
 
+**Hardcore saves**: Argosy keeps RetroAchievements hardcore saves apart from casual ones by marking the file it uploads, and won't silently replace a hardcore save with an unmarked one. A save from a hardcore Argosy session is therefore kept marked on this machine, and goes back up marked when you've played it in hardcore here too. That means RetroArch, PPSSPP, DuckStation, PCSX2 or Dolphin with achievements *and* hardcore mode enabled (read from their settings files when the session ends). A save changed any other way is uploaded as a casual save: Argosy will then ask whether to keep its hardcore save or take the new one. Azahar, xemu and Xenia have no RetroAchievements support, so their saves are never marked. Needs RomM before 5.5 (without snapshot sync), which is what this app talks to.
+
 ## Where the token is kept
 
 The API token can read the whole library and overwrite saves, so on a normal install it is stored in the operating system's keychain (`crates/romm-core/src/token_store.rs`), protected by the user's login rather than by a file's permissions: the Credential Manager on Windows (local to the machine, not roaming), the Secret Service over D-Bus on Linux.

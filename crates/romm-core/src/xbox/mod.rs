@@ -387,7 +387,7 @@ fn parse_save_zip_within(save_id: &str, bytes: &[u8], max_entries: usize, max_by
     let mut budget = max_bytes;
     for i in 0..z.len() {
         let mut f = z.by_index(i)?;
-        let raw = f.name().to_string();
+        let raw = f.name().map_err(|e| bad(format!("entry {i} has a name that can't be read ({e})")))?.into_owned();
         if raw.contains('\\') || raw.starts_with('/') || raw.contains('\0') {
             return Err(bad(format!("entry {raw:?} has an unsafe path")));
         }
@@ -571,7 +571,7 @@ pub fn check_writable(image: &Path) -> XboxResult<()> {
 /// The title id a save zip is for: its root folder, when that is eight hex digits (upper-cased).
 pub fn zip_title_id(zip: &[u8]) -> Option<String> {
     let mut z = ZipArchive::new(Cursor::new(zip)).ok()?;
-    let name = z.by_index(0).ok()?.name().to_string();
+    let name = z.by_index(0).ok()?.name().ok()?.into_owned();
     let root = name.split('/').next()?;
     is_title_id(root).then(|| root.to_ascii_uppercase())
 }

@@ -238,14 +238,14 @@ fn read_archive_within(bytes: &[u8], max_entries: usize, max_bytes: u64) -> Resu
     let mut files = 0usize;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let path = f.enclosed_name().ok_or_else(|| Error::msg(format!("unsafe path in the save archive: {}", f.name())))?;
+        let path = saves::entry_path(&f).ok_or_else(|| Error::msg(format!("unsafe path in the save archive: {}", saves::entry_label(&f))))?;
         let mut comps = path.components();
         match comps.next() {
             Some(Component::Normal(root)) if root == SAVED_GAME => {}
             _ => {
                 return Err(Error::msg(format!(
                     "the server's save isn't a Xenia saved game: {} is outside {SAVED_GAME}/ (it may belong to another emulator)",
-                    f.name()
+                    saves::entry_label(&f)
                 )))
             }
         }
@@ -420,7 +420,7 @@ mod tests {
 
     fn names(zip: &[u8]) -> Vec<String> {
         let mut z = zip::ZipArchive::new(Cursor::new(zip)).unwrap();
-        (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect()
+        (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect()
     }
 
     fn zip_of(entries: &[(&str, Option<&[u8]>)]) -> Vec<u8> {

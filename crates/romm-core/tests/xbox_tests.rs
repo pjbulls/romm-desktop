@@ -33,7 +33,7 @@ fn read_zip(bytes: &[u8]) -> (Files, BTreeSet<String>, BTreeSet<String>) {
     let (mut files, mut dirs, mut roots) = (Files::new(), BTreeSet::new(), BTreeSet::new());
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let name = f.name().to_string();
+        let name = f.name().unwrap().to_string();
         roots.insert(name.split('/').next().unwrap().to_string());
         let rel = name.split_once('/').map(|x| x.1).unwrap_or("").to_string();
         if name.ends_with('/') {
@@ -113,7 +113,7 @@ fn the_zip_has_argosys_shape() {
     let mut hdd = FileHdd::open(&fixture("hdd-v3.qcow2")).unwrap();
     let zip = hdd.export_zip("4d530004").unwrap().unwrap(); // a lower-case request still roots at the upper-case id
     let mut z = zip::ZipArchive::new(Cursor::new(&zip)).unwrap();
-    let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
+    let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
     assert!(!names.contains(&"4D530004/".to_string()), "Argosy's single-folder zip has no root entry: {names:?}");
     assert!(names.contains(&"4D530004/deep/er/est/".to_string()), "sub-folders get entries");
     assert!(names.iter().all(|n| n.starts_with("4D530004/")));

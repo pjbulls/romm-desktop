@@ -33,6 +33,32 @@ pub fn md5_bytes(b: &[u8]) -> String {
     hex::encode(Md5::digest(b))
 }
 
+/// A zip entry's name for an error message. `ZipFile::name` can fail (a name that is not UTF-8 is
+/// decoded as CP437, and the decode is fallible), so this falls back to a lossy reading of the raw
+/// bytes: a message can always be written. It is for people to read; never decide anything from it
+/// (use `entry_path`, or `name` and handle the error, for that).
+pub(crate) fn entry_label<R: Read + ?Sized>(entry: &zip::read::ZipFile<'_, R>) -> String {
+    entry.name().map_or_else(|_| String::from_utf8_lossy(entry.name_raw()).into_owned(), |n| n.into_owned())
+}
+
+/// Where a zip entry would land, relative to the folder being unpacked into, or `None` if it must
+/// be refused: `enclosed_name` (no `..` out of the folder, no NUL, no root or drive *after* a first
+/// component), plus a refusal of a name that *starts* with a root or a drive.
+///
+/// The second part is deliberate. zip 2 refused an absolute entry name (`/etc/x`, `C:\x`); zip 9's
+/// `enclosed_name` instead drops a leading root or drive and keeps the rest, so `/a/b` comes back as
+/// `a/b`. That cannot leave the folder, but it is not the name the archive holds, and this code
+/// refuses archives like that (see `safe_rel`) rather than rewrite them.
+pub(crate) fn entry_path<R: Read + ?Sized>(entry: &zip::read::ZipFile<'_, R>) -> Option<PathBuf> {
+    let raw = entry.name_raw();
+    let rooted = matches!(raw.first(), Some(b'/' | b'\\'));
+    let drive = matches!(raw, [d, b':', ..] if d.is_ascii_alphabetic());
+    if rooted || drive {
+        return None;
+    }
+    entry.enclosed_name()
+}
+
 /// MD5 of everything `r` yields, read in blocks so a large save is never held in memory twice.
 pub fn md5_reader<R: Read>(r: &mut R) -> std::io::Result<String> {
     let mut h = Md5::new();
@@ -527,6 +553,33 @@ mod tests {
         assert!(safe_rel("/etc/passwd").is_none());
         assert!(safe_rel("a/../../x").is_none());
         assert!(safe_rel("").is_none());
+    }
+
+    #[test]
+    fn a_zip_entry_that_starts_at_a_root_or_a_drive_is_refused_not_rewritten() {
+        use zip::{write::SimpleFileOptions, ZipWriter};
+        let cases: [(&str, Option<&str>); 9] = [
+            ("a/b.txt", Some("a/b.txt")),
+            ("00000001/S/f", Some("00000001/S/f")),
+            ("with space/c.txt", Some("with space/c.txt")),
+            ("/etc/passwd", None),
+            ("\\windows\\x", None),
+            ("C:\\x", None),
+            ("c:x", None),
+            ("../x", None),
+            ("a/../../x", None),
+        ];
+        let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, _) in &cases {
+            zw.start_file(*name, SimpleFileOptions::default()).unwrap();
+        }
+        let bytes = zw.finish().unwrap().into_inner();
+        let mut ar = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        for (i, (name, want)) in cases.iter().enumerate() {
+            let entry = ar.by_index(i).unwrap();
+            assert_eq!(entry.name().unwrap(), *name, "the writer kept the name as given");
+            assert_eq!(entry_path(&entry), want.map(PathBuf::from), "{name:?}");
+        }
     }
 
     #[test]

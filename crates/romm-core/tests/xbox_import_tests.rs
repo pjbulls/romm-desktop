@@ -537,7 +537,7 @@ fn entry_times(zip: &[u8]) -> BTreeMap<String, (u16, u8, u8, u8, u8, u8)> {
                 return None;
             }
             let t = f.last_modified().unwrap();
-            Some((f.name().to_string(), (t.year(), t.month(), t.day(), t.hour(), t.minute(), t.second())))
+            Some((f.name().unwrap().to_string(), (t.year(), t.month(), t.day(), t.hour(), t.minute(), t.second())))
         })
         .collect()
 }

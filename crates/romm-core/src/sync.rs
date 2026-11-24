@@ -162,7 +162,7 @@ impl LocalUnit {
                     return None;
                 }
                 let mut z = zip::ZipArchive::new(std::io::Cursor::new(&u.data)).ok()?;
-                (0..z.len()).filter(|i| z.by_index(*i).is_ok_and(|f| !f.name().ends_with('/'))).count()
+                (0..z.len()).filter(|i| z.by_index(*i).is_ok_and(|f| !f.name_raw().ends_with(b"/"))).count()
             }
         };
         Some(format!("{n} file{}", if n == 1 { "" } else { "s" }))
