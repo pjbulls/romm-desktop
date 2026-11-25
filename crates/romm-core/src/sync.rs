@@ -1,5 +1,6 @@
 //! Save sync against RomM's device-sync protocol: negotiate → apply operations → complete the
-//! session.
+//! session. That is the flow for a RomM before 5.5; a server with snapshots is synced by the child
+//! module `snapshot_sync`, which shares this one's way of finding, putting down and describing saves.
 //!
 //! What a game's save *is*, and the bytes that travel, come from `route` and `unit` (Sigil, the
 //! library Argosy uses), so a save uploaded here is one Argosy restores and vice versa. This module
@@ -22,6 +23,10 @@ use crate::saves::{self, SLOT};
 use crate::state::{save_key, LocalRom, SaveRecord, State};
 use crate::unit::{self, Identity};
 use crate::xbox;
+
+// Save sync for a server with snapshots (RomM 5.5+); this module is the older engine.
+#[path = "snapshot_sync.rs"]
+mod snapshots;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -410,17 +415,41 @@ pub struct Syncer<'a> {
 }
 
 /// Everything an operation needs to know about the game being synced.
-struct Cx<'x> {
-    rom: &'x LocalRom,
-    env: &'x EmuEnv,
-    id: &'x Identity,
-    plan: Option<&'x Plan>,
-    local: Option<&'x LocalUnit>,
-    session_id: i64,
+pub(crate) struct Cx<'x> {
+    pub(crate) rom: &'x LocalRom,
+    pub(crate) env: &'x EmuEnv,
+    pub(crate) id: &'x Identity,
+    pub(crate) plan: Option<&'x Plan>,
+    pub(crate) local: Option<&'x LocalUnit>,
+    /// The sync session a legacy sync runs in; snapshot sync has none and leaves it 0.
+    pub(crate) session_id: i64,
+}
+
+/// What putting a server save on disk reported.
+pub(crate) struct Placed {
+    /// The name the save is reported under.
+    pub(crate) name: String,
+    /// It carried Argosy's hardcore marker (what older servers have of hardcore; see `hardcore`).
+    pub(crate) marked: bool,
+}
+
+/// What can be known about a save's destination before the save is downloaded: find out first whether
+/// the disk can take it.
+pub(crate) fn precheck(plan: &Plan) -> Result<()> {
+    if let Kind::Xbox { image, .. } = &plan.kind {
+        xbox::check_writable(image).map_err(|e| Error::msg(format!("the server's save was not applied: {e}. Close xemu and sync again")))?;
+    }
+    Ok(())
 }
 
 impl<'a> Syncer<'a> {
     pub async fn sync_rom(&mut self, rom: &LocalRom, env: &EmuEnv, play: Option<PlaySession>) -> Result<SyncReport> {
+        // A server with snapshots (RomM 5.5+) keeps saves in channels, which the flow below can't use
+        // for a unit Sigil built or a hardcore save. It is asked first; one that doesn't answer, or
+        // isn't new enough, gets the flow below, which every RomM since 4.x still takes.
+        if self.client.capabilities().await.snapshots {
+            return self.sync_rom_snapshots(rom, env, play).await;
+        }
         let id = identity_for(self.state, rom);
         let plan = route::plan(env, rom, &id);
         let label = plan.as_ref().map_or_else(|| env.profile.id.clone(), |p| p.label.clone());
@@ -618,17 +647,28 @@ impl<'a> Syncer<'a> {
 
     async fn download(&mut self, cx: &Cx<'_>, save_id: i64, server_updated_at: Option<String>, report: &mut SyncReport) -> Result<()> {
         let plan = cx.plan.ok_or_else(|| Error::msg("this emulator has no save rule"))?;
-        // Find out before downloading anything whether the disk can take it.
-        if let Kind::Xbox { image, .. } = &plan.kind {
-            xbox::check_writable(image).map_err(|e| Error::msg(format!("the server's save was not applied: {e}. Close xemu and sync again")))?;
-        }
+        precheck(plan)?;
         let bytes = self.client.download_save(save_id, self.device_id, cx.session_id).await?;
         let hash = unit::content_hash(&bytes);
-        let backup = saves::backup_dir_for(&self.backup_dir, &plan.label);
+        if let (Kind::Unit(route), true) = (&plan.kind, saves::is_legacy_bundle(&bytes)) {
+            let backup = saves::backup_dir_for(&self.backup_dir, &plan.label);
+            self.download_legacy(cx, plan, route, &bytes, &backup, save_id, &hash, report).await?;
+            return Ok(());
+        }
+        let placed = self.place(cx, plan, &bytes)?;
+        self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, placed.marked);
+        report.downloaded.push(placed.name);
+        Ok(())
+    }
 
-        let name = match &plan.kind {
+    /// Puts a downloaded save where the emulator keeps it, the way its kind needs, after keeping a copy
+    /// of what it replaces. Nothing is recorded: that is for the caller, once the save is in place.
+    /// Both save APIs come here, so a save is put down the same way whichever one it came by.
+    pub(crate) fn place(&mut self, cx: &Cx<'_>, plan: &Plan, bytes: &[u8]) -> Result<Placed> {
+        let backup = saves::backup_dir_for(&self.backup_dir, &plan.label);
+        match &plan.kind {
             Kind::Xbox { image, save_id: title } => {
-                let (body, marked) = hardcore::split(&bytes);
+                let (body, marked) = hardcore::split(bytes);
                 if !saves::is_zip(body) {
                     return Err(Error::msg("the server's save for this game isn't a zip of its UDATA folder, so it wasn't applied to xemu"));
                 }
@@ -637,12 +677,11 @@ impl<'a> Syncer<'a> {
                 }
                 // All or nothing, verified by reading it back; a failure leaves the disk as it was.
                 xbox::import_save(image, title, body)?;
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, marked);
-                upload_name(&cx.rom.stem, "zip")
+                Ok(Placed { name: upload_name(&cx.rom.stem, "zip"), marked })
             }
             Kind::Raw { path, exists } => {
                 // A hardcore save from Argosy ends in its marker; the emulator's save file must not.
-                let (body, marked) = hardcore::split(&bytes);
+                let (body, marked) = hardcore::split(bytes);
                 if saves::is_zip(body) {
                     return Err(Error::msg(format!(
                         "the server's save is a unit from a core with its own save layout; {} keeps a plain save file, so it wasn't applied",
@@ -654,38 +693,29 @@ impl<'a> Syncer<'a> {
                     saves::backup_file(path, &backup, &fname)?;
                 }
                 saves::write_atomic(path, body)?;
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, marked);
-                fname
+                Ok(Placed { name: fname, marked })
             }
             Kind::Unit(route) => {
-                if saves::is_legacy_bundle(&bytes) {
-                    self.download_legacy(cx, plan, route, &bytes, &backup, save_id, &hash, report).await?;
-                    return Ok(());
-                }
                 ensure_identified(route, cx.id, cx.rom)?;
                 if let Some(local) = cx.local {
                     local.backup_to(&backup)?;
                 }
                 let blob = self.state.sigil_state(&route.state_key());
-                let restored = unit::restore(route, cx.id, &plan.content_name, &bytes, blob.as_deref())?;
+                let restored = unit::restore(route, cx.id, &plan.content_name, bytes, blob.as_deref())?;
                 self.state.set_sigil_state(&route.state_key(), &restored.state);
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, restored.hardcore_marker);
-                upload_name(&cx.rom.stem, &extension_of_unit(&bytes))
+                Ok(Placed { name: upload_name(&cx.rom.stem, &extension_of_unit(bytes)), marked: restored.hardcore_marker })
             }
             Kind::Folder { content, title_id } => {
                 let title_id = ensure_title_id(title_id, &name_base(cx.rom, Some(plan)))?;
                 if let Some(local) = cx.local {
                     local.backup_to(&backup)?;
                 }
-                let (body, marked) = hardcore::split(&bytes);
+                let (body, marked) = hardcore::split(bytes);
                 let restored = xenia::restore(content, title_id, body)?;
                 tracing::debug!("restored {} file(s) into {}, {} header(s) written", restored.files, restored.dir.display(), restored.headers_written);
-                self.remember_download(cx, &plan.label, &hash, save_id, server_updated_at, marked);
-                upload_name(&name_base(cx.rom, Some(plan)), "zip")
+                Ok(Placed { name: upload_name(&name_base(cx.rom, Some(plan)), "zip"), marked })
             }
-        };
-        report.downloaded.push(name);
-        Ok(())
+        }
     }
 
     /// An older romm-desktop uploaded a zip with a manifest and paths relative to the emulator's data

@@ -17,7 +17,7 @@ use romm_core::session::SyncCtx;
 use romm_core::retroarch;
 use romm_core::route;
 use romm_core::saves;
-use romm_core::state::{save_key, LocalRom, State};
+use romm_core::state::{channel_key, save_key, ChannelRecord, LocalRom, State};
 use romm_core::sync::{saves_overview, ConflictPolicy, EmuEnv, SaveStatus, Syncer};
 use romm_core::unit::{self, Identity, Route};
 use serde_json::{json, Value};
@@ -1890,4 +1890,701 @@ async fn xemu_restores_a_marked_server_save_without_choking_on_the_marker() {
 
     let rep = syncer(&c, &mut x.st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&x.rom, &x.env, None).await.unwrap();
     assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.unchanged == 1, "{rep:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// RomM 5.5: channels and snapshots (see `snapshot_sync`)
+// ---------------------------------------------------------------------------------------------
+
+/// A RomM with snapshot sync: its heartbeat has a `SAVE_SYNC` section, which no older server has.
+async fn snapshot_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/heartbeat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "SYSTEM": {"VERSION": "5.5.0-beta.1"},
+            "SAVE_SYNC": {"SNAPSHOT_RETENTION": 10, "SNAPSHOT_BRANCH_LIFETIME_DAYS": 30}
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The ROM as `GET /api/roms/7` lists it: one game file, id 70.
+async fn mock_rom_7(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/roms/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 7, "name": "Zelda", "fs_name": "Zelda.sfc", "platform_id": 1, "platform_slug": "snes", "platform_fs_slug": "snes",
+            "files": [{"id": 70, "rom_id": 7, "file_name": "Zelda.sfc", "category": null, "missing_from_fs": false, "is_top_level": true}]
+        })))
+        .mount(server)
+        .await;
+}
+
+/// A snapshot as the server answers: its save is the file `Zelda.srm`, content `hash`.
+fn snap_json(id: i64, hash: &str, hardcore: bool) -> Value {
+    json!({
+        "id": id, "digest": format!("digest-{id}"), "channel_id": "chan-1", "is_hardcore": hardcore, "created_at": SERVER_TIME,
+        "save": {"id": 50 + id, "file_name": "Zelda.srm", "file_size_bytes": 1, "content_hash": hash, "identity_hash": hash,
+                 "shape": "SINGLE", "format": "native", "download_path": format!("/api/saves/{}/content?timestamp=t&name=Zelda.srm", 50 + id)}
+    })
+}
+
+fn channel_json(current: Option<Value>, hardcore: bool) -> Value {
+    json!({"id": "chan-1", "label": "default", "is_own": true, "is_hardcore": hardcore, "rom_file_id": 70, "current": current})
+}
+
+async fn mock_channels(server: &MockServer, channels: Vec<Value>) {
+    Mock::given(method("GET")).and(path("/api/channels")).respond_with(ResponseTemplate::new(200).set_body_json(channels)).mount(server).await;
+}
+
+async fn mock_get_snapshot(server: &MockServer, snap: Value) {
+    let id = snap["id"].as_i64().unwrap();
+    Mock::given(method("GET")).and(path(format!("/api/snapshots/{id}"))).respond_with(ResponseTemplate::new(200).set_body_json(snap)).mount(server).await;
+}
+
+async fn mock_push_ok(server: &MockServer, snap: Value) {
+    Mock::given(method("POST")).and(path("/api/snapshots")).respond_with(ResponseTemplate::new(201).set_body_json(snap)).mount(server).await;
+}
+
+/// The next push is answered with `status` and `body`; later ones fall through to what is mounted after.
+async fn mock_push_once(server: &MockServer, status: u16, body: Value) {
+    Mock::given(method("POST")).and(path("/api/snapshots")).respond_with(ResponseTemplate::new(status).set_body_json(body)).up_to_n_times(1).mount(server).await;
+}
+
+async fn mock_play_sessions(server: &MockServer) {
+    Mock::given(method("POST")).and(path("/api/play-sessions")).respond_with(ResponseTemplate::new(201).set_body_json(json!({}))).mount(server).await;
+}
+
+/// The `manifest` part of a push.
+fn manifest_of(req: &Request) -> Value {
+    let body = String::from_utf8_lossy(&req.body);
+    let at = body.find("name=\"manifest\"").expect("a manifest part");
+    let start = at + body[at..].find("\r\n\r\n").unwrap() + 4;
+    let end = start + body[start..].find("\r\n--").unwrap();
+    serde_json::from_str(&body[start..end]).unwrap()
+}
+
+fn has_save_part(req: &Request) -> bool {
+    String::from_utf8_lossy(&req.body).contains("name=\"save\"")
+}
+
+/// A device that holds `snapshot_id` of the game's channel, whose save has content `hash`.
+fn holding(st: &mut State, snapshot_id: i64, hash: &str) {
+    st.channels.insert(
+        channel_key(7),
+        ChannelRecord {
+            channel_id: "chan-1".into(),
+            rom_file_id: 70,
+            held_snapshot_id: Some(snapshot_id),
+            held_content_hash: Some(hash.into()),
+            held_identity_hash: Some(hash.into()),
+            held_hardcore: false,
+            pending_hardcore: false,
+        },
+    );
+}
+
+/// A RetroArch/snes9x game whose save file holds `bytes`.
+fn snes_game(t: &Path, bytes: &[u8]) -> (EmuEnv, PathBuf) {
+    let ra = t.join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    std::fs::write(ra.join("saves/Zelda.srm"), bytes).unwrap();
+    (retroarch_env(&ra, "snes9x"), ra.join("saves/Zelda.srm"))
+}
+
+async fn run_snapshot_sync(server: &MockServer, st: &mut State, env: &EmuEnv, policy: ConflictPolicy, play: Option<romm_core::api::types::PlaySession>, bak: &Path) -> romm_core::report::TransferReport {
+    let c = client(server);
+    syncer(&c, st, bak, policy).sync_rom(&rom("Zelda", "snes"), env, play).await.unwrap()
+}
+
+// -- which engine a server gets -----------------------------------------------------------------
+
+#[tokio::test]
+async fn a_server_without_snapshots_is_synced_the_old_way() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"SYSTEM": {"VERSION": "5.4.1"}}))).mount(&server).await;
+    mock_negotiate(&server, vec![]).await;
+    mock_complete(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"LOCAL");
+
+    let mut st = State::default();
+    run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(reqs(&server, "POST", "/api/sync/negotiate").await.len(), 1, "negotiate, as before");
+    assert!(reqs(&server, "GET", "/api/channels").await.is_empty());
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert!(st.channels.is_empty());
+}
+
+#[tokio::test]
+async fn a_server_whose_heartbeat_cant_be_read_is_taken_for_an_older_one() {
+    for answer in [ResponseTemplate::new(500), ResponseTemplate::new(200).set_body_string("not json")] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(answer).mount(&server).await;
+        mock_negotiate(&server, vec![]).await;
+        mock_complete(&server).await;
+        let t = tempfile::tempdir().unwrap();
+        let (env, _) = snes_game(t.path(), b"LOCAL");
+        let mut st = State::default();
+        run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+        assert_eq!(reqs(&server, "POST", "/api/sync/negotiate").await.len(), 1);
+        assert!(reqs(&server, "GET", "/api/channels").await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn the_servers_ability_is_asked_once_not_per_game() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = retroarch_env(&t.path().join("ra"), "snes9x"); // no save on disk
+    let c = client(&server);
+    let mut st = State::default();
+    for _ in 0..3 {
+        syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    }
+    assert_eq!(reqs(&server, "GET", "/api/heartbeat").await.len(), 1);
+}
+
+// -- the first push ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_new_game_creates_its_channel_with_the_first_push() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    let md5 = saves::md5_bytes(b"LOCAL");
+    mock_push_ok(&server, snap_json(5, &md5, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"LOCAL");
+
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(rep.uploaded, ["Zelda.srm"]);
+
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 1);
+    assert_eq!(query(&pushes[0])["device_id"], DEVICE);
+    let m = manifest_of(&pushes[0]);
+    assert_eq!(m["rom_file_id"], 70, "keyed to the ROM file, not the ROM");
+    assert_eq!(m["label"], "default", "a channel the server hasn't got yet is named");
+    assert!(m["channel_id"].as_str().is_some_and(|id| id.len() == 36), "a client-made uuid: {m}");
+    assert!(m.get("expected_current_id").is_some_and(Value::is_null), "an empty channel is expected, said outright: {m}");
+    assert!(m.get("parent_snapshot_id").is_none());
+    assert_eq!(m["save"], json!({"hash": md5, "shape": "SINGLE", "format": "native"}));
+    assert_eq!(m["is_hardcore"], false);
+    assert!(m.get("approve_hardcore_downgrade").is_none());
+    assert_eq!((m["emulator"].as_str(), m["core"].as_str()), (Some("retroarch"), Some("snes9x")));
+    assert!(has_save_part(&pushes[0]) && contains(&pushes[0].body, b"LOCAL"));
+    assert!(!contains(&pushes[0].body, b"ARGOSY"), "the trailer is a pre-5.5 mechanism");
+
+    // No negotiate, no sync session: this server doesn't use them for saves.
+    assert!(reqs(&server, "POST", "/api/sync/negotiate").await.is_empty());
+    let held = &st.channels[&channel_key(7)];
+    assert_eq!((held.held_snapshot_id, held.held_content_hash.as_deref()), (Some(5), Some(md5.as_str())));
+    assert_eq!(held.rom_file_id, 70);
+    assert_eq!(std::fs::read(file).unwrap(), b"LOCAL");
+    assert_eq!(st.saves[&save_key(7, "snes9x")].last_hash.as_deref(), Some(md5.as_str()), "the saves list stays in step");
+}
+
+#[tokio::test]
+async fn a_channel_the_server_already_has_is_pushed_into_by_its_id_and_not_named_again() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, "old", false)), false)]).await;
+    let md5 = saves::md5_bytes(b"NEW");
+    mock_push_ok(&server, snap_json(6, &md5, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"NEW");
+    let mut st = State::default();
+    holding(&mut st, 5, "old");
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let m = manifest_of(&reqs(&server, "POST", "/api/snapshots").await[0]);
+    assert_eq!(m["channel_id"], "chan-1");
+    assert!(m.get("label").is_none());
+    assert_eq!((m["expected_current_id"].as_i64(), m["parent_snapshot_id"].as_i64()), (Some(5), Some(5)), "on top of what this device built on");
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+}
+
+// -- pulling ---------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_newer_current_is_downloaded_and_the_save_it_replaces_is_kept() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"OLD");
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"OLD"));
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.downloaded == ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"THEIRS");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty(), "nothing was changed here, so nothing is pushed");
+    let q = query(&reqs(&server, "GET", "/api/snapshots/6").await[0]);
+    assert_eq!((q["device_id"].as_str(), q["hold"].as_str()), (DEVICE, "true"), "the server is told this device has it now");
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+    assert!(std::fs::read_dir(t.path().join("bak")).unwrap().count() > 0, "what was replaced is backed up");
+
+    // Quiet afterwards.
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.unchanged, 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_machine_with_no_save_takes_the_current() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let env = retroarch_env(&ra, "snes9x");
+
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.downloaded, ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"THEIRS");
+}
+
+#[tokio::test]
+async fn a_save_already_equal_to_the_current_is_adopted_without_a_transfer() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let same = saves::md5_bytes(b"SAME");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &same, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &same, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"SAME");
+
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.uploaded.is_empty() && rep.downloaded.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert!(reqs(&server, "GET", "/api/saves/56/content").await.is_empty());
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+    assert_eq!(query(&reqs(&server, "GET", "/api/snapshots/6").await[0])["hold"], "true");
+}
+
+// -- both sides changed: the four policies ----------------------------------------------------
+
+/// This device holds snapshot 5 (`OLD`) and changed the save to `MINE`; the channel's current is 6 (`THEIRS`).
+async fn diverged(policy: ConflictPolicy) -> (MockServer, State, EmuEnv, PathBuf, tempfile::TempDir, romm_core::report::TransferReport) {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"OLD"));
+    match policy {
+        // KeepBoth: the push that doesn't build on the current is kept as a branch, with a 409.
+        ConflictPolicy::KeepBoth => mock_push_once(&server, 409, json!({"current": snap_json(6, &theirs, false), "branch": snap_json(7, &saves::md5_bytes(b"MINE"), false), "reason": "moved"})).await,
+        ConflictPolicy::DeviceWins => mock_push_ok(&server, snap_json(7, &saves::md5_bytes(b"MINE"), false)).await,
+        _ => {}
+    }
+    let rep = run_snapshot_sync(&server, &mut st, &env, policy, None, &t.path().join("bak")).await;
+    (server, st, env, file, t, rep)
+}
+
+#[tokio::test]
+async fn when_asked_a_divergence_is_reported_and_nothing_is_touched() {
+    let (server, st, _env, file, _t, rep) = diverged(ConflictPolicy::Ask).await;
+    assert_eq!(rep.conflict_names(), ["Zelda.srm"], "{rep:?}");
+    assert!(rep.conflicts[0].reason.is_some());
+    assert_eq!(std::fs::read(file).unwrap(), b"MINE");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert!(reqs(&server, "GET", "/api/saves/56/content").await.is_empty());
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(5), "still on the old one");
+}
+
+#[tokio::test]
+async fn the_server_wins_a_divergence_when_told_to_and_the_local_save_is_backed_up() {
+    let (server, st, _env, file, t, rep) = diverged(ConflictPolicy::ServerWins).await;
+    assert!(rep.is_clean() && rep.downloaded == ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(file).unwrap(), b"THEIRS");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+    let kept: Vec<_> = walk_files(&t.path().join("bak"));
+    assert!(kept.iter().any(|p| std::fs::read(p).is_ok_and(|b| b == b"MINE")), "{kept:?}");
+}
+
+#[tokio::test]
+async fn keeping_both_pushes_the_local_save_as_a_branch_and_then_takes_the_current() {
+    let (server, st, _env, file, t, rep) = diverged(ConflictPolicy::KeepBoth).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 1);
+    let m = manifest_of(&pushes[0]);
+    // Built on what this device held (5), not on the current (6): that is what makes it a branch.
+    assert_eq!((m["expected_current_id"].as_i64(), m["parent_snapshot_id"].as_i64()), (Some(5), Some(5)));
+    assert_eq!(rep.archived.len(), 1, "the kept copy is reported: {rep:?}");
+    assert_eq!(rep.downloaded, ["Zelda.srm"]);
+    assert_eq!(std::fs::read(file).unwrap(), b"THEIRS");
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+    assert!(walk_files(&t.path().join("bak")).iter().any(|p| std::fs::read(p).is_ok_and(|b| b == b"MINE")));
+}
+
+#[tokio::test]
+async fn the_device_wins_a_divergence_by_pushing_on_top_of_the_current() {
+    let (server, st, _env, file, _t, rep) = diverged(ConflictPolicy::DeviceWins).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let m = manifest_of(&reqs(&server, "POST", "/api/snapshots").await[0]);
+    assert_eq!((m["expected_current_id"].as_i64(), m["parent_snapshot_id"].as_i64()), (Some(6), Some(5)));
+    assert_eq!(m["approve_hardcore_downgrade"], true, "overwriting is the choice that approves a downgrade");
+    assert_eq!(std::fs::read(file).unwrap(), b"MINE");
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(7));
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { out.extend(walk_files(&p)) } else { out.push(p) }
+        }
+    }
+    out
+}
+
+// -- hardcore ---------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_hardcore_session_pushes_a_hardcore_snapshot_and_never_a_trailer() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, "old", true)), true)]).await;
+    mock_push_ok(&server, snap_json(6, &saves::md5_bytes(b"NEW"), true)).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"NEW").unwrap();
+    let mut st = State::default();
+    holding(&mut st, 5, "old");
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let push = &reqs(&server, "POST", "/api/snapshots").await[0];
+    assert_eq!(manifest_of(push)["is_hardcore"], true);
+    assert!(!contains(&push.body, b"ARGOSY"));
+    assert_eq!(query(push)["device_id"], DEVICE);
+    assert!(st.channels[&channel_key(7)].held_hardcore);
+}
+
+#[tokio::test]
+async fn a_casual_session_over_a_hardcore_save_is_refused_and_kept_apart_by_default() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"HARDCORE");
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, &theirs, true)), true)]).await;
+    mock_get_snapshot(&server, snap_json(5, &theirs, true)).await;
+    mock_save_content(&server, 55, b"HARDCORE".to_vec()).await;
+    // The first push is refused as a downgrade; the second, which doesn't build on the current, is kept as a branch.
+    mock_push_once(&server, 409, json!({"hardcore_downgrade": true})).await;
+    mock_push_once(&server, 409, json!({"current": snap_json(5, &theirs, true), "branch": snap_json(6, &saves::md5_bytes(b"CASUAL"), false), "reason": "moved"})).await;
+    mock_play_sessions(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, false); // hardcore off
+    std::fs::write(ra.join("saves/Zelda.srm"), b"CASUAL").unwrap();
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"BEFORE"));
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 2, "refused, then kept as a branch");
+    assert_eq!(manifest_of(&pushes[0])["is_hardcore"], false);
+    let second = manifest_of(&pushes[1]);
+    assert!(second.get("expected_current_id").is_some_and(Value::is_null), "not the current: that makes it a branch: {second}");
+    assert_eq!(rep.downloaded, ["Zelda.srm"]);
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"HARDCORE", "the hardcore save stands");
+    assert!(st.channels[&channel_key(7)].held_hardcore);
+}
+
+#[tokio::test]
+async fn overwriting_a_hardcore_save_has_to_be_chosen() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"HARDCORE");
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, &theirs, true)), true)]).await;
+    // Refused as a downgrade each time a push doesn't approve it (here: once per run), then accepted.
+    mock_push_once(&server, 409, json!({"hardcore_downgrade": true})).await;
+    mock_push_once(&server, 409, json!({"hardcore_downgrade": true})).await;
+    mock_push_ok(&server, snap_json(6, &saves::md5_bytes(b"CASUAL"), false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"CASUAL");
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"BEFORE"));
+
+    // Ask: reported, not decided.
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert_eq!(rep.conflict_names(), ["Zelda.srm"], "{rep:?}");
+    assert!(rep.conflicts[0].reason.as_deref().is_some_and(|r| r.contains("hardcore")));
+    assert_eq!(std::fs::read(&file).unwrap(), b"CASUAL");
+
+    // DeviceWins: refused again, then pushed once more with the downgrade approved.
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::DeviceWins, None, &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 3);
+    assert!(manifest_of(&pushes[0]).get("approve_hardcore_downgrade").is_none());
+    assert!(manifest_of(&pushes[1]).get("approve_hardcore_downgrade").is_none(), "never approved before the server has said it is needed");
+    assert_eq!(manifest_of(&pushes[2])["approve_hardcore_downgrade"], true);
+    assert!(!st.channels[&channel_key(7)].held_hardcore, "the channel is casual now");
+}
+
+#[tokio::test]
+async fn a_hardcore_session_whose_push_failed_is_still_pushed_as_hardcore_later() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, "old", true)), true)]).await;
+    mock_push_once(&server, 400, json!({"detail": "nope"})).await;
+    mock_push_ok(&server, snap_json(6, &saves::md5_bytes(b"NEW"), true)).await;
+    mock_play_sessions(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"NEW").unwrap();
+    let mut st = State::default();
+    holding(&mut st, 5, "old");
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(st.channels[&channel_key(7)].pending_hardcore, "remembered although nothing was pushed");
+
+    // Later, outside a session and with hardcore switched off meanwhile: still hardcore.
+    retroarch_hardcore_env(&ra, false);
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    assert_eq!(manifest_of(&reqs(&server, "POST", "/api/snapshots").await[1])["is_hardcore"], true);
+    assert!(!st.channels[&channel_key(7)].pending_hardcore);
+}
+
+#[tokio::test]
+async fn a_snapshot_pushed_outside_any_session_is_never_passed_off_as_hardcore() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    mock_push_ok(&server, snap_json(5, &saves::md5_bytes(b"COPIED"), false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true); // hardcore is on, but nothing was played
+    std::fs::write(ra.join("saves/Zelda.srm"), b"COPIED").unwrap();
+    let mut st = State::default();
+    run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(manifest_of(&reqs(&server, "POST", "/api/snapshots").await[0])["is_hardcore"], false);
+}
+
+// -- what a push may have to do again -------------------------------------------------------------
+
+#[tokio::test]
+async fn a_server_that_wants_the_save_after_all_is_sent_it() {
+    // This push goes without the save: the channel's current already has this content. The server
+    // lacks it nonetheless (pruned, say), says so, and the push is repeated with it.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let md5 = saves::md5_bytes(b"MINE");
+    let mut cur = snap_json(5, &md5, false);
+    cur["save"]["identity_hash"] = json!("another-identity"); // so this isn't taken for the same save
+    mock_channels(&server, vec![channel_json(Some(cur), false)]).await;
+    mock_push_once(&server, 400, json!({"missing": ["save"]})).await;
+    mock_push_ok(&server, snap_json(6, &md5, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    holding(&mut st, 5, "old");
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 2);
+    assert!(!has_save_part(&pushes[0]) && has_save_part(&pushes[1]));
+}
+
+#[tokio::test]
+async fn a_parent_the_server_has_pruned_is_left_out_and_the_push_stands() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, "old", false)), false)]).await;
+    Mock::given(method("POST")).and(path("/api/snapshots")).respond_with(ResponseTemplate::new(404).set_body_json(json!({"detail": "Parent snapshot not found"}))).up_to_n_times(1).mount(&server).await;
+    mock_push_ok(&server, snap_json(6, &saves::md5_bytes(b"NEW"), false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"NEW");
+    let mut st = State::default();
+    holding(&mut st, 5, "old");
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert!(manifest_of(&pushes[0]).get("parent_snapshot_id").is_some());
+    assert!(manifest_of(&pushes[1]).get("parent_snapshot_id").is_none());
+}
+
+// -- which channel and which file --------------------------------------------------------------------
+
+#[tokio::test]
+async fn only_the_callers_own_default_channel_is_used_and_the_newest_of_them() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let other = json!({"id": "theirs", "label": "default", "is_own": false, "rom_file_id": 70, "current": snap_json(9, "x", false)});
+    let named = json!({"id": "named", "label": "Steam Deck 2026-01-01", "is_own": true, "rom_file_id": 70, "current": snap_json(8, "y", false)});
+    let mut older = channel_json(Some(snap_json(3, "o", false)), false);
+    older["id"] = json!("older");
+    older["current"]["created_at"] = json!("2025-01-01T00:00:00Z");
+    mock_channels(&server, vec![other, named, older, channel_json(Some(snap_json(5, "n", false)), false)]).await;
+    mock_push_ok(&server, snap_json(6, &saves::md5_bytes(b"NEW"), false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"NEW");
+    let mut st = State::default();
+    run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::DeviceWins, None, &t.path().join("bak")).await;
+    let m = manifest_of(&reqs(&server, "POST", "/api/snapshots").await[0]);
+    assert_eq!(m["channel_id"], "chan-1", "own, called default, the newest current");
+}
+
+#[tokio::test]
+async fn a_game_whose_rom_file_changed_starts_a_new_channel() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    mock_push_ok(&server, snap_json(6, &saves::md5_bytes(b"NEW"), false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"NEW");
+    let mut st = State::default();
+    holding(&mut st, 5, "old");
+    st.channels.get_mut(&channel_key(7)).unwrap().rom_file_id = 999; // the library was rescanned
+
+    run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    let m = manifest_of(&reqs(&server, "POST", "/api/snapshots").await[0]);
+    assert_ne!(m["channel_id"], "chan-1");
+    assert_eq!(m["label"], "default");
+    assert!(m.get("parent_snapshot_id").is_none(), "it holds nothing of the new channel");
+}
+
+#[tokio::test]
+async fn a_rom_with_no_game_file_syncs_nothing_and_says_why_but_still_reports_play_time() {
+    let server = snapshot_server().await;
+    Mock::given(method("GET")).and(path("/api/roms/7")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "id": 7, "name": "Zelda", "fs_name": "Zelda.sfc", "platform_id": 1, "platform_slug": "snes", "platform_fs_slug": "snes",
+        "files": [{"id": 71, "rom_id": 7, "file_name": "Manual.pdf", "category": "manual", "missing_from_fs": false, "is_top_level": true}]
+    }))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/play-sessions")).respond_with(ResponseTemplate::new(201).set_body_json(json!({}))).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"LOCAL");
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].contains("no game file"), "{rep:?}");
+    assert_eq!(reqs(&server, "POST", "/api/play-sessions").await.len(), 1);
+}
+
+// -- play time ----------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn play_time_is_reported_on_its_own_since_snapshot_sync_has_no_session_to_complete() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/play-sessions")).respond_with(ResponseTemplate::new(201).set_body_json(json!({}))).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = retroarch_env(&t.path().join("ra"), "snes9x");
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let body: Value = reqs(&server, "POST", "/api/play-sessions").await[0].body_json().unwrap();
+    assert_eq!(body["device_id"], DEVICE);
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(body["sessions"][0]["rom_id"], 7);
+    assert!(reqs(&server, "POST", "/api/sync/negotiate").await.is_empty());
+}
+
+// -- a unit Sigil built --------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_psp_hardcore_session_pushes_a_neutral_folder_unit_with_its_hash() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src");
+    psp_memory_stick(&src);
+    let root = t.path().join("ppsspp/PSP");
+    std::fs::create_dir_all(root.join("SYSTEM")).unwrap();
+    std::fs::write(root.join("SYSTEM/ppsspp.ini"), "[Achievements]\nAchievementsEnable = True\nAchievementsChallengeMode = True\n").unwrap();
+    let cp = std::process::Command::new("sh").arg("-c").arg(r#"cp -r "$1/PSP/." "$0/""#).arg(&root).arg(&src).status().unwrap();
+    assert!(cp.success());
+    let r = rom_disc(&t.path().join("roms"), "Crisis Core.iso", "psp", &psp_disc("ULUS-10064"));
+
+    let server = snapshot_server().await;
+    Mock::given(method("GET")).and(path("/api/roms/7")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "id": 7, "name": "Crisis Core", "fs_name": "Crisis Core.iso", "platform_id": 3, "platform_slug": "psp", "platform_fs_slug": "psp",
+        "files": [{"id": 70, "rom_id": 7, "file_name": "Crisis Core.iso", "category": null, "missing_from_fs": false, "is_top_level": true}]
+    }))).mount(&server).await;
+    mock_channels(&server, vec![]).await;
+    mock_push_ok(&server, snap_json(5, PSP_HASH, true)).await;
+
+    let env = standalone_env("ppsspp", &root);
+    let c = client(&server);
+    let mut st = State::default();
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&r, &env, Some(play_session())).await.unwrap();
+    assert_eq!(rep.uploaded, ["Crisis Core.zip"], "{rep:?}");
+
+    let push = &reqs(&server, "POST", "/api/snapshots").await[0];
+    let m = manifest_of(push);
+    assert_eq!(m["save"], json!({"hash": PSP_HASH, "shape": "FOLDER", "format": "neutral"}));
+    assert_eq!((m["is_hardcore"].as_bool(), m["emulator"].as_str()), (Some(true), Some("ppsspp")));
+    assert!(m.get("core").is_none(), "only a libretro core has one");
+    assert!(contains(&push.body, b"ULUS10064DATA00/DATA.BIN"), "the unit Argosy would push");
+    assert!(!contains(&push.body, b"ARGOSY"));
+}
+
+#[tokio::test]
+async fn a_psp_unit_from_argosy_is_restored_and_the_next_sync_is_quiet() {
+    let t = tempfile::tempdir().unwrap();
+    let r = rom_file(&t.path().join("roms"), "Crisis Core [ULUS10064].iso", "psp");
+    let argosy_unit = {
+        let src = t.path().join("src");
+        psp_memory_stick(&src);
+        unit::collect(&psp_route(&src.join("PSP")), &unit::identify(&r.launch_path, "psp"), "x.iso", None).unwrap().unwrap()
+    };
+    let server = snapshot_server().await;
+    Mock::given(method("GET")).and(path("/api/roms/7")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "id": 7, "name": "Crisis Core", "fs_name": "Crisis Core [ULUS10064].iso", "platform_id": 3, "platform_slug": "psp", "platform_fs_slug": "psp",
+        "files": [{"id": 70, "rom_id": 7, "file_name": "Crisis Core [ULUS10064].iso", "category": null, "missing_from_fs": false, "is_top_level": true}]
+    }))).mount(&server).await;
+    let mut snap = snap_json(5, PSP_HASH, false);
+    snap["save"]["identity_hash"] = json!(argosy_unit.identity_hash);
+    snap["save"]["shape"] = json!("FOLDER");
+    snap["save"]["format"] = json!("neutral");
+    mock_channels(&server, vec![channel_json(Some(snap.clone()), false)]).await;
+    mock_get_snapshot(&server, snap).await;
+    mock_save_content(&server, 55, argosy_unit.data.clone()).await;
+
+    let root = t.path().join("ppsspp/PSP");
+    let env = standalone_env("ppsspp", &root);
+    let c = client(&server);
+    let mut st = State::default();
+    let bak = t.path().join("bak");
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&r, &env, None).await.unwrap();
+    assert!(rep.is_clean() && rep.downloaded == ["Crisis Core [ULUS10064].zip"], "{rep:?}");
+    assert_eq!(std::fs::read(root.join("SAVEDATA/ULUS10064DATA00/DATA.BIN")).unwrap(), vec![b'A'; 300]);
+
+    // What Sigil collects from what it just restored is the same save, so nothing goes back up.
+    let rep = syncer(&c, &mut st, &bak, ConflictPolicy::KeepBoth).sync_rom(&r, &env, None).await.unwrap();
+    assert_eq!(rep.unchanged, 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
 }

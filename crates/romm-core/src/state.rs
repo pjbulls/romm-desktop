@@ -119,6 +119,10 @@ pub struct State {
     /// last collect, same key as `sigil`. A save that appears after this is the one just played.
     #[serde(default)]
     pub sigil_unowned: BTreeMap<String, Vec<String>>,
+    /// RomM 5.5+ snapshot sync: what this device holds of each game's channel,
+    /// key = `channel_key`.
+    #[serde(default)]
+    pub channels: BTreeMap<String, ChannelRecord>,
     /// What the file held when this copy last read or wrote it: the common ancestor that `save`
     /// merges against, so that what another program saved meanwhile is kept (see `shared`).
     #[serde(skip)]
@@ -134,6 +138,39 @@ pub struct Fork {
 
 pub fn save_key(rom_id: i64, emulator: &str) -> String {
     format!("{rom_id}:{emulator}")
+}
+
+/// The channel this app syncs a game through. RomM's own name for the channel a game's autosave
+/// slot maps to; the app has no named channels of its own.
+pub const DEFAULT_CHANNEL: &str = "default";
+
+pub fn channel_key(rom_id: i64) -> String {
+    format!("{rom_id}:{DEFAULT_CHANNEL}")
+}
+
+/// A game's channel as this device last knew it: which snapshot it holds (pushed or applied), and the
+/// hashes of the save in it. What a sync decides against (see `snapshot_sync::decide`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelRecord {
+    /// The channel's id on the server. A channel this device has not written to yet gets an id here
+    /// first; the server creates it with the first push.
+    pub channel_id: String,
+    /// The ROM file the channel is keyed to. A channel whose file changed (the library was rescanned)
+    /// is not this one any more.
+    pub rom_file_id: i64,
+    #[serde(default)]
+    pub held_snapshot_id: Option<i64>,
+    #[serde(default)]
+    pub held_content_hash: Option<String>,
+    #[serde(default)]
+    pub held_identity_hash: Option<String>,
+    /// The held snapshot is a hardcore one.
+    #[serde(default)]
+    pub held_hardcore: bool,
+    /// Changes made since were made in a hardcore session and haven't been pushed yet, so a later
+    /// sync, no longer right after that session, still pushes them as hardcore.
+    #[serde(default)]
+    pub pending_hardcore: bool,
 }
 
 pub fn state_key(rom_id: i64, emulator: &str, name: &str) -> String {

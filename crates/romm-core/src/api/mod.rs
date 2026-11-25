@@ -4,8 +4,8 @@ pub mod types;
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use reqwest::{multipart, Response, Url};
@@ -139,7 +139,13 @@ pub struct RommClient {
     header_wait: Duration,
     /// How long an upload keeps its turn; see `UPLOAD_TURN`.
     upload_turn: Duration,
+    /// What the server can do, and when that was read; shared by every clone. See `capabilities`.
+    caps: Arc<StdMutex<Option<(Instant, Capabilities)>>>,
 }
+
+/// How long what the server can do is trusted before the heartbeat is asked again. A server is
+/// upgraded rarely, and a sync asks once per game.
+const CAPABILITIES_TTL: Duration = Duration::from_secs(300);
 
 impl RommClient {
     pub fn new(base_url: &str, token: Option<String>, accept_invalid_certs: bool) -> Result<Self> {
@@ -159,6 +165,7 @@ impl RommClient {
             lock_wait: PROCESS_LOCK_WAIT,
             header_wait: HEADER_WAIT,
             upload_turn: UPLOAD_TURN,
+            caps: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -352,6 +359,31 @@ impl RommClient {
 
     pub async fn heartbeat(&self) -> Result<serde_json::Value> {
         self.get_json(&["heartbeat"], &[]).await
+    }
+
+    /// What this server can do. Which save API to use depends on it: a RomM with snapshot sync
+    /// (5.5+) keeps saves in channels, and an older one in slots.
+    ///
+    /// The answer is remembered for a few minutes. A heartbeat that can't be read doesn't change it:
+    /// the last answer stands, and with none yet the server is taken to be an older one, whose save
+    /// API every RomM still has. So an unreachable or unfamiliar server never gets the newer calls.
+    pub async fn capabilities(&self) -> Capabilities {
+        let known = self.caps.lock().ok().and_then(|g| g.clone());
+        if let Some((at, c)) = &known {
+            if at.elapsed() < CAPABILITIES_TTL {
+                return c.clone();
+            }
+        }
+        match self.heartbeat().await {
+            Ok(v) => {
+                let c = Capabilities::from_heartbeat(&v);
+                if let Ok(mut g) = self.caps.lock() {
+                    *g = Some((Instant::now(), c.clone()));
+                }
+                c
+            }
+            Err(_) => known.map(|(_, c)| c).unwrap_or_default(),
+        }
     }
 
     // ------------------------------------------------------------- library
@@ -608,6 +640,80 @@ impl RommClient {
         let resp = Self::check(self.headers(self.authed(self.http.get(url))).await?).await?;
         let ctype = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
         Ok((resp.bytes().await?.to_vec(), ctype))
+    }
+
+    // ------------------------------------------------- channels and snapshots (RomM 5.5+)
+
+    /// The caller's channels on these ROM files, empty ones included, each with its current snapshot.
+    pub async fn channels(&self, rom_file_ids: &[i64]) -> Result<Vec<Channel>> {
+        let q: Vec<(&str, String)> = rom_file_ids.iter().map(|id| ("rom_file_id", id.to_string())).collect();
+        self.get_json(&["channels"], &q).await
+    }
+
+    /// One snapshot. With `hold`, the server records that this device now has it, which is how a
+    /// later push without an explicit parent knows what the device built on.
+    pub async fn snapshot(&self, id: i64, device_id: &str, hold: bool) -> Result<Snapshot> {
+        let mut q = vec![("device_id", device_id.to_string())];
+        if hold {
+            q.push(("hold", "true".into()));
+        }
+        self.get_json(&["snapshots", &id.to_string()], &q).await
+    }
+
+    /// Writes a snapshot into a channel: the `manifest`, plus the save's bytes when the server doesn't
+    /// have them yet. The server answers in more ways than success and failure, and a client has to
+    /// act on each; see `PushOutcome`.
+    pub async fn push_snapshot(&self, device_id: &str, manifest: &Manifest, save: Option<(String, Vec<u8>)>) -> Result<PushOutcome> {
+        let json = serde_json::to_string(manifest)?;
+        let mut size = json.len() as u64;
+        let mut form = multipart::Form::new().part("manifest", multipart::Part::text(json).mime_str("application/json").map_err(Error::Http)?);
+        if let Some((name, bytes)) = save {
+            size += bytes.len() as u64;
+            form = form.part("save", multipart::Part::bytes(bytes).file_name(name).mime_str("application/octet-stream").map_err(Error::Http)?);
+        }
+        let url = self.url(&["snapshots"])?;
+        let resp = self.send_upload(self.authed(self.http.post(url).query(&[("device_id", device_id)]).multipart(form)), size).await?;
+        let status = resp.status().as_u16();
+        match status {
+            200 | 201 => Ok(PushOutcome::Written { snapshot: resp.json().await?, created: status == 201 }),
+            409 => {
+                let conflict: PushConflict = resp.json().await.unwrap_or_default();
+                Ok(if conflict.hardcore_downgrade { PushOutcome::HardcoreDowngrade } else { PushOutcome::Conflict(Box::new(conflict)) })
+            }
+            400 | 404 => {
+                // Both carry a body that says what to do next; anything else about them is an error.
+                let url = resp.url().to_string();
+                let body = resp.text().await.unwrap_or_default();
+                if status == 400 {
+                    #[derive(serde::Deserialize)]
+                    struct Missing {
+                        #[serde(default)]
+                        missing: Vec<String>,
+                    }
+                    if let Some(m) = serde_json::from_str::<Missing>(&body).ok().filter(|m| !m.missing.is_empty()) {
+                        return Ok(PushOutcome::Missing(m.missing));
+                    }
+                } else if body.contains("Parent snapshot not found") {
+                    return Ok(PushOutcome::ParentMissing);
+                }
+                Err(Error::Status { status, url, body: body.chars().take(500).collect() })
+            }
+            _ => Err(Self::check(resp).await.err().unwrap_or_else(|| Error::msg(format!("unexpected answer {status} to a snapshot push")))),
+        }
+    }
+
+    /// The bytes of a snapshot's save, from the server-relative `download_path` it names.
+    pub async fn download_snapshot_save(&self, download_path: &str) -> Result<Vec<u8>> {
+        Ok(self.fetch_asset(download_path).await?.0)
+    }
+
+    /// Reports play sessions on their own, which RomM 5.5 takes apart from a sync session (snapshot sync
+    /// has none, and the older way of reporting them rode on one).
+    pub async fn ingest_play_sessions(&self, device_id: &str, sessions: &[PlaySession]) -> Result<()> {
+        let body = serde_json::json!({ "device_id": device_id, "sessions": sessions });
+        let resp = self.send_retrying(self.authed(self.http.post(self.url(&["play-sessions"])?).json(&body))).await?;
+        Self::check(resp).await?;
+        Ok(())
     }
 
     // ------------------------------------------------------------- states

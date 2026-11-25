@@ -53,6 +53,12 @@ pub struct RomFile {
     pub md5_hash: Option<String>,
     #[serde(default)]
     pub is_top_level: bool,
+    /// `game`, `dlc`, `patch`...; null for a file RomM didn't categorise. Only game files carry saves.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// The file is gone from disk.
+    #[serde(default)]
+    pub missing_from_fs: bool,
 }
 
 /// How big one ROM is on the server (see `RommClient::rom_sizes`).
@@ -389,4 +395,146 @@ pub struct Me {
     pub ra_username: Option<String>,
     #[serde(default)]
     pub ra_progression: Option<RaProgression>,
+}
+
+// ------------------------------------------------------------------------------------------------
+// Snapshots (RomM 5.5+)
+// ------------------------------------------------------------------------------------------------
+
+/// What a server can do, read from its heartbeat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub version: String,
+    /// RomM 5.5+: a game's saves live in channels and are written as snapshots. The heartbeat says so
+    /// by having a `SAVE_SYNC` section, which no older server has; Argosy reads it the same way.
+    pub snapshots: bool,
+}
+
+impl Capabilities {
+    pub fn from_heartbeat(v: &serde_json::Value) -> Self {
+        Self {
+            version: v.pointer("/SYSTEM/VERSION").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            snapshots: v.get("SAVE_SYNC").is_some_and(serde_json::Value::is_object),
+        }
+    }
+}
+
+/// The save in a snapshot, with where to fetch its bytes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnapshotSave {
+    pub id: i64,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub file_size_bytes: u64,
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    #[serde(default)]
+    pub identity_hash: Option<String>,
+    #[serde(default)]
+    pub shape: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Server-relative, query included.
+    #[serde(default)]
+    pub download_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Snapshot {
+    pub id: i64,
+    #[serde(default)]
+    pub digest: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub is_hardcore: bool,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub save: Option<SnapshotSave>,
+}
+
+/// One playthrough of one ROM file: a line of snapshots with a current one.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub is_own: bool,
+    #[serde(default)]
+    pub is_hardcore: bool,
+    #[serde(default)]
+    pub rom_file_id: Option<i64>,
+    /// Null while the channel is empty.
+    #[serde(default)]
+    pub current: Option<Snapshot>,
+}
+
+/// The save a push carries, by hash. `shape` is `SINGLE`, `MULTI` or `FOLDER`; `format` is `native`
+/// (the emulator's own files) or `neutral` (a unit Sigil built).
+#[derive(Debug, Clone, Serialize)]
+pub struct ManifestSave {
+    pub hash: String,
+    pub shape: String,
+    pub format: String,
+}
+
+/// The `manifest` part of `POST /api/snapshots`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Manifest {
+    pub rom_file_id: i64,
+    pub channel_id: String,
+    /// Only for a channel the server has yet to create.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The snapshot the push expects to be the channel's current. Always sent: `null` says the push
+    /// expects an empty channel, and leaving it out would let the server guess.
+    pub expected_current_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_snapshot_id: Option<i64>,
+    pub save: ManifestSave,
+    pub is_hardcore: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub approve_hardcore_downgrade: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emulator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emulator_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_version: Option<String>,
+}
+
+/// The body of a 409 to a push.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PushConflict {
+    /// The channel's current, which the push didn't build on.
+    #[serde(default)]
+    pub current: Option<Snapshot>,
+    /// What the server stored the push as: a branch, so nothing is lost.
+    #[serde(default)]
+    pub branch: Option<Snapshot>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// The push would have replaced a hardcore save with a casual one.
+    #[serde(default)]
+    pub hardcore_downgrade: bool,
+}
+
+/// What the server made of a push.
+#[derive(Debug, Clone)]
+pub enum PushOutcome {
+    /// Stored (`created`), or already what the channel held (not `created`).
+    Written { snapshot: Box<Snapshot>, created: bool },
+    /// The channel moved on; the push was kept as a branch.
+    Conflict(Box<PushConflict>),
+    /// A casual save over a hardcore current, and the push didn't approve that.
+    HardcoreDowngrade,
+    /// The manifest names content the server lacks and the push didn't send: the part names.
+    Missing(Vec<String>),
+    /// The parent snapshot named doesn't exist (any more).
+    ParentMissing,
 }

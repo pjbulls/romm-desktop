@@ -2,8 +2,11 @@
 //! hardcore mode.
 //!
 //! Argosy keeps a game's hardcore saves apart from its casual ones. On servers without snapshot
-//! sync (RomM before 5.5, which this client speaks) it does so by *appending a marker to the file
-//! it uploads*: `{"h":true,"v":1}`, that JSON's length as a little-endian `u32`, then the eight
+//! sync (RomM before 5.5) it does so by *appending a marker to the file it uploads*, which is what
+//! the older sync engine here (`sync`) follows. A RomM with snapshots has no use for it: hardcore is
+//! a flag of the channel there, set by a snapshot's manifest (`snapshot_sync`), and the server never
+//! reads the marker, so that engine neither writes nor needs it (it still strips one from a save it
+//! downloads). The marker is: `{"h":true,"v":1}`, that JSON's length as a little-endian `u32`, then the eight
 //! bytes `ARGOSY\x01\x00`. When Argosy holds any hardcore save of a game it will not apply a server
 //! save that lacks the marker; it parks it and asks the player to keep the hardcore save or give it
 //! up (`SaveDownloader`, `SaveSyncOrchestrator` in Argosy). So a save that comes down marked must go
