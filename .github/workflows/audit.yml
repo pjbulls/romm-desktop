@@ -13,11 +13,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
+      # Prebuilt binary instead of compiling it on every run. cargo-audit publishes no checksum: SHA256 is of
+      # the release asset itself, so raise it together with VERSION.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version 0.23.0
-      - run: cargo audit
+        env:
+          VERSION: 0.23.0
+          SHA256: 4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          file="cargo-audit-x86_64-unknown-linux-musl-v${VERSION}.tgz"
+          curl -fsSL -o "$file" "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${VERSION}/${file}"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          tar xzf "$file"
+          echo "$RUNNER_TEMP/${file%.tgz}" >> "$GITHUB_PATH"
+      - run: cargo-audit audit
 
   npm:
     runs-on: ubuntu-24.04

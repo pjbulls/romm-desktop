@@ -44,7 +44,8 @@ jobs:
       - name: Build the CLI (debug)
         id: cli
         if: ${{ !cancelled() }}
-        run: cargo build --locked -p romm-cli
+        # --workspace, not -p romm-cli: shared dependencies then reuse the test build instead of recompiling
+        run: cargo build --locked --workspace --bin romm
       - name: CLI smoke test
         if: ${{ !cancelled() && steps.cli.outcome == 'success' }}
         run: tests/smoke/psp_smoke.sh
@@ -153,7 +154,8 @@ jobs:
           path: dist/*
           if-no-files-found: error
       - name: Build the standalone CLI
-        run: cargo build --release --locked -p romm-cli
+        # --workspace, not -p romm-cli: reuses the app build above (~13 crates recompile, not ~80)
+        run: cargo build --release --locked --workspace --bin romm
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: romm-cli-${{ matrix.os }}
