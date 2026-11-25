@@ -137,8 +137,6 @@ jobs:
           ARCH: ${{ matrix.arch }}
           SUFFIX: ${{ matrix.suffix }}
         run: |
-          # Tauri names it "<productName>_<version>_<arch>.<ext>". The name published here has no version
-          # in it, so a link to it keeps working from one build to the next.
           shopt -s nullglob
           built=(target/release/bundle/"$BUNDLE"/*."$EXT")
           if [ "${#built[@]}" -ne 1 ]; then

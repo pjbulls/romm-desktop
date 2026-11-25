@@ -1,7 +1,5 @@
 name: audit
 on:
-  # Weekly as well as on changes: advisories are published without any commit here, and this is how
-  # a new one in an existing dependency gets noticed.
   schedule: [{ cron: '23 5 * * 1' }]
   push: { branches: [main] }
   pull_request:
@@ -19,21 +17,15 @@ jobs:
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.23.0
-      # Fails on vulnerabilities. Unmaintained and unsound crates are printed as warnings: the ones there
-      # now come from Tauri's GTK3 bindings and cannot be changed from here (see .cargo/audit.toml).
       - run: cargo audit
 
   npm:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # What ships: the app bundles only these four packages, so this is the check that fails the run.
       - name: Production dependencies
         run: npm audit --omit=dev --package-lock-only --audit-level=high
         working-directory: app
-      # Build and test tooling (vite, vitest) never reaches the shipped app, and an advisory there can be one
-      # nobody has fixed yet (picomatch, when this was written: no patched version exists). It is shown,
-      # so that it is seen, but does not fail the run.
       - name: Dev tooling (informational)
         continue-on-error: true
         run: npm audit --package-lock-only --audit-level=high
