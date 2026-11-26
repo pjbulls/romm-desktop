@@ -90,6 +90,42 @@ pub(crate) fn decide(held: Option<&Point>, current: Option<&Point>, local: Optio
     }
 }
 
+/// Stands in for a snapshot id this device held but can no longer name. Real ids start at 1, so it is
+/// never the channel's current, and it is never sent to the server (see `sync_channel`).
+pub(crate) const NO_SNAPSHOT: i64 = 0;
+
+/// What a device that has only ever synced this game the older way can be taken to hold.
+///
+/// Such a device has no channel record (`decide` would call it a device that holds nothing, and any
+/// difference from the server a conflict), but it does know the save it last exchanged: `last_synced`,
+/// the content hash the older engine kept. That is enough to tell which side has moved since:
+///
+/// - the channel's current is still that save: the device holds the current, so what changed here
+///   is a change to push, not a conflict;
+/// - the channel's current is something else: the device holds an earlier snapshot it can't name
+///   ([`NO_SNAPSHOT`]), so the channel moved on, and a clean device follows it while one that changed
+///   too has a real conflict.
+///
+/// `None` (so `decide` goes on as for a device that holds nothing) when there is nothing to go by: no
+/// last-synced hash, an empty channel, or a local save that already is the channel's current, which
+/// `decide` adopts.
+pub(crate) fn seed_held(last_synced: &str, current: Option<&Point>, local: Option<&Hashes>) -> Option<Point> {
+    let current = current?;
+    if last_synced.is_empty() {
+        return None;
+    }
+    if let (Some(l), Some(c)) = (local, current.save.as_ref()) {
+        if l.same_save_as(c) {
+            return None;
+        }
+    }
+    match &current.save {
+        Some(c) if c.content == last_synced => Some(current.clone()),
+        // Only the content hash was kept, so the identity is unknown, and an empty one matches nothing.
+        _ => Some(Point { id: NO_SNAPSHOT, save: Some(Hashes { content: last_synced.to_string(), identity: String::new() }) }),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // What this module needs to know about a game, from the server and from this machine
 // ---------------------------------------------------------------------------------------------
@@ -237,13 +273,23 @@ impl<'a> Syncer<'a> {
         // A held snapshot with no hashes on record is still a held snapshot.
         let held = held.or_else(|| view.held.as_ref().and_then(|h| h.held_snapshot_id).map(|id| Point { id, save: None }));
         let current = view.current.as_ref().map(|s| Point { id: s.id, save: s.save.as_ref().and_then(save_hashes) });
+        // A game this install has synced only the older way has no channel record yet, though it knows
+        // what it last exchanged: without that, its first sync would call every change here, or on the
+        // server, a conflict. Once a sync writes the channel record, this is no longer asked.
+        let held = held.or_else(|| {
+            if self.state.channels.contains_key(&channel_key(rom_id)) {
+                return None;
+            }
+            seed_held(self.state.last_synced_hash(rom_id, &plan.label)?, current.as_ref(), local_h.as_ref())
+        });
 
         let action = decide(held.as_ref(), current.as_ref(), local_h.as_ref());
         tracing::debug!("snapshot sync: rom {rom_id} channel {} held {:?} current {:?} -> {action:?}", view.channel_id, held.as_ref().map(|h| h.id), current.as_ref().map(|c| c.id));
 
         let dirty = local_h.as_ref().is_some_and(|l| held.as_ref().and_then(|h| h.save.as_ref()).is_none_or(|h| !l.same_save_as(h)));
         let hardcore = self.push_is_hardcore(rom_id, cx.env, &view, dirty, in_session);
-        let held_id = held.as_ref().map(|h| h.id);
+        // `NO_SNAPSHOT` is no snapshot the server knows; naming it would only draw a 404 for the parent.
+        let held_id = held.as_ref().map(|h| h.id).filter(|id| *id != NO_SNAPSHOT);
 
         match action {
             Action::Nothing => {
@@ -535,6 +581,73 @@ mod tests {
         let a = Hashes { content: "c1".into(), identity: String::new() };
         let b = Hashes { content: "c2".into(), identity: String::new() };
         assert!(!a.same_save_as(&b));
+    }
+
+    // -- a device that has only synced this game the older way ----------------------------------
+
+    #[test]
+    fn nothing_is_inferred_without_a_last_synced_save_or_a_current() {
+        let cur = pt(5, "x");
+        assert_eq!(seed_held("", Some(&cur), Some(&h("y"))), None, "the older engine never exchanged anything");
+        assert_eq!(seed_held("x", None, Some(&h("y"))), None, "an empty channel has nothing to compare with");
+    }
+
+    #[test]
+    fn a_local_save_that_already_is_the_current_is_left_to_be_adopted() {
+        // Even though the server has moved on from what was last synced: the two sides agree.
+        let cur = pt(6, "new");
+        assert_eq!(seed_held("old", Some(&cur), Some(&h("new"))), None);
+        assert_eq!(decide(None, Some(&cur), Some(&h("new"))), Action::Adopt(6));
+    }
+
+    #[test]
+    fn a_channel_still_on_the_last_synced_save_is_held_as_the_current() {
+        let cur = pt(5, "old");
+        assert_eq!(seed_held("old", Some(&cur), Some(&h("mine"))), Some(cur.clone()));
+        // Its own hashes, including the identity the older engine never kept.
+        assert_eq!(seed_held("old", Some(&cur), None), Some(cur));
+    }
+
+    #[test]
+    fn a_channel_that_moved_on_is_held_as_an_earlier_snapshot_that_cant_be_named() {
+        let held = seed_held("old", Some(&pt(6, "new")), Some(&h("mine"))).unwrap();
+        assert_eq!(held.id, NO_SNAPSHOT);
+        let kept = held.save.unwrap();
+        assert_eq!((kept.content.as_str(), kept.identity.as_str()), ("old", ""));
+        // A current with no save of its own (only states) moved on as well.
+        let states_only = Point { id: 7, save: None };
+        assert_eq!(seed_held("old", Some(&states_only), Some(&h("mine"))).unwrap().id, NO_SNAPSHOT);
+    }
+
+    #[test]
+    fn the_stand_in_id_is_never_a_real_snapshot() {
+        // Real ids are 1 and up, so a seeded device is never taken to hold the current.
+        assert_eq!(NO_SNAPSHOT, 0);
+        let held = seed_held("old", Some(&pt(1, "new")), Some(&h("mine"))).unwrap();
+        assert_ne!(held.id, 1);
+    }
+
+    #[test]
+    fn what_the_seed_changes_in_the_first_snapshot_sync_of_an_upgraded_device() {
+        let seeded = |last: &str, cur: &Point, local: Option<&Hashes>| seed_held(last, Some(cur), local);
+
+        // The channel is as it was last synced. Changed here: push it on top (not a conflict). Not changed:
+        // the two sides are the same save, so it is adopted (no transfer, and the device now holds it).
+        let cur = pt(5, "old");
+        let mine = h("mine");
+        assert_eq!(decide(seeded("old", &cur, Some(&mine)).as_ref(), Some(&cur), Some(&mine)), Action::Push { expected: Some(5), parent: Some(5) });
+        assert_eq!(decide(seeded("old", &cur, Some(&h("old"))).as_ref(), Some(&cur), Some(&h("old"))), Action::Adopt(5));
+
+        // The channel has moved on. Not changed here: follow it. Changed here too: a real conflict.
+        let cur = pt(6, "new");
+        assert_eq!(decide(seeded("old", &cur, Some(&h("old"))).as_ref(), Some(&cur), Some(&h("old"))), Action::Download(6));
+        assert_eq!(decide(seeded("old", &cur, Some(&mine)).as_ref(), Some(&cur), Some(&mine)), Action::Conflict(6));
+        // No local save at all: take the channel's.
+        assert_eq!(decide(seeded("old", &cur, None).as_ref(), Some(&cur), None), Action::Download(6));
+
+        // Without the seed, every one of those differences was a conflict (or an adoption).
+        assert_eq!(decide(None, Some(&pt(5, "old")), Some(&mine)), Action::Conflict(5));
+        assert_eq!(decide(None, Some(&cur), Some(&h("old"))), Action::Conflict(6));
     }
 
     #[test]

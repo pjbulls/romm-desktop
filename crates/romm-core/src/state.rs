@@ -183,6 +183,12 @@ impl State {
         self.saves.entry(save_key(rom_id, emulator)).or_default()
     }
 
+    /// The content hash of what the older (slot-based) sync last exchanged for `emulator`'s save of
+    /// `rom_id`, if it ever did. Unlike `save_record` this creates nothing, so asking is free.
+    pub fn last_synced_hash(&self, rom_id: i64, emulator: &str) -> Option<&str> {
+        self.saves.get(&save_key(rom_id, emulator)).and_then(|r| r.last_hash.as_deref()).filter(|h| !h.is_empty())
+    }
+
     pub fn sigil_state(&self, key: &str) -> Option<Vec<u8>> {
         use base64::Engine;
         let b64 = self.sigil.get(key)?;

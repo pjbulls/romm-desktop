@@ -2264,6 +2264,169 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+// -- a device that has so far synced the older way ----------------------------------------------
+//
+// Such an install has no channel record for the game, only what the older engine last exchanged
+// (`OLD` here). Without that, its first snapshot sync called every difference a conflict.
+
+/// An install that has only ever synced Zelda the older way: it last exchanged `OLD`.
+fn synced_the_old_way(st: &mut State) {
+    st.save_record(7, "snes9x").mark_synced(&saves::md5_bytes(b"OLD"), Some(55), Some(SERVER_TIME.to_string()));
+}
+
+#[tokio::test]
+async fn an_upgraded_device_pushes_what_it_changed_when_the_channel_is_as_it_left_it() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let (old, mine) = (saves::md5_bytes(b"OLD"), saves::md5_bytes(b"MINE"));
+    // The channel's current is the very save this device last synced: the server carried it over.
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, &old, false)), false)]).await;
+    mock_push_ok(&server, snap_json(6, &mine, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    synced_the_old_way(&mut st);
+
+    // `Ask`, the strictest policy: nothing here is a conflict, so it never comes into play.
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.conflicts.is_empty(), "{rep:?}");
+    assert_eq!(rep.uploaded, ["Zelda.srm"]);
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 1);
+    let m = manifest_of(&pushes[0]);
+    assert_eq!((m["expected_current_id"].as_i64(), m["parent_snapshot_id"].as_i64()), (Some(5), Some(5)), "on top of what it held");
+    assert!(has_save_part(&pushes[0]));
+    assert_eq!(std::fs::read(file).unwrap(), b"MINE");
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6), "from here on it holds a channel record");
+}
+
+#[tokio::test]
+async fn an_upgraded_device_follows_a_channel_that_moved_on_when_it_changed_nothing() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"OLD"); // as last synced: unchanged here
+    let mut st = State::default();
+    synced_the_old_way(&mut st);
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.conflicts.is_empty(), "{rep:?}");
+    assert_eq!(rep.downloaded, ["Zelda.srm"]);
+    assert_eq!(std::fs::read(file).unwrap(), b"THEIRS");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+    assert!(walk_files(&t.path().join("bak")).iter().any(|p| std::fs::read(p).is_ok_and(|b| b == b"OLD")), "a copy of what it replaced is kept");
+}
+
+#[tokio::test]
+async fn an_upgraded_device_that_changed_a_save_the_channel_also_moved_has_a_real_conflict() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    synced_the_old_way(&mut st);
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert_eq!(rep.conflict_names(), ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(file).unwrap(), b"MINE");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert!(reqs(&server, "GET", "/api/saves/56/content").await.is_empty());
+    assert!(st.channels.is_empty(), "nothing was settled, so nothing is recorded");
+}
+
+#[tokio::test]
+async fn the_stand_in_for_a_snapshot_it_cant_name_never_reaches_the_server() {
+    // Keeping both pushes the local save as a branch off what the device held. An upgraded device
+    // can't name that snapshot, so the push names none; sending the stand-in would draw a 404.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let (theirs, mine) = (saves::md5_bytes(b"THEIRS"), saves::md5_bytes(b"MINE"));
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    mock_push_once(&server, 409, json!({"current": snap_json(6, &theirs, false), "branch": snap_json(7, &mine, false), "reason": "moved"})).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    synced_the_old_way(&mut st);
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(pushes.len(), 1, "no second try after a 404 for an unknown parent");
+    let m = manifest_of(&pushes[0]);
+    assert!(m["expected_current_id"].is_null() && m["parent_snapshot_id"].is_null(), "{m}");
+    assert_eq!(rep.downloaded, ["Zelda.srm"]);
+    assert_eq!(std::fs::read(file).unwrap(), b"THEIRS");
+    assert!(walk_files(&t.path().join("bak")).iter().any(|p| std::fs::read(p).is_ok_and(|b| b == b"MINE")));
+}
+
+#[tokio::test]
+async fn an_upgraded_device_whose_save_already_is_the_current_adopts_it() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"THEIRS"); // the channel moved on, and so did this device: to the same save
+    let mut st = State::default();
+    synced_the_old_way(&mut st);
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.conflicts.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert!(reqs(&server, "GET", "/api/saves/56/content").await.is_empty());
+    assert_eq!(std::fs::read(file).unwrap(), b"THEIRS");
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(6));
+}
+
+#[tokio::test]
+async fn a_device_with_no_history_at_all_is_still_a_device_that_holds_nothing() {
+    // The seed is only for an install that synced the game before: with nothing recorded, a save that
+    // differs from the channel's current is a conflict, as it was.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert_eq!(rep.conflict_names(), ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(file).unwrap(), b"MINE");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_channel_record_always_outranks_what_the_older_engine_kept() {
+    // Once a device has a channel record, the older record is history. Here it would wrongly say the
+    // channel is as this device left it (`THEIRS`), which would push over a snapshot it never held.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = saves::md5_bytes(b"THEIRS");
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"OLD"));
+    st.save_record(7, "snes9x").mark_synced(&theirs, Some(55), Some(SERVER_TIME.to_string()));
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert_eq!(rep.conflict_names(), ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(file).unwrap(), b"MINE");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(5));
+}
+
 // -- hardcore ---------------------------------------------------------------------------------
 
 #[tokio::test]
