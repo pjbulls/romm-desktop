@@ -158,7 +158,10 @@ describe("startup with a library that loads slowly", () => {
 
     // Progress arrives while the first list is waiting on the library.
     for (const n of [500, 1000, 1500]) await act(async () => h.emit("romm://library", { phase: "loading", loaded: n, total: 1500, error: null }));
-    expect(document.querySelector("[data-testid=loading]")!.textContent).toContain("1,500 of 1,500");
+    // The app writes numbers the way the machine does (1,500 on en-US, 1.500 on nl-BE, 1 500 on fr-FR), so
+    // the expected text is made the same way, not spelled out: the test then holds on any machine.
+    const shown = (1500).toLocaleString();
+    expect(document.querySelector("[data-testid=loading]")!.textContent).toContain(`${shown} of ${shown}`);
     await act(async () => h.emit("romm://library", { phase: "loading", loaded: 0, total: null, error: null }));
     expect(shellStillThere()).toBe(true);
 
