@@ -11,6 +11,11 @@ updates:
     directory: /app
     schedule: { interval: weekly }
     groups:
+      # Vite and its plugins have to move together: @vitejs/plugin-react 6 needs Vite 8, and 4.x can't
+      # take it, so as separate pull requests neither can even be installed. Listed first, so that it
+      # takes these packages (majors included) before the group below does.
+      vite:
+        patterns: ["vite", "@vitejs/*"]
       npm-minor-and-patch:
         update-types: [minor, patch]
 

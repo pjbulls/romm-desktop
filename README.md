@@ -38,7 +38,7 @@ Most emulator settings should be set in their respective applications though.
 **This includes your RetroAchievements account**: for those the app itself only displays what your RomM server knows & does not directly connect to retroachievements.org.
 
 ## Build
-Requires Rust 1.91+, Node 22+, and a C compiler for [`argosy-sigil`](https://github.com/rommapp/argosy-sigil).
+Requires Rust 1.91+, Node 22.12+, and a C compiler for [`argosy-sigil`](https://github.com/rommapp/argosy-sigil).
 
 ```sh
 sudo apt-get install build-essentials pkg-config \
