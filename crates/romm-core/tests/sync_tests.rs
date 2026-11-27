@@ -2427,6 +2427,237 @@ async fn a_channel_record_always_outranks_what_the_older_engine_kept() {
     assert_eq!(st.channels[&channel_key(7)].held_snapshot_id, Some(5));
 }
 
+// -- hardcore, across the two engines and the two ways RomM can know it ---------------------------
+//
+// Before snapshot sync a hardcore save is one with Argosy's marker after it (a plain file hashes with
+// it, RomM never reads it). With snapshots it is a flag of the snapshot. Each engine remembers its
+// own way, so a save has to stay hardcore on the way from one to the other and back.
+
+/// An install that synced Zelda the older way, whose last exchange was a hardcore save.
+fn last_exchange_was_hardcore(st: &mut State) {
+    synced_the_old_way(st);
+    st.save_record(7, "snes9x").hardcore = true;
+}
+
+#[tokio::test]
+async fn an_upgraded_device_pushes_hardcore_progress_it_had_not_yet_sent_as_hardcore() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let (old, mine) = (saves::md5_bytes(b"OLD"), saves::md5_bytes(b"MINE"));
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, &old, false)), false)]).await;
+    mock_push_ok(&server, snap_json(6, &mine, true)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    synced_the_old_way(&mut st);
+    st.save_record(7, "snes9x").pending_hardcore = true; // played in hardcore; the older engine hadn't sent it
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(manifest_of(&pushes[0])["is_hardcore"], true);
+    assert!(st.channels[&channel_key(7)].held_hardcore);
+    let rec = &st.saves[&save_key(7, "snes9x")];
+    assert!(rec.hardcore && !rec.pending_hardcore);
+}
+
+#[tokio::test]
+async fn a_casual_change_is_still_not_passed_off_as_hardcore_by_the_hardcore_save_before_it() {
+    // The last exchange being hardcore says nothing of changes made since, outside any session.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let (old, mine) = (saves::md5_bytes(b"OLD"), saves::md5_bytes(b"MINE"));
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, &old, false)), false)]).await;
+    mock_push_ok(&server, snap_json(6, &mine, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"MINE");
+    let mut st = State::default();
+    last_exchange_was_hardcore(&mut st);
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    assert_eq!(manifest_of(&reqs(&server, "POST", "/api/snapshots").await[0])["is_hardcore"], false);
+    assert!(!st.channels[&channel_key(7)].held_hardcore && !st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn a_hardcore_save_the_server_has_with_its_marker_is_matched_not_pushed_back_as_casual() {
+    // RomM never read the marker, so it hashes the plain file with it and flags the snapshot casual;
+    // the emulator's file has no marker. Measured plainly the save looked changed, and went up again
+    // as a casual one, with the marker gone and nothing on the server to guard it.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let with_marker = saves::md5_bytes(&marked(b"SAVE"));
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &with_marker, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &with_marker, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, file) = snes_game(t.path(), b"SAVE");
+    let mut st = State::default();
+    st.save_record(7, "snes9x").mark_synced(&with_marker, Some(55), Some(SERVER_TIME.to_string()));
+    st.save_record(7, "snes9x").hardcore = true;
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.conflicts.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty(), "nothing changed, so nothing is pushed");
+    assert_eq!(std::fs::read(file).unwrap(), b"SAVE");
+    let held = &st.channels[&channel_key(7)];
+    assert!(held.held_hardcore, "and it is still known to be hardcore");
+    assert_eq!(held.held_content_hash.as_deref(), Some(with_marker.as_str()));
+    assert!(st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn the_marker_on_the_server_alone_is_enough_to_know_a_save_is_hardcore() {
+    // No record of the older engine at all (the state file was lost, or this is another machine).
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let with_marker = saves::md5_bytes(&marked(b"SAVE"));
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &with_marker, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &with_marker, false)).await;
+    let t = tempfile::tempdir().unwrap();
+    let (env, _) = snes_game(t.path(), b"SAVE");
+    let mut st = State::default();
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.conflicts.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
+    assert!(st.channels[&channel_key(7)].held_hardcore);
+    assert!(st.saves[&save_key(7, "snes9x")].hardcore, "the older engine is told too");
+}
+
+#[tokio::test]
+async fn a_save_that_comes_down_with_the_marker_is_remembered_as_hardcore() {
+    // Uploaded by an older engine, so the snapshot is flagged casual; the marker is the proof.
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let theirs = marked(b"THEIRS");
+    let hash = saves::md5_bytes(&theirs);
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &hash, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &hash, false)).await;
+    mock_save_content(&server, 56, theirs).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let env = retroarch_env(&ra, "snes9x");
+    let mut st = State::default();
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.downloaded == ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"THEIRS", "the emulator's file never carries the marker");
+    assert!(st.channels[&channel_key(7)].held_hardcore);
+    assert!(st.saves[&save_key(7, "snes9x")].hardcore);
+}
+
+#[tokio::test]
+async fn a_hardcore_snapshot_goes_back_up_marked_when_the_older_engine_takes_over() {
+    // Snapshot sync brings the hardcore save down (the flag is the snapshot's, no marker in the bytes).
+    let theirs = saves::md5_bytes(b"THEIRS");
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, true)), true)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, true)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let env = retroarch_env(&ra, "snes9x");
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.downloaded == ["Zelda.srm"], "{rep:?}");
+    assert!(st.channels[&channel_key(7)].held_hardcore);
+    assert!(st.saves[&save_key(7, "snes9x")].hardcore, "the older engine's record agrees");
+
+    // The server then goes back to one without snapshots (or this machine can't read its heartbeat),
+    // and the older engine is asked to send the same save up: it carries the marker.
+    let old_server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"SYSTEM": {"VERSION": "5.4.1"}}))).mount(&old_server).await;
+    let sent = marked(b"THEIRS");
+    mock_negotiate(&old_server, vec![op("upload", None, "Zelda.srm")]).await;
+    mock_upload_ok(&old_server, &saves::md5_bytes(&sent)).await;
+    mock_complete(&old_server).await;
+    let rep = run_snapshot_sync(&old_server, &mut st, &env, ConflictPolicy::KeepBoth, None, &t.path().join("bak")).await;
+    assert_eq!(rep.uploaded, ["Zelda.srm"], "{rep:?}");
+    let up = &reqs(&old_server, "POST", "/api/saves").await[0];
+    assert!(contains(&up.body, &sent), "the save went up with Argosy's marker after it");
+}
+
+#[tokio::test]
+async fn a_hardcore_session_whose_push_failed_is_remembered_by_both_engines_and_still_sent_as_hardcore() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    let (old, mine) = (saves::md5_bytes(b"OLD"), saves::md5_bytes(b"MINE"));
+    mock_channels(&server, vec![channel_json(Some(snap_json(5, &old, false)), false)]).await;
+    mock_play_sessions(&server).await;
+    mock_push_once(&server, 500, json!({"detail": "down"})).await;
+    mock_push_ok(&server, snap_json(6, &mine, true)).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"MINE").unwrap();
+    let mut st = State::default();
+    holding(&mut st, 5, &old);
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, Some(play_session()), &t.path().join("bak")).await;
+    assert!(!rep.failed.is_empty(), "the push failed: {rep:?}");
+    assert!(st.channels[&channel_key(7)].pending_hardcore, "remembered at once");
+    assert!(st.saves[&save_key(7, "snes9x")].pending_hardcore, "and the older engine is told");
+
+    // Later, outside any session and with hardcore switched off meanwhile: still sent as hardcore.
+    retroarch_hardcore_env(&ra, false);
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(manifest_of(&pushes[1])["is_hardcore"], true);
+    let rec = &st.saves[&save_key(7, "snes9x")];
+    assert!(rec.hardcore && !rec.pending_hardcore && st.channels[&channel_key(7)].held_hardcore);
+}
+
+#[tokio::test]
+async fn the_older_engine_keeps_the_channel_records_hardcore_flag_current() {
+    // This install has used snapshot sync (its channel record says the save it holds is hardcore), and
+    // is synced the older way for a while. The casual save it takes down must not be taken for a
+    // hardcore one when snapshots come back.
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_env(&ra, "snes9x");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("download", Some(11), "Zelda.srm")]).await;
+    mock_save_content(&server, 11, b"THEIRS".to_vec()).await;
+    mock_complete(&server).await;
+    let c = client(&server);
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"OLD"));
+    st.channels.get_mut(&channel_key(7)).unwrap().held_hardcore = true;
+    st.save_record(7, "snes9x").hardcore = true;
+
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::ServerWins).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    assert_eq!(rep.downloaded, ["Zelda.srm"], "{rep:?}");
+    assert!(!st.saves[&save_key(7, "snes9x")].hardcore);
+    assert!(!st.channels[&channel_key(7)].held_hardcore, "the channel record was told");
+    assert_eq!(st.hardcore_memory(7, "snes9x"), (false, false));
+}
+
+#[tokio::test]
+async fn a_hardcore_session_the_older_engine_could_not_upload_is_remembered_in_the_channel_record_too() {
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"LOCAL").unwrap();
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![op("upload", None, "Zelda.srm")]).await;
+    Mock::given(method("POST")).and(path("/api/saves")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    mock_complete(&server).await;
+    let c = client(&server);
+    let mut st = State::default();
+    holding(&mut st, 5, &saves::md5_bytes(b"OLD"));
+
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+    assert!(!rep.failed.is_empty(), "{rep:?}");
+    assert!(st.saves[&save_key(7, "snes9x")].pending_hardcore);
+    assert!(st.channels[&channel_key(7)].pending_hardcore, "so that snapshot sync, if it runs next, still sends it as hardcore");
+}
+
 // -- hardcore ---------------------------------------------------------------------------------
 
 #[tokio::test]

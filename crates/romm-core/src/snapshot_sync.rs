@@ -170,6 +170,36 @@ fn local_hashes(l: &LocalUnit) -> Hashes {
     }
 }
 
+/// How RomM knows a plain (not zip) save that an older engine uploaded as a hardcore one: with
+/// Argosy's marker after it, and, since RomM hashes anything but a zip whole, under the hash of that.
+/// A zip is hashed by its entries, marker or not, so it has no such form.
+fn marked_form(l: &LocalUnit) -> Option<Hashes> {
+    let data = l.bytes().ok()?;
+    if saves::is_zip(&data) {
+        return None;
+    }
+    let h = unit::content_hash(&hardcore::mark(&data));
+    Some(Hashes { identity: h.clone(), content: h })
+}
+
+/// The hashes to measure a local save by, and whether it is known only in its marked form.
+///
+/// The emulator's file never carries the marker, but the server's copy of a hardcore save an older
+/// engine uploaded does, and that copy is hashed with it. Measured plainly such a save looks changed
+/// (and would go up again, as a casual one, with no marker and no flag for RomM to guard). `known` is
+/// every content hash that names the save on the server or on record here: when the plain hash is
+/// one the marked form is not looked for, and when only the marked form is, that is the save, and
+/// proof that it is a hardcore one.
+pub(crate) fn known_form(plain: Hashes, marked: impl FnOnce() -> Option<Hashes>, known: &[&str]) -> (Hashes, bool) {
+    if known.contains(&plain.content.as_str()) {
+        return (plain, false);
+    }
+    match marked() {
+        Some(m) if known.contains(&m.content.as_str()) => (m, true),
+        _ => (plain, false),
+    }
+}
+
 fn newest_first(c: &Channel) -> String {
     c.current.as_ref().and_then(|s| s.created_at.clone()).unwrap_or_default()
 }
@@ -273,6 +303,23 @@ impl<'a> Syncer<'a> {
         // A held snapshot with no hashes on record is still a held snapshot.
         let held = held.or_else(|| view.held.as_ref().and_then(|h| h.held_snapshot_id).map(|id| Point { id, save: None }));
         let current = view.current.as_ref().map(|s| Point { id: s.id, save: s.save.as_ref().and_then(save_hashes) });
+        let last_synced = self.state.last_synced_hash(rom_id, &plan.label).map(str::to_owned);
+        // An older engine uploaded a hardcore save that is a plain file with the marker after it, and
+        // RomM hashes it so; the emulator's file has no marker. Match them, or the same save would
+        // look changed and go up again without the marker (see `known_form`).
+        let (local_h, local_marked) = match (local, local_h) {
+            (Some(l), Some(plain)) => {
+                let known: Vec<&str> = [current.as_ref(), held.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.save.as_ref().map(|h| h.content.as_str()))
+                    .chain(last_synced.as_deref())
+                    .collect();
+                let (h, marked) = known_form(plain, || marked_form(l), &known);
+                (Some(h), marked)
+            }
+            (_, h) => (h, false),
+        };
         // A game this install has synced only the older way has no channel record yet, though it knows
         // what it last exchanged: without that, its first sync would call every change here, or on the
         // server, a conflict. Once a sync writes the channel record, this is no longer asked.
@@ -280,14 +327,14 @@ impl<'a> Syncer<'a> {
             if self.state.channels.contains_key(&channel_key(rom_id)) {
                 return None;
             }
-            seed_held(self.state.last_synced_hash(rom_id, &plan.label)?, current.as_ref(), local_h.as_ref())
+            seed_held(last_synced.as_deref()?, current.as_ref(), local_h.as_ref())
         });
 
         let action = decide(held.as_ref(), current.as_ref(), local_h.as_ref());
         tracing::debug!("snapshot sync: rom {rom_id} channel {} held {:?} current {:?} -> {action:?}", view.channel_id, held.as_ref().map(|h| h.id), current.as_ref().map(|c| c.id));
 
         let dirty = local_h.as_ref().is_some_and(|l| held.as_ref().and_then(|h| h.save.as_ref()).is_none_or(|h| !l.same_save_as(h)));
-        let hardcore = self.push_is_hardcore(rom_id, cx.env, &view, dirty, in_session);
+        let hardcore = self.push_is_hardcore(rom_id, &plan.label, cx.env, &view, dirty, in_session);
         // `NO_SNAPSHOT` is no snapshot the server knows; naming it would only draw a 404 for the parent.
         let held_id = held.as_ref().map(|h| h.id).filter(|id| *id != NO_SNAPSHOT);
 
@@ -300,7 +347,7 @@ impl<'a> Syncer<'a> {
             }
             Action::Adopt(snapshot_id) => {
                 if let Some(cur) = &view.current {
-                    self.record(cx, plan, &view, cur, current.as_ref().and_then(|c| c.save.clone()));
+                    self.record(cx, plan, &view, cur, current.as_ref().and_then(|c| c.save.clone()), local_marked);
                 }
                 // Tell the server this device holds it. Nothing is lost if that fails: the next sync
                 // finds the same hashes and adopts again.
@@ -333,9 +380,13 @@ impl<'a> Syncer<'a> {
     /// the emulator's settings say when it ends (see `hardcore`). Changes found outside a session count
     /// only if the session that made them was, as remembered; a casual save is never passed off as
     /// hardcore. Nothing changed: the held save's own kind.
-    fn push_is_hardcore(&mut self, rom_id: i64, env: &EmuEnv, view: &View, dirty: bool, in_session: bool) -> bool {
+    ///
+    /// What was made of the save before is remembered by whichever engine last exchanged it
+    /// (`State::hardcore_memory`), so it counts here even on the first snapshot sync of a game the
+    /// older engine had been syncing.
+    fn push_is_hardcore(&mut self, rom_id: i64, emulator: &str, env: &EmuEnv, view: &View, dirty: bool, in_session: bool) -> bool {
         let key = channel_key(rom_id);
-        let (was, pending) = self.state.channels.get(&key).map_or((false, false), |c| (c.held_hardcore, c.pending_hardcore));
+        let (was, pending) = self.state.hardcore_memory(rom_id, emulator);
         if !dirty {
             return was;
         }
@@ -345,9 +396,9 @@ impl<'a> Syncer<'a> {
         let hardcore = hardcore::session_is_hardcore(env);
         // Remembered at once, so that a push that fails doesn't lose it. A casual session adds nothing.
         if hardcore || self.state.channels.contains_key(&key) {
-            let rec = self.state.channels.entry(key).or_insert_with(|| ChannelRecord { channel_id: view.channel_id.clone(), rom_file_id: view.file_id, ..Default::default() });
-            rec.pending_hardcore = hardcore;
+            self.state.channels.entry(key).or_insert_with(|| ChannelRecord { channel_id: view.channel_id.clone(), rom_file_id: view.file_id, ..Default::default() });
         }
+        self.state.note_pending(rom_id, emulator, hardcore);
         hardcore
     }
 
@@ -413,7 +464,7 @@ impl<'a> Syncer<'a> {
 
     /// A push landed: this device now holds it.
     fn pushed(&mut self, cx: &Cx<'_>, plan: &Plan, view: &View, local: &LocalUnit, snap: &Snapshot, report: &mut SyncReport) {
-        self.record(cx, plan, view, snap, Some(local_hashes(local)));
+        self.record(cx, plan, view, snap, Some(local_hashes(local)), false);
         self.commit_sigil(plan, Some(local));
         report.uploaded.push(local.file_name.clone());
     }
@@ -425,12 +476,14 @@ impl<'a> Syncer<'a> {
         let snap = self.client.snapshot(snapshot_id, self.device_id, true).await?;
         let Some(save) = &snap.save else {
             // States only: there is no save to place, but the device has caught up.
-            self.record(cx, plan, view, &snap, None);
+            self.record(cx, plan, view, &snap, None, false);
             return Ok(());
         };
         let bytes = self.client.download_snapshot_save(&save.download_path).await?;
         let placed = self.place(cx, plan, &bytes)?;
-        self.record(cx, plan, view, &snap, save_hashes(save));
+        // A marker on what came down is proof it is a hardcore save, whatever the snapshot's flag says:
+        // RomM never reads it, so a save an older engine uploaded as hardcore is flagged casual there.
+        self.record(cx, plan, view, &snap, save_hashes(save), placed.marked);
         report.downloaded.push(placed.name);
         Ok(())
     }
@@ -510,9 +563,12 @@ impl<'a> Syncer<'a> {
         }
     }
 
-    /// What this device holds of the channel now, and the per-save record the saves list reads.
-    fn record(&mut self, cx: &Cx<'_>, plan: &Plan, view: &View, snap: &Snapshot, hashes: Option<Hashes>) {
+    /// What this device holds of the channel now, and the per-save record the saves list reads (which
+    /// the older engine reads too, so it is told whether the save is a hardcore one: `marked` is proof
+    /// that it is, besides the snapshot's own flag).
+    fn record(&mut self, cx: &Cx<'_>, plan: &Plan, view: &View, snap: &Snapshot, hashes: Option<Hashes>, marked: bool) {
         let rom_id = cx.rom.rom_id;
+        let hardcore = snap.is_hardcore || marked;
         self.state.channels.insert(
             channel_key(rom_id),
             ChannelRecord {
@@ -521,12 +577,13 @@ impl<'a> Syncer<'a> {
                 held_snapshot_id: Some(snap.id),
                 held_content_hash: hashes.as_ref().map(|h| h.content.clone()),
                 held_identity_hash: hashes.as_ref().map(|h| h.identity.clone()),
-                held_hardcore: snap.is_hardcore,
+                held_hardcore: hardcore,
                 pending_hardcore: false,
             },
         );
         if let Some(h) = &hashes {
             self.state.save_record(rom_id, &plan.label).mark_synced(&h.content, snap.save.as_ref().map(|s| s.id), snap.created_at.clone());
+            self.state.note_exchanged(rom_id, &plan.label, hardcore);
         }
     }
 
@@ -648,6 +705,64 @@ mod tests {
         // Without the seed, every one of those differences was a conflict (or an adoption).
         assert_eq!(decide(None, Some(&pt(5, "old")), Some(&mine)), Action::Conflict(5));
         assert_eq!(decide(None, Some(&cur), Some(&h("old"))), Action::Conflict(6));
+    }
+
+    // -- a plain hardcore save an older engine uploaded with Argosy's marker -----------------------
+
+    fn hs(c: &str) -> Hashes {
+        Hashes { content: c.into(), identity: c.into() }
+    }
+
+    fn local_bytes(data: &[u8]) -> LocalUnit {
+        LocalUnit {
+            emulator: "x".into(),
+            slot: "default".into(),
+            file_name: "g.srm".into(),
+            kind: LocalKind::Bytes(data.to_vec()),
+            size: data.len() as u64,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            hash: unit::content_hash(data),
+            changed: false,
+            marked: false,
+        }
+    }
+
+    #[test]
+    fn a_save_known_by_its_own_hash_is_measured_by_it_and_the_marked_form_is_never_made() {
+        let (h, marked) = known_form(hs("plain"), || panic!("the marked form isn't needed"), &["plain", "other"]);
+        assert_eq!((h.content.as_str(), marked), ("plain", false));
+    }
+
+    #[test]
+    fn a_save_known_only_with_its_marker_is_that_save_and_a_hardcore_one() {
+        let (h, marked) = known_form(hs("plain"), || Some(hs("with-marker")), &["with-marker"]);
+        assert_eq!((h.content.as_str(), marked), ("with-marker", true));
+    }
+
+    #[test]
+    fn a_save_known_by_neither_form_stays_as_it_is() {
+        let (h, marked) = known_form(hs("plain"), || Some(hs("with-marker")), &["something-else"]);
+        assert_eq!((h.content.as_str(), marked), ("plain", false));
+        // A zip has no marked form, so there is nothing to match.
+        let (h, marked) = known_form(hs("plain"), || None, &["with-marker"]);
+        assert_eq!((h.content.as_str(), marked), ("plain", false));
+    }
+
+    #[test]
+    fn the_marked_form_is_the_hash_romm_gives_the_save_with_the_marker_after_it() {
+        let l = local_bytes(b"SAVE");
+        let m = marked_form(&l).unwrap();
+        assert_eq!(m.content, unit::content_hash(&hardcore::mark(b"SAVE")));
+        assert_ne!(m.content, l.hash, "the marker is part of what a plain file's hash covers");
+        assert_eq!(m.identity, m.content);
+    }
+
+    #[test]
+    fn a_zip_has_no_marked_form() {
+        // RomM hashes a zip by its entries, so a marker after it changes nothing.
+        let z = zip_of(&["a.sav", "b.rtc"]);
+        assert!(marked_form(&local_bytes(&z)).is_none());
+        assert_eq!(unit::content_hash(&hardcore::mark(&z)), unit::content_hash(&z));
     }
 
     #[test]

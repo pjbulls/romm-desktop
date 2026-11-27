@@ -183,6 +183,50 @@ impl State {
         self.saves.entry(save_key(rom_id, emulator)).or_default()
     }
 
+    /// Whether the save this install last exchanged for `rom_id` was a hardcore one, and whether
+    /// changes made since, in a hardcore session, still wait to be exchanged.
+    ///
+    /// Each engine keeps this in its own record, the older sync in the save's (`saves`) and snapshot
+    /// sync in the game's channel record (`channels`), and each tells the other when it changes
+    /// (`note_exchanged`, `note_pending`), so that it doesn't matter which one ran last, or which
+    /// runs next. An install that has only ever used the older one has no channel record yet; what it
+    /// knows is in the older record, and that is the answer.
+    pub fn hardcore_memory(&self, rom_id: i64, emulator: &str) -> (bool, bool) {
+        if let Some(c) = self.channels.get(&channel_key(rom_id)) {
+            return (c.held_hardcore, c.pending_hardcore);
+        }
+        self.saves.get(&save_key(rom_id, emulator)).map_or((false, false), |r| (r.hardcore, r.pending_hardcore))
+    }
+
+    /// An exchange with the server has just made the save this install holds for `rom_id` a hardcore
+    /// one, or not, and left nothing pending. Both engines' records are told, but only the older one
+    /// is made for a casual save: nothing needs remembering of that.
+    pub fn note_exchanged(&mut self, rom_id: i64, emulator: &str, hardcore: bool) {
+        let key = save_key(rom_id, emulator);
+        if hardcore || self.saves.contains_key(&key) {
+            let rec = self.saves.entry(key).or_default();
+            rec.hardcore = hardcore;
+            rec.pending_hardcore = false;
+        }
+        if let Some(c) = self.channels.get_mut(&channel_key(rom_id)) {
+            c.held_hardcore = hardcore;
+            c.pending_hardcore = false;
+        }
+    }
+
+    /// Changes to the save of `rom_id` were made in a hardcore session (or, with `false`, a casual
+    /// one) and have not been exchanged yet. Both engines' records are told, where one exists; the
+    /// older one is only made for a hardcore session.
+    pub fn note_pending(&mut self, rom_id: i64, emulator: &str, pending: bool) {
+        let key = save_key(rom_id, emulator);
+        if pending || self.saves.contains_key(&key) {
+            self.saves.entry(key).or_default().pending_hardcore = pending;
+        }
+        if let Some(c) = self.channels.get_mut(&channel_key(rom_id)) {
+            c.pending_hardcore = pending;
+        }
+    }
+
     /// The content hash of what the older (slot-based) sync last exchanged for `emulator`'s save of
     /// `rom_id`, if it ever did. Unlike `save_record` this creates nothing, so asking is free.
     pub fn last_synced_hash(&self, rom_id: i64, emulator: &str) -> Option<&str> {
@@ -526,5 +570,72 @@ mod tests {
         let mut rec = SaveRecord { pending_hardcore: true, ..Default::default() };
         rec.mark_synced("h", Some(1), None);
         assert!(!rec.pending_hardcore);
+    }
+
+    // -- how hardcore is remembered across the two sync engines -------------------------------------
+
+    fn with_channel(st: &mut State, held: bool, pending: bool) {
+        st.channels.insert(channel_key(7), ChannelRecord { channel_id: "c".into(), rom_file_id: 1, held_hardcore: held, pending_hardcore: pending, ..Default::default() });
+    }
+
+    #[test]
+    fn nothing_is_remembered_of_a_game_never_synced() {
+        assert_eq!(State::default().hardcore_memory(7, "snes9x"), (false, false));
+    }
+
+    #[test]
+    fn an_install_that_only_used_the_older_engine_answers_from_its_record() {
+        let mut st = State::default();
+        *st.save_record(7, "snes9x") = SaveRecord { hardcore: true, pending_hardcore: true, ..Default::default() };
+        assert_eq!(st.hardcore_memory(7, "snes9x"), (true, true));
+        assert_eq!(st.hardcore_memory(7, "other-core"), (false, false), "another emulator's save is another record");
+    }
+
+    #[test]
+    fn the_channel_record_outranks_the_older_one_once_there_is_one() {
+        let mut st = State::default();
+        st.save_record(7, "snes9x").hardcore = true;
+        with_channel(&mut st, false, false);
+        assert_eq!(st.hardcore_memory(7, "snes9x"), (false, false), "it is the newer of the two, and says casual");
+    }
+
+    #[test]
+    fn an_exchange_tells_both_records() {
+        let mut st = State::default();
+        st.save_record(7, "snes9x").pending_hardcore = true;
+        with_channel(&mut st, false, true);
+        st.note_exchanged(7, "snes9x", true);
+        assert_eq!(st.hardcore_memory(7, "snes9x"), (true, false));
+        let r = &st.saves[&save_key(7, "snes9x")];
+        assert!(r.hardcore && !r.pending_hardcore, "the older record agrees");
+
+        st.note_exchanged(7, "snes9x", false);
+        assert_eq!(st.hardcore_memory(7, "snes9x"), (false, false));
+        assert!(!st.saves[&save_key(7, "snes9x")].hardcore, "and a later casual exchange is not hidden by an earlier hardcore one");
+    }
+
+    #[test]
+    fn a_casual_exchange_makes_no_record_that_has_nothing_to_say() {
+        let mut st = State::default();
+        st.note_exchanged(7, "snes9x", false);
+        assert!(st.saves.is_empty() && st.channels.is_empty());
+        // The channel record is never made here (it needs the channel's id), only told.
+        st.note_exchanged(7, "snes9x", true);
+        assert_eq!(st.saves.len(), 1);
+        assert!(st.channels.is_empty());
+    }
+
+    #[test]
+    fn pending_hardcore_is_told_to_both_and_a_casual_session_clears_it() {
+        let mut st = State::default();
+        with_channel(&mut st, false, false);
+        st.note_pending(7, "snes9x", true);
+        assert!(st.saves[&save_key(7, "snes9x")].pending_hardcore && st.channels[&channel_key(7)].pending_hardcore);
+        st.note_pending(7, "snes9x", false);
+        assert!(!st.saves[&save_key(7, "snes9x")].pending_hardcore && !st.channels[&channel_key(7)].pending_hardcore);
+
+        let mut casual_only = State::default();
+        casual_only.note_pending(7, "snes9x", false);
+        assert!(casual_only.saves.is_empty(), "a casual session adds nothing to remember");
     }
 }

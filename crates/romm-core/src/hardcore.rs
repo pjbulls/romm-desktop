@@ -5,8 +5,12 @@
 //! sync (RomM before 5.5) it does so by *appending a marker to the file it uploads*, which is what
 //! the older sync engine here (`sync`) follows. A RomM with snapshots has no use for it: hardcore is
 //! a flag of the channel there, set by a snapshot's manifest (`snapshot_sync`), and the server never
-//! reads the marker, so that engine neither writes nor needs it (it still strips one from a save it
-//! downloads). The marker is: `{"h":true,"v":1}`, that JSON's length as a little-endian `u32`, then the eight
+//! reads the marker, so that engine never writes it. It does read it: a marker on a save it downloads
+//! (which it strips), or on the server's copy of a plain save it already has, is proof the save is
+//! hardcore, as RomM flagged what an older engine uploaded casual. And the two engines keep each
+//! other's record of whether the save held is hardcore, and of hardcore changes not yet sent
+//! (`State::note_exchanged`, `State::note_pending`), so a save stays hardcore when the engine
+//! changes, either way. The marker is: `{"h":true,"v":1}`, that JSON's length as a little-endian `u32`, then the eight
 //! bytes `ARGOSY\x01\x00`. When Argosy holds any hardcore save of a game it will not apply a server
 //! save that lacks the marker; it parks it and asks the player to keep the hardcore save or give it
 //! up (`SaveDownloader`, `SaveSyncOrchestrator` in Argosy). So a save that comes down marked must go

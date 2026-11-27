@@ -758,9 +758,10 @@ impl<'a> Syncer<'a> {
     /// Argosy's hardcore marker, which the save on disk doesn't keep; it is remembered so that the
     /// marker goes back up with the save.
     fn remember_download(&mut self, cx: &Cx<'_>, label: &str, hash: &str, save_id: i64, server_updated_at: Option<String>, hardcore: bool) {
-        let rec = self.state.save_record(cx.rom.rom_id, label);
-        rec.mark_synced(hash, Some(save_id), server_updated_at);
-        rec.hardcore = hardcore;
+        self.state.save_record(cx.rom.rom_id, label).mark_synced(hash, Some(save_id), server_updated_at);
+        // Both engines' records are told (see `State::note_exchanged`): this install may use snapshot
+        // sync next, as it may have used it before.
+        self.state.note_exchanged(cx.rom.rom_id, label, hardcore);
     }
 
     /// Whether the save about to be exchanged is a hardcore one, which is what Argosy wants to be told
@@ -782,9 +783,7 @@ impl<'a> Syncer<'a> {
         }
         let hardcore = hardcore::session_is_hardcore(env);
         // A casual session adds nothing to the state; only a hardcore one has something to remember.
-        if hardcore || self.state.saves.contains_key(&save_key(rom.rom_id, label)) {
-            self.state.save_record(rom.rom_id, label).pending_hardcore = hardcore;
-        }
+        self.state.note_pending(rom.rom_id, label, hardcore);
         hardcore
     }
 
@@ -849,9 +848,8 @@ impl<'a> Syncer<'a> {
     /// The save is now on the server: remember what was exchanged, and let Sigil's state catch up
     /// (it must not advance before this, or a failed upload would lose the change marker).
     fn record_synced(&mut self, cx: &Cx<'_>, local: &LocalUnit, hash: &str, save_id: Option<i64>, server_updated_at: Option<String>) {
-        let rec = self.state.save_record(cx.rom.rom_id, &local.emulator);
-        rec.mark_synced(hash, save_id, server_updated_at);
-        rec.hardcore = local.marked;
+        self.state.save_record(cx.rom.rom_id, &local.emulator).mark_synced(hash, save_id, server_updated_at);
+        self.state.note_exchanged(cx.rom.rom_id, &local.emulator, local.marked);
         if let (LocalKind::Unit(u), Some(Plan { kind: Kind::Unit(route), .. })) = (&local.kind, cx.plan) {
             self.state.set_sigil_state(&route.state_key(), &u.state);
         }
