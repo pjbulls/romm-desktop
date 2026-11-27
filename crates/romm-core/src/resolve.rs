@@ -57,13 +57,12 @@ impl<'a> Resolver<'a> {
     }
 
     pub fn installed(&self, profile: &Profile) -> Option<Installed> {
-        let path_env = std::env::var_os("PATH");
         detect::detect(
             profile,
             self.cfg.emulator_paths.get(&profile.id).map(PathBuf::as_path),
             self.os,
             &self.pctx,
-            path_env.as_deref(),
+            self.pctx.path.as_deref(),
         )
     }
 

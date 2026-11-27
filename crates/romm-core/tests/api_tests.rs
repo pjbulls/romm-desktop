@@ -588,7 +588,17 @@ async fn the_lock_is_free_again_as_soon_as_a_request_has_its_headers() {
     let c = authed(&server).with_process_lock(&lock);
     c.heartbeat().await.unwrap();
     let probe = std::fs::OpenOptions::new().read(true).write(true).open(&lock).unwrap();
-    probe.try_lock().expect("nothing is still holding the lock after the call returns");
+    // Look for a moment, not once: a process another test is starting (the two-real-processes tests do)
+    // holds a copy of every file this one has open until it execs, and a lock lives as long as any copy
+    // does. Held "for good" is what this rules out, and that still fails after the wait.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match probe.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => panic!("nothing is still holding the lock after the call returns: {e:?}"),
+        }
+    }
 }
 
 // ---- two real processes ------------------------------------------------------------------------

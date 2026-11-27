@@ -32,6 +32,10 @@ pub struct PathCtx {
     pub programfiles: Option<PathBuf>,
     pub documents: Option<PathBuf>,
     pub exe_dir: Option<PathBuf>,
+    /// The `PATH` an emulator's binary is looked for on. Part of the context so that what is found
+    /// follows from what the context says, not from whatever the machine running this has installed:
+    /// without one, nothing is found on the path.
+    pub path: Option<std::ffi::OsString>,
 }
 
 impl PathCtx {
@@ -47,6 +51,7 @@ impl PathCtx {
             documents: directories::UserDirs::new().and_then(|u| u.document_dir().map(Path::to_path_buf)),
             home,
             exe_dir: None,
+            path: std::env::var_os("PATH"),
         }
     }
 

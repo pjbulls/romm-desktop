@@ -2919,8 +2919,7 @@ async fn a_psp_hardcore_session_pushes_a_neutral_folder_unit_with_its_hash() {
     let root = t.path().join("ppsspp/PSP");
     std::fs::create_dir_all(root.join("SYSTEM")).unwrap();
     std::fs::write(root.join("SYSTEM/ppsspp.ini"), "[Achievements]\nAchievementsEnable = True\nAchievementsChallengeMode = True\n").unwrap();
-    let cp = std::process::Command::new("sh").arg("-c").arg(r#"cp -r "$1/PSP/." "$0/""#).arg(&root).arg(&src).status().unwrap();
-    assert!(cp.success());
+    copy_dir(&src.join("PSP"), &root);
     let r = rom_disc(&t.path().join("roms"), "Crisis Core.iso", "psp", &psp_disc("ULUS-10064"));
 
     let server = snapshot_server().await;
