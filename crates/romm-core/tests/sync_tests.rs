@@ -2982,3 +2982,76 @@ async fn a_psp_unit_from_argosy_is_restored_and_the_next_sync_is_quiet() {
     assert_eq!(rep.unchanged, 1, "{rep:?}");
     assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty());
 }
+
+// -- play time a token may not report ------------------------------------------------------------------
+//
+// `POST /api/play-sessions` needs the `roms.user.write` scope, and since 5.5 so does `complete` with play
+// sessions in it. RomM answers a bare 403 either way, which used to reach the user as "reporting play time:
+// ... 403 ...": true, and no help. It now says which scope, and only when that is the likely cause.
+
+fn forbidden() -> ResponseTemplate {
+    ResponseTemplate::new(403).set_body_json(json!({ "detail": "Forbidden" }))
+}
+
+#[tokio::test]
+async fn play_time_a_token_may_not_report_names_the_missing_scope() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/play-sessions")).respond_with(forbidden()).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = retroarch_env(&t.path().join("ra"), "snes9x");
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].contains("roms.user.write") && rep.failed[0].contains("403"), "{:?}", rep.failed);
+    assert_eq!(reqs(&server, "POST", "/api/play-sessions").await.len(), 1, "it is not retried: it would only be refused again");
+}
+
+#[tokio::test]
+async fn play_time_that_fails_for_another_reason_keeps_the_servers_words() {
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/play-sessions")).respond_with(ResponseTemplate::new(422).set_body_json(json!({"detail": "bad times"}))).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = retroarch_env(&t.path().join("ra"), "snes9x");
+    let mut st = State::default();
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::KeepBoth, Some(play_session()), &t.path().join("bak")).await;
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].starts_with("reporting play time: ") && !rep.failed[0].contains("roms.user.write"), "{:?}", rep.failed);
+}
+
+#[tokio::test]
+async fn the_older_engines_complete_call_that_is_refused_over_play_time_names_the_missing_scope() {
+    // 5.5 checks the scope before it completes the session, so it is `complete` that answers 403.
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    Mock::given(method("POST")).and(path_regex(r"^/api/sync/sessions/\d+/complete$")).respond_with(forbidden()).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = retroarch_env(&t.path().join("ra"), "snes9x");
+    let c = client(&server);
+    let mut st = State::default();
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await.unwrap();
+
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].contains("roms.user.write"), "{:?}", rep.failed);
+    let sent: Value = reqs(&server, "POST", "/api/sync/sessions/42/complete").await[0].body_json().unwrap();
+    assert_eq!(sent["play_sessions"].as_array().map(|a| a.len()), Some(1), "play time was what it sent");
+}
+
+#[tokio::test]
+async fn a_refused_complete_with_no_play_time_in_it_is_not_blamed_on_the_scope() {
+    // The same 403 with nothing to report can't be about play time, so the old wording stands.
+    let server = MockServer::start().await;
+    mock_negotiate(&server, vec![]).await;
+    Mock::given(method("POST")).and(path_regex(r"^/api/sync/sessions/\d+/complete$")).respond_with(forbidden()).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = retroarch_env(&t.path().join("ra"), "snes9x");
+    let c = client(&server);
+    let mut st = State::default();
+    let rep = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].starts_with("completing sync session: ") && !rep.failed[0].contains("roms.user.write"), "{:?}", rep.failed);
+}

@@ -404,6 +404,7 @@ struct TransferDto {
     archived: Vec<String>,
     conflicts: Vec<String>,
     skipped: Vec<String>,
+    managed: Vec<String>,
     failed: Vec<String>,
 }
 
@@ -411,12 +412,13 @@ impl TransferDto {
     fn add(&mut self, r: &TransferReport) {
         // Every field is named so that one added to the report has to be decided about here; a
         // hand-copied list once left out what was archived.
-        let TransferReport { uploaded, downloaded, archived, conflicts, skipped, failed, unchanged: _ } = r;
+        let TransferReport { uploaded, downloaded, archived, conflicts, skipped, managed, failed, unchanged: _ } = r;
         self.uploaded.extend(uploaded.iter().cloned());
         self.downloaded.extend(downloaded.iter().cloned());
         self.archived.extend(archived.iter().cloned());
         self.conflicts.extend(conflicts.iter().map(|c| c.file_name.clone()));
         self.skipped.extend(skipped.iter().cloned());
+        self.managed.extend(managed.iter().cloned());
         self.failed.extend(failed.iter().cloned());
     }
 }
@@ -1422,6 +1424,7 @@ mod tests {
                 archived: vec![tag("archived")],
                 conflicts: vec![conflict("conflict")],
                 skipped: vec![],
+                managed: vec![],
                 failed: vec![tag("failed")],
                 unchanged: 1,
             },
@@ -1431,6 +1434,7 @@ mod tests {
                 archived: vec![tag("sarchived")],
                 conflicts: vec![conflict("sconflict")],
                 skipped: vec![tag("sskipped")],
+                managed: vec![tag("smanaged")],
                 failed: vec![tag("sfailed")],
                 unchanged: 1,
             },
@@ -1460,6 +1464,7 @@ mod tests {
         assert_eq!(sum.states.archived, names(&["A.sarchived", "B.sarchived"]));
         assert_eq!(sum.states.conflicts, names(&["A.sconflict", "B.sconflict"]));
         assert_eq!(sum.states.skipped, names(&["A.sskipped", "B.sskipped"]));
+        assert_eq!(sum.states.managed, names(&["A.smanaged", "B.smanaged"]));
         assert_eq!(sum.states.failed, names(&["A.sfailed", "B.sfailed"]));
     }
 
@@ -1486,7 +1491,7 @@ mod tests {
         let v = serde_json::to_value(SyncSummary::default()).unwrap();
         assert_eq!(keys(&v), ["saves", "states"]);
         for lane in ["saves", "states"] {
-            assert_eq!(keys(&v[lane]), ["archived", "conflicts", "downloaded", "failed", "skipped", "uploaded"], "{lane}");
+            assert_eq!(keys(&v[lane]), ["archived", "conflicts", "downloaded", "failed", "managed", "skipped", "uploaded"], "{lane}");
         }
     }
 }

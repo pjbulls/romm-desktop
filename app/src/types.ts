@@ -103,13 +103,17 @@ export interface LibraryEvent {
   error: string | null;
 }
 
-/** What one kind of sync did, by file name. Only save states are ever skipped (for their size). */
+/**
+ * What one kind of sync did, by file name. Only save states are ever skipped (for their size) or managed
+ * (held by a RomM sync channel, which refuses to have them rewritten, so they are left as the server has them).
+ */
 export interface TransferSummary {
   uploaded: string[];
   downloaded: string[];
   archived: string[];
   conflicts: string[];
   skipped: string[];
+  managed: string[];
   failed: string[];
 }
 
@@ -156,7 +160,7 @@ export interface SaveView {
   status: SaveStatus;
 }
 
-export type StateStatus = "in_sync" | "local_newer" | "server_newer" | "local_only" | "server_only" | "conflict" | "unverified";
+export type StateStatus = "in_sync" | "local_newer" | "server_newer" | "local_only" | "server_only" | "conflict" | "unverified" | "managed";
 
 export interface StateView {
   name: string;

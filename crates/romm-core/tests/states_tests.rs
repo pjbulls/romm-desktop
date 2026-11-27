@@ -621,3 +621,165 @@ async fn an_absolute_state_name_cannot_replace_the_states_folder() {
         rep.failed
     );
 }
+// ---- RomM 5.5: a state a sync channel holds can be read but not written -------------------------------
+//
+// Argosy 3.0 pushes states inside snapshots. RomM then refuses to rewrite such a state (409), and lists it
+// with the `channel_id` of the channel that holds it. That is not a failure, and not a question for the user:
+// the state is left as the server has it, and said to be.
+
+const CHANNEL: &str = "6f1c1a52-6a4f-4a53-9d9e-3b6a4f6d2f10";
+
+/// A listed state that a sync channel holds.
+fn held(mut v: Value) -> Value {
+    v["channel_id"] = json!(CHANNEL);
+    v
+}
+
+fn refused(detail: &str) -> ResponseTemplate {
+    ResponseTemplate::new(409).set_body_json(json!({ "detail": detail }))
+}
+
+#[tokio::test]
+async fn a_state_a_sync_channel_holds_is_left_alone_without_asking_to_rewrite_it() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![held(st(5, "Zelda.state1", 2, "T1", "retroarch"))]).await;
+    // If the app asked anyway, this is what RomM would say; the test is that it is never asked.
+    Mock::given(method("PUT")).and(path("/api/states/5")).respond_with(refused("The state belongs to a sync channel.")).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5);
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+
+    assert_eq!(rep.managed, ["Zelda.state1"]);
+    assert!(rep.failed.is_empty() && rep.uploaded.is_empty(), "{rep:?}");
+    assert!(rep.is_clean(), "left alone on purpose: nothing to report as wrong");
+    assert!(reqs(&server, "PUT", "/api/states/*").await.is_empty() && reqs(&server, "POST", "/api/states").await.is_empty(), "no write is attempted");
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"v2", "the local file is untouched");
+    let rec = &db.states[&state_key(7, "retroarch", "Zelda.state1")];
+    assert_eq!((rec.server_updated_at.as_str(), rec.local_hash.as_str()), ("T1", md5_bytes(b"v1").as_str()), "the baseline does not pretend it was synced");
+}
+
+#[tokio::test]
+async fn a_write_romm_refuses_for_a_sync_channel_is_left_alone_when_the_listing_gave_no_warning() {
+    // The listing can't always say: a state held under another emulator's name is filtered out of it, so the
+    // app takes the file for a new one and creates it, and RomM refuses because that name is a channel's.
+    let server = MockServer::start().await;
+    mock_list(&server, vec![]).await;
+    Mock::given(method("POST")).and(path("/api/states")).respond_with(refused("The upload would replace a state that belongs to a sync channel.")).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v1");
+    let mut db = State::default();
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+
+    assert_eq!(rep.managed, ["Zelda.state1"]);
+    assert!(rep.failed.is_empty() && rep.uploaded.is_empty(), "{rep:?}");
+    assert_eq!(reqs(&server, "POST", "/api/states").await.len(), 1, "it had to ask once to find out");
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"v1");
+    assert!(db.states.get(&state_key(7, "retroarch", "Zelda.state1")).is_none_or(|r| r.server_id.is_none()), "nothing is recorded as uploaded");
+}
+
+#[tokio::test]
+async fn an_update_romm_refuses_for_a_sync_channel_is_left_alone_too() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st(5, "Zelda.state1", 2, "T1", "retroarch")]).await; // no channel_id: not predicted
+    Mock::given(method("PUT")).and(path("/api/states/5")).respond_with(refused("The state belongs to a sync channel.")).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5);
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert_eq!(rep.managed, ["Zelda.state1"]);
+    assert!(rep.failed.is_empty() && rep.uploaded.is_empty(), "{rep:?}");
+}
+
+#[tokio::test]
+async fn a_409_that_is_not_about_a_sync_channel_is_still_a_failure() {
+    // `managed` is for exactly one refusal. Anything else RomM says must still reach the user.
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st(5, "Zelda.state1", 2, "T1", "retroarch")]).await;
+    Mock::given(method("PUT")).and(path("/api/states/5")).respond_with(refused("Something else is in the way.")).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5);
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert!(rep.managed.is_empty(), "{rep:?}");
+    assert_eq!(rep.failed.len(), 1, "{rep:?}");
+    assert!(rep.failed[0].contains("Zelda.state1"), "{:?}", rep.failed);
+}
+
+#[tokio::test]
+async fn keeping_this_pcs_state_cannot_overwrite_one_a_sync_channel_holds() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![held(st(5, "Zelda.state1", 6, "T2", "retroarch"))]).await;
+    Mock::given(method("PUT")).and(path("/api/states/5")).respond_with(refused("The state belongs to a sync channel.")).mount(&server).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"LOCAL2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5); // both sides changed since
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::DeviceWins, &opts()).await.unwrap();
+
+    assert_eq!(rep.managed, ["Zelda.state1"]);
+    assert!(rep.failed.is_empty() && rep.uploaded.is_empty() && rep.downloaded.is_empty(), "{rep:?}");
+    assert!(reqs(&server, "PUT", "/api/states/*").await.is_empty(), "no write is attempted");
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"LOCAL2", "the user's choice stands for their own file");
+}
+
+#[tokio::test]
+async fn a_state_a_sync_channel_holds_is_still_downloaded_when_the_server_has_a_newer_one() {
+    // Held means unwritable, not unreadable: this is how an Argosy state reaches this PC.
+    let server = MockServer::start().await;
+    mock_list(&server, vec![held(st(5, "Zelda.state1", 6, "T2", "retroarch"))]).await;
+    mock_content(&server, 5, b"newer!").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v1");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 5);
+    let bak = t.path().join("bak");
+    let rep = sync_states(&client(&server), &mut db, &bak, &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert_eq!(rep.downloaded, ["Zelda.state1"]);
+    assert!(rep.managed.is_empty(), "{rep:?}");
+    assert_eq!(std::fs::read(t.path().join("ra/states/Zelda.state1")).unwrap(), b"newer!");
+    assert!(contains(&bak, b"v1"), "the old local state is still backed up first");
+}
+
+#[tokio::test]
+async fn overview_says_a_changed_state_a_sync_channel_holds_will_not_be_uploaded() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![
+        held(st(1, "Zelda.state1", 2, "T1", "retroarch")), // changed here, held
+        st(2, "Zelda.state2", 2, "T1", "retroarch"),       // changed here, not held
+    ]).await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    let mut db = State::default();
+    for (n, id) in [("Zelda.state1", 1), ("Zelda.state2", 2)] {
+        write(&t.path().join("ra/states").join(n), b"NEW");
+        baseline(&mut db, n, b"old", "T1", 2, id);
+    }
+    let views = overview(Some(&client(&server)), &db, &rom("Zelda"), &env).await.unwrap();
+    let status: HashMap<_, _> = views.iter().map(|v| (v.name.as_str(), v.status)).collect();
+    assert_eq!(status["Zelda.state1"], StateStatus::Managed);
+    assert_eq!(status["Zelda.state2"], StateStatus::LocalNewer);
+}
+
+#[test]
+fn a_listed_state_is_held_by_a_channel_only_when_it_names_one() {
+    use romm_core::api::types::StateInfo;
+    let parse = |extra: Value| {
+        let mut v = st(1, "x", 1, "T", "retroarch");
+        if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) { o.extend(e.clone()) }
+        serde_json::from_value::<StateInfo>(v).unwrap()
+    };
+    assert!(!parse(json!({})).is_channel_managed(), "a server before 5.5 has no such field");
+    assert!(!parse(json!({"channel_id": null})).is_channel_managed());
+    assert!(!parse(json!({"channel_id": ""})).is_channel_managed());
+    assert!(parse(json!({"channel_id": CHANNEL})).is_channel_managed());
+}

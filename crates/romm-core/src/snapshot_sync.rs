@@ -267,7 +267,7 @@ impl<'a> Syncer<'a> {
         }
         if let Some(p) = play {
             if let Err(e) = self.client.ingest_play_sessions(self.device_id, &[p]).await {
-                report.failed.push(format!("reporting play time: {e}"));
+                report.failed.push(play_time_failure(&e));
             }
         }
         Ok(report)

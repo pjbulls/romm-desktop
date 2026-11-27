@@ -339,6 +339,21 @@ fn ensure_title_id<'a>(title_id: &'a str, game: &str) -> Result<&'a str> {
 /// RetroArch names its saves after). For a ROM extracted into its own folder whose save is kept as a
 /// folder it is that folder's name instead: an Xbox 360 disc's launch file is always `default.xex`,
 /// which would name every game's save `default.zip`.
+/// The report line for play time that RomM refused or that couldn't be sent.
+///
+/// RomM answers 403 to play time from a token without `roms.user.write`: `POST /api/play-sessions` does (5.4 and
+/// 5.5 alike), and since 5.5 so does `POST /api/sync/sessions/{id}/complete`, before it completes the session. The body is
+/// a bare "Forbidden", so the status is all there is to go on; saying only that would leave the user guessing.
+pub(crate) fn play_time_failure(e: &Error) -> String {
+    if e.status() == Some(403) {
+        "play time wasn't recorded: RomM refused it (403), so the API token probably lacks the roms.user.write scope \
+         (add it to the token under Client API Tokens, then connect again)"
+            .to_string()
+    } else {
+        format!("reporting play time: {e}")
+    }
+}
+
 fn name_base(rom: &LocalRom, plan: Option<&Plan>) -> String {
     if matches!(plan.map(|p| &p.kind), Some(Kind::Folder { .. })) && rom.path.is_dir() {
         if let Some(n) = rom.path.file_name() {
@@ -510,6 +525,7 @@ impl<'a> Syncer<'a> {
             .await?;
 
         let (mut ok, mut bad) = (0u32, 0u32);
+        let sent_play_time = play.is_some();
         for op in &resp.operations {
             let cx = Cx { rom, env, id: &id, plan: plan.as_ref(), local: local.as_ref(), session_id: resp.session_id };
             match self.apply(op, &cx, &mut report).await {
@@ -530,7 +546,11 @@ impl<'a> Syncer<'a> {
             )
             .await
         {
-            report.failed.push(format!("completing sync session: {e}"));
+            report.failed.push(if sent_play_time && e.status() == Some(403) {
+                play_time_failure(&e)
+            } else {
+                format!("completing sync session: {e}")
+            });
         }
         Ok(report)
     }
@@ -867,6 +887,16 @@ mod tests {
 
     fn rom(platform: &str, launch: &str) -> LocalRom {
         LocalRom { rom_id: 5, platform_slug: platform.into(), launch_path: PathBuf::from(launch), stem: "Game".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_403_on_play_time_names_the_missing_scope_and_other_failures_keep_the_server_text() {
+        let status = |code| Error::Status { status: code, url: "http://romm/api/play-sessions".into(), body: "Forbidden".into() };
+        let refused = play_time_failure(&status(403));
+        assert!(refused.contains("roms.user.write") && refused.contains("403"), "{refused}");
+        let broken = play_time_failure(&status(500));
+        assert!(broken.starts_with("reporting play time: ") && broken.contains("500") && !broken.contains("roms.user.write"), "{broken}");
+        assert!(play_time_failure(&Error::msg("connection reset")).contains("connection reset"));
     }
 
     fn state_with(identity: Identity) -> State {

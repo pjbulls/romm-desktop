@@ -241,6 +241,9 @@ fn print_report(r: &TransferReport, kind: Kind) {
     for f in &r.skipped {
         println!("  – {what}skipped (too large) {f}");
     }
+    for f in &r.managed {
+        println!("  – {what}left alone (held by a RomM sync channel) {f}");
+    }
     for f in &r.failed {
         println!("  ✗ {what}failed     {f}");
     }
@@ -551,6 +554,7 @@ async fn main() -> Result<()> {
                     StateStatus::ServerOnly => "server only",
                     StateStatus::Conflict => "CONFLICT",
                     StateStatus::Unverified => "not compared yet",
+                    StateStatus::Managed => "local is newer, but a RomM sync channel holds the server's",
                 };
                 println!("  {:<40} {label}", v.name);
             }

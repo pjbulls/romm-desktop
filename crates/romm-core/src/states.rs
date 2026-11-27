@@ -13,6 +13,11 @@
 //!   it is downloaded once to a temp file and checked ("verify").
 //!
 //! Nothing is ever overwritten without a local backup, and deletions never propagate.
+//!
+//! RomM 5.5 adds a second owner for a state: a snapshot, which is how Argosy 3.0 pushes states. A state a
+//! sync channel holds can be read but never rewritten directly (RomM answers 409), so such a state is left as
+//! the server has it and reported as `managed`, not as a failure. Putting this app's states into snapshots
+//! too is what would make them travel between the two; until then they stay in the plain `/api/states` store.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -91,6 +96,13 @@ pub fn plan(local_hash: Option<&str>, server: Option<&StateInfo>, base: Option<&
             (true, true) => Plan::Conflict,
         },
     }
+}
+
+/// Is this RomM's refusal to write a state that a sync channel holds? It is a 409 that says so in words, and the
+/// only 409 `POST /api/states` and `PUT /api/states/{id}` have. The `channel_id` a listing carries predicts it,
+/// but only RomM knows which snapshots hold what, so a write that is refused all the same is taken the same way.
+fn refused_by_channel(e: &Error) -> bool {
+    matches!(e, Error::Status { status: 409, body, .. } if body.to_ascii_lowercase().contains("sync channel"))
 }
 
 // --------------------------------------------------------------------- locating files
@@ -251,6 +263,11 @@ async fn sync_one(
         }
         Plan::Upload | Plan::Update => {
             let (path, h) = (local.expect("plan implies local"), hashed.as_ref().expect("plan implies local"));
+            if p == Plan::Update && server.is_some_and(StateInfo::is_channel_managed) {
+                // Only a snapshot changes it; asking would only be refused.
+                report.managed.push(name.to_string());
+                return Ok(());
+            }
             let existing = if p == Plan::Update { server.map(|s| s.id) } else { None };
             upload(ctx, db, name, path, h, existing, None, report).await?;
         }
@@ -326,10 +343,15 @@ async fn upload(
     };
     let png = png_path.exists().then_some(png_path);
     let upload_name = as_name.unwrap_or(name);
-    let info = ctx
-        .client
-        .upload_state(ctx.rom.rom_id, &ctx.emu, existing_id, upload_name, path, png.as_deref())
-        .await?;
+    let info = match ctx.client.upload_state(ctx.rom.rom_id, &ctx.emu, existing_id, upload_name, path, png.as_deref()).await {
+        Ok(info) => info,
+        // An archive has a name of its own, which no channel can hold; anything else is a state that one does.
+        Err(e) if as_name.is_none() && refused_by_channel(&e) => {
+            report.managed.push(name.to_string());
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     match as_name {
         Some(archive) => report.archived.push(archive.to_string()),
         None => {
@@ -410,6 +432,12 @@ async fn resolve_conflict(
         ConflictPolicy::ServerWins => adopt_server(ctx, db, name, s, Some(&local), downloaded, report).await?,
         ConflictPolicy::DeviceWins => {
             discard(&downloaded);
+            if s.is_channel_managed() {
+                // This device's copy can't replace one a channel holds, and the local file is the user's, so it
+                // stays as it is: neither overwritten by the server's nor lost.
+                report.managed.push(name.to_string());
+                return Ok(());
+            }
             upload(ctx, db, name, path, h, Some(s.id), None, report).await?;
         }
         ConflictPolicy::KeepBoth => {
@@ -448,6 +476,9 @@ pub enum StateStatus {
     Conflict,
     /// Present on both sides but never compared (will be checked on the next sync).
     Unverified,
+    /// Changed here, but a RomM sync channel holds the server's copy and can't have it rewritten: a sync
+    /// leaves both as they are.
+    Managed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -483,6 +514,7 @@ pub async fn overview(client: Option<&RommClient>, db: &State, rom: &LocalRom, e
             (false, _) => StateStatus::ServerOnly,
             (true, true) => match plan(hashed.as_ref().map(|h| h.hash.as_str()), srv, base) {
                 Plan::Unchanged | Plan::Forget => StateStatus::InSync,
+                Plan::Update if srv.is_some_and(StateInfo::is_channel_managed) => StateStatus::Managed,
                 Plan::Update | Plan::Upload => StateStatus::LocalNewer,
                 Plan::Download => StateStatus::ServerNewer,
                 Plan::Verify => StateStatus::Unverified,
@@ -518,7 +550,7 @@ mod tests {
     use super::*;
 
     fn srv(updated: &str, size: u64) -> StateInfo {
-        StateInfo { id: 1, rom_id: 7, file_name: "x".into(), file_size_bytes: size, emulator: Some("e".into()), updated_at: updated.into(), missing_from_fs: false }
+        StateInfo { id: 1, rom_id: 7, file_name: "x".into(), file_size_bytes: size, emulator: Some("e".into()), updated_at: updated.into(), missing_from_fs: false, channel_id: None }
     }
     fn base(hash: &str, updated: &str, size: u64) -> StateRecord {
         StateRecord { server_id: Some(1), local_hash: hash.into(), server_updated_at: updated.into(), server_size: size, ..Default::default() }

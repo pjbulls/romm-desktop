@@ -61,7 +61,7 @@ export function Login({ onConnected }: { onConnected: (s: Status) => void }) {
           <label>
             API token
             <input data-testid="token" type="password" placeholder="rmm_…" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
-            <span className="hint">Needs the scopes: me.read, platforms.read, roms.read, firmware.read, assets.read, assets.write, devices.read, devices.write.</span>
+            <span className="hint">Needs the scopes: me.read, platforms.read, roms.read, firmware.read, assets.read, assets.write, devices.read, devices.write, roms.user.write.</span>
           </label>
         )}
 

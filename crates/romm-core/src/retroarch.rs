@@ -9,6 +9,9 @@ use walkdir::WalkDir;
 
 use crate::paths::{Os, PathCtx};
 
+/// What a generic arcade platform runs on: FinalBurn Neo first, then the MAME cores.
+const ARCADE_CORES: &[&str] = &["fbneo", "mame2003_plus", "mame"];
+
 /// Libretro cores that can run each RomM platform (core name without `_libretro`), best
 /// choice first. The first entry is the default and what "Automatic" uses, so reordering
 /// changes behaviour for everyone who hasn't picked a core.
@@ -39,7 +42,23 @@ pub const CORES: &[(&str, &[&str])] = &[
     ("wonderswan-color", &["mednafen_wswan"]),
     ("neo-geo-pocket", &["mednafen_ngp"]),
     ("neo-geo-pocket-color", &["mednafen_ngp"]),
-    ("arcade", &["fbneo", "mame2003_plus", "mame"]),
+    ("arcade", ARCADE_CORES),
+    // RomM 5.5 gives MAME and FinalBurn sets platforms of their own, where it had folded them into `arcade`.
+    // The cores are the ones RomM itself runs them with (backend/utils/emulatorjs_cores.py): `mame` is for the
+    // 2003-era sets, so those cores come first there; `fba` sets run on FBNeo, which replaced FB Alpha. Nothing
+    // here for `mame-advmame` (AdvanceMAME sets): RomM maps no core to it either.
+    ("mame", &["mame2003_plus", "mame"]),
+    ("fbneo", &["fbneo"]),
+    ("fba", &["fbneo"]),
+    // The MAME-only boards that servers before 5.5 list as platforms of their own. 5.5 moves them into `arcade`
+    // (migration 0155), so on an older server they were platforms nothing here could play.
+    ("cps1", ARCADE_CORES),
+    ("cps2", ARCADE_CORES),
+    ("cps3", ARCADE_CORES),
+    ("model1", ARCADE_CORES),
+    ("system16", ARCADE_CORES),
+    ("system32", ARCADE_CORES),
+    ("system-32", ARCADE_CORES),
     // PS1 alternatives to DuckStation (which is the default when installed):
     ("psx", &["pcsx_rearmed", "swanstation", "mednafen_psx"]),
 ];
@@ -434,7 +453,31 @@ mod tests {
         ] {
             assert_eq!(default_core(slug), Some(core), "{slug}");
         }
-        assert_eq!(supported_slugs().count(), 24);
+        // 24 platforms, plus the three arcade set platforms RomM 5.5 added and the seven board slugs older servers send.
+        assert_eq!(supported_slugs().count(), 34);
+    }
+
+    /// RomM's arcade platforms (`ARCADE_SET_PLATFORMS` in backend/utils/arcade_platforms.py, as of 5.5.0-beta.1) and
+    /// the slugs 5.5 retired into `arcade` (migration 0155), which servers before 5.5 still send. A platform with no
+    /// core here is one the app reports as unplayable, so each of these is either playable or left out on purpose.
+    #[test]
+    fn arcade_platforms_romm_sends_are_playable_or_left_out_on_purpose() {
+        const SET_PLATFORMS: &[&str] = &["arcade", "mame", "mame-advmame", "fbneo", "fba"];
+        const RETIRED_INTO_ARCADE: &[&str] = &["cps1", "cps2", "cps3", "model1", "system16", "system32", "system-32"];
+        // RomM maps no core to these either (AdvanceMAME sets), so there is nothing to offer.
+        const NO_CORE: &[&str] = &["mame-advmame"];
+
+        for slug in SET_PLATFORMS.iter().chain(RETIRED_INTO_ARCADE) {
+            assert_eq!(cores_for(slug).is_empty(), NO_CORE.contains(slug), "{slug}: {:?}", cores_for(slug));
+        }
+        for slug in RETIRED_INTO_ARCADE {
+            assert_eq!(cores_for(slug), cores_for("arcade"), "{slug} is what 5.5 turns into `arcade`, so it plays like it");
+        }
+        // The first core is what "Automatic" launches: RomM's own first choice for each.
+        assert_eq!(default_core("arcade"), Some("fbneo"));
+        assert_eq!(default_core("mame"), Some("mame2003_plus"));
+        assert_eq!(default_core("fbneo"), Some("fbneo"));
+        assert_eq!(default_core("fba"), Some("fbneo"));
     }
 
     #[test]

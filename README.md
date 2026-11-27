@@ -25,7 +25,7 @@ Known emulators include:
 ### Server
 You'll need a RomM client API token with these scopes:
 
-`me.read platforms.read roms.read firmware.read assets.read assets.write devices.read devices.write`
+`me.read platforms.read roms.read firmware.read assets.read assets.write devices.read devices.write roms.user.write`
 
 If desired, `me.write` is also needed to request a [RetroAchievements](https://retroachievements.org/) sync after a game is closed (see next).
 The server connection is managed under **Settings** → **Connection**.

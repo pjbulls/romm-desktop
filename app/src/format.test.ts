@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatDuration, normalizeCode, summarizeSync, timeAgo, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements, ACH_FILTERS } from "./format";
+import { formatBytes, formatDuration, normalizeCode, summarizeSync, hasProblems, STATE_STATUS, timeAgo, ACH_PREVIEW, AWARD, achievementCounts, achievementPercent, filterAchievements, fullDate, previewAchievements, ACH_FILTERS } from "./format";
 import type { Achievement, SyncSummary, TransferSummary } from "./types";
 
-const lane = (): TransferSummary => ({ uploaded: [], downloaded: [], archived: [], conflicts: [], skipped: [], failed: [] });
+const lane = (): TransferSummary => ({ uploaded: [], downloaded: [], archived: [], conflicts: [], skipped: [], managed: [], failed: [] });
 const empty = (): SyncSummary => ({ saves: lane(), states: lane() });
 
 describe("formatBytes", () => {
@@ -65,6 +65,17 @@ describe("summarizeSync", () => {
     s.saves.archived = ["a"];
     s.states.archived = ["b"];
     expect(summarizeSync(s)).toEqual(["Kept your local copy of 2 conflicting files on the server"]);
+  });
+  it("says what it left alone because a RomM sync channel holds it, and does not call that a problem", () => {
+    const s = empty();
+    s.states.managed = ["Game.state1"];
+    expect(summarizeSync(s)).toEqual(["Left 1 save state that a RomM sync channel holds as it is on the server"]);
+    expect(hasProblems(s)).toBe(false);
+    s.states.managed = ["Game.state1", "Game.state2"];
+    expect(summarizeSync(s)).toEqual(["Left 2 save states that a RomM sync channel holds as they are on the server"]);
+  });
+  it("gives a state held by a sync channel a status of its own", () => {
+    expect(STATE_STATUS.managed.label).toBe("Held by a sync channel");
   });
 });
 

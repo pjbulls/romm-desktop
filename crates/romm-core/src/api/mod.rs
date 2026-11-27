@@ -20,7 +20,7 @@ pub const CLIENT_SLUG: &str = "romm-desktop";
 
 /// The scopes a token needs for everything this app does. A token made in RomM (Profile → Client
 /// API Tokens) without one of them is accepted at login and then fails when that feature is used.
-pub const REQUIRED_SCOPES: &[&str] = &["me.read", "platforms.read", "roms.read", "firmware.read", "assets.read", "assets.write", "devices.read", "devices.write"];
+pub const REQUIRED_SCOPES: &[&str] = &["me.read", "platforms.read", "roms.read", "firmware.read", "assets.read", "assets.write", "devices.read", "devices.write", "roms.user.write"];
 
 /// The required scopes that `granted` does not include, in `REQUIRED_SCOPES` order.
 pub fn missing_scopes(granted: &[String]) -> Vec<&'static str> {
@@ -633,10 +633,18 @@ impl RommClient {
         Ok(Self::check(resp).await?.json().await?)
     }
 
-    /// Fetch a server-relative resource such as cover art (`/assets/romm/resources/...`).
-    pub async fn fetch_asset(&self, path: &str) -> Result<(Vec<u8>, Option<String>)> {
+    /// The URL of a server-relative path (`/assets/...`, `/api/saves/3/content?...`) as the server named it.
+    fn server_relative(&self, path: &str) -> Result<Url> {
         let rel = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
-        let url = Url::parse(&format!("{}{}", self.base, rel)).map_err(|e| Error::msg(e.to_string()))?;
+        Url::parse(&format!("{}{}", self.base, rel)).map_err(|e| Error::msg(e.to_string()))
+    }
+
+    /// Fetch a server-relative resource such as cover art (`/assets/romm/resources/...`).
+    ///
+    /// Only for what nginx serves itself: it skips the turn-taking `send` does, which is there for requests
+    /// that reach RomM's auth middleware. A path under `/api` must not come through here; use `send_retrying`.
+    pub async fn fetch_asset(&self, path: &str) -> Result<(Vec<u8>, Option<String>)> {
+        let url = self.server_relative(path)?;
         let resp = Self::check(self.headers(self.authed(self.http.get(url))).await?).await?;
         let ctype = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
         Ok((resp.bytes().await?.to_vec(), ctype))
@@ -703,8 +711,14 @@ impl RommClient {
     }
 
     /// The bytes of a snapshot's save, from the server-relative `download_path` it names.
+    ///
+    /// That path is `/api/saves/{id}/content?...`, an ordinary authenticated API route, so it takes its turn
+    /// and is retried like any other read (see `send`): going round the gate let it race another request's
+    /// auth step and fail with the 500 the gate exists to prevent, with nothing to retry it.
     pub async fn download_snapshot_save(&self, download_path: &str) -> Result<Vec<u8>> {
-        Ok(self.fetch_asset(download_path).await?.0)
+        let url = self.server_relative(download_path)?;
+        let resp = Self::check(self.send_retrying(self.authed(self.http.get(url))).await?).await?;
+        Ok(resp.bytes().await?.to_vec())
     }
 
     /// Reports play sessions on their own, which RomM 5.5 takes apart from a sync session (snapshot sync

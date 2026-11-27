@@ -47,6 +47,8 @@ export function summarizeSync({ saves, states }: SyncSummary): string[] {
   add(archived, `Kept your local copy of ${plural(archived, "conflicting file")} on the server`);
   add(conflicts, `${plural(conflicts, "conflict")} left for you to resolve`);
   add(states.skipped.length, `Skipped ${plural(states.skipped.length, "state")} (over the size limit)`);
+  const kept = states.managed.length;
+  add(kept, `Left ${plural(kept, "save state")} that a RomM sync channel holds as ${kept === 1 ? "it is" : "they are"} on the server`);
   for (const f of [...saves.failed, ...states.failed]) lines.push(`Problem: ${f}`);
   return lines;
 }
@@ -69,12 +71,13 @@ export const STATE_STATUS: Record<StateStatus, { label: string; tone: "ok" | "wa
   server_only: { label: "Only on server", tone: "muted" },
   conflict: { label: "Conflict", tone: "bad" },
   unverified: { label: "Not compared yet", tone: "muted" },
+  managed: { label: "Held by a sync channel", tone: "muted" },
 };
 
 export const POLICY_LABEL: Record<ConflictPolicy, { title: string; help: string }> = {
   keep_both: { title: "Keep both (recommended)", help: "Your version is archived on the server, then the server's version is used. Nothing is lost." },
   server_wins: { title: "Prefer the server", help: "The server's version is used. Your local file is backed up first." },
-  device_wins: { title: "Prefer this PC", help: "Your version overwrites the one on the server." },
+  device_wins: { title: "Prefer this PC", help: "Your version overwrites the one on the server, except a save state a RomM sync channel holds: that one is left as it is." },
   ask: { title: "Leave it alone", help: "Conflicting files aren't touched; you're told about them." },
 };
 

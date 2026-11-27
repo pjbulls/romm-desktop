@@ -285,6 +285,18 @@ pub struct StateInfo {
     pub updated_at: String,
     #[serde(default)]
     pub missing_from_fs: bool,
+    /// The sync channel (RomM 5.5+) a snapshot put this state in; null for a state no channel holds, and for every
+    /// state on an older server. RomM refuses to rewrite or delete a state a channel holds (409): only a new
+    /// snapshot changes it, so a client that writes snapshots (Argosy 3.0 does) owns the states it pushed.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+}
+
+impl StateInfo {
+    /// Does a RomM sync channel hold this state, so that it can be read but not written directly?
+    pub fn is_channel_managed(&self) -> bool {
+        self.channel_id.as_deref().is_some_and(|c| !c.is_empty())
+    }
 }
 
 // ------------------------------------------------------------- RetroAchievements

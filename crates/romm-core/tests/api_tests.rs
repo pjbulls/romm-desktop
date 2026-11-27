@@ -733,3 +733,55 @@ async fn an_upload_still_takes_its_turn_at_the_start() {
     assert!(platforms_at < upload_at);
     assert!(started.elapsed() >= std::time::Duration::from_millis(290));
 }
+
+// ---- a snapshot's save is downloaded from an /api route, so it is an API call like any other ------
+//
+// `download_path` is `/api/saves/{id}/content?...`. It used to be fetched the way cover art is, which
+// goes round the turn-taking and the retry: it could overlap another request's auth step and fail with
+// the 500 both exist to prevent, and nothing made it again.
+
+const SAVE_PATH: &str = "/api/saves/50/content";
+const SAVE_DOWNLOAD: &str = "/api/saves/50/content?timestamp=t&name=Zelda.srm";
+
+#[tokio::test]
+async fn a_snapshot_save_download_takes_its_turn_like_any_other_api_call() {
+    let server = slow_empty_server().await;
+    Mock::given(method("GET"))
+        .and(path(SAVE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"SAVE".to_vec()).set_delay(std::time::Duration::from_millis(300)))
+        .mount(&server)
+        .await;
+    let c = authed(&server);
+    let started = std::time::Instant::now();
+    let (platforms, bytes) = tokio::join!(c.platforms(), c.download_snapshot_save(SAVE_DOWNLOAD));
+    platforms.unwrap();
+    assert_eq!(bytes.unwrap(), b"SAVE");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(580), "the download overlapped another call: {:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn a_snapshot_save_download_that_hits_the_auth_race_is_made_again() {
+    let server = MockServer::start().await;
+    // The query rides along and the token goes with every attempt.
+    Mock::given(method("GET")).and(path(SAVE_PATH)).and(query_param("name", "Zelda.srm")).and(header("authorization", "Bearer rmm_t")).respond_with(glitch()).up_to_n_times(1).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path(SAVE_PATH))
+        .and(query_param("name", "Zelda.srm"))
+        .and(header("authorization", "Bearer rmm_t"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"SAVE".to_vec()))
+        .mount(&server)
+        .await;
+
+    let bytes = authed(&server).download_snapshot_save(SAVE_DOWNLOAD).await.expect("the second attempt succeeds, so the download does");
+    assert_eq!(bytes, b"SAVE");
+    assert_eq!(count(&server, "GET", SAVE_PATH).await, 2);
+}
+
+#[tokio::test]
+async fn a_snapshot_save_the_server_refuses_is_an_error_not_an_empty_file() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path(SAVE_PATH)).respond_with(ResponseTemplate::new(404).set_body_string("gone")).mount(&server).await;
+    let e = authed(&server).download_snapshot_save(SAVE_DOWNLOAD).await.unwrap_err();
+    assert_eq!(e.status(), Some(404), "{e}");
+    assert_eq!(count(&server, "GET", SAVE_PATH).await, 1, "a 404 is not a glitch, so it is not repeated");
+}
