@@ -31,6 +31,23 @@ returned for the same fixtures; a Sigil change that alters a unit's wire format 
 is exactly the signal wanted (a unit-shape change breaks every save already on a server, so Sigil
 only does it with a compatible reader).
 
+## Notes from the `ef9b51e` bump
+
+* **Struct growth.** `sigil_sync_request` and `sigil_sync_result` grew at the end (`write_at`, `maker_profile`).
+  A request is sent as V1, which Sigil accepts and reads only up to where `write_at` would start; a result is
+  allocated by Sigil and only viewed from Rust, so a Rust struct that stops short of a new field is harmless, and
+  a longer one is only a mirror. The layout asserts in `src/lib.rs` follow `check-sigil-layout.sh`.
+* **Identity.** From `ae27ad2` Sigil's identity for a unit with one non-clock member is that member's hash, which is
+  what RomM computes (`zip_identity_hash`). Before it a Game Boy clock cart's identity was never RomM's, so the clock
+  ticking looked like a change to the save. `tests/identity_tests.rs` checks it against a real Sigil call.
+* **New layouts.** Sigil now has GBA (`mgba`, `gpsp`, `vba_next`), NDS (`melonds`, `desmume`), Genesis family
+  (`genesis_plus_gx`, `picodrive`), Xbox and Xbox 360 layouts. None is unit-routed in `route.rs`, so those games
+  still travel as plain files, and a neutral save another client pushed for one is refused (`readable_save`) instead
+  of being written as a plain save file. Adding a core to `RETROARCH_UNIT_CORES` is what lets this app take them.
+* **New third-party code.** Sigil's Xbox qcow2/FATX code is MIT, ported from MMagTech/cabinetos; its notice is in
+  `vendor/argosy-sigil/licenses/cabinetos-MIT.txt`. This app has qcow2/FATX code of its own (`src/xbox/`), so the two
+  now overlap.
+
 ## What is still mirrored by hand
 
 Sigil decides what a save *is*. Which emulator and core uses which layout, what the server is told, and

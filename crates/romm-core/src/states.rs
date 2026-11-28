@@ -1,18 +1,22 @@
 //! Save-state sync.
 //!
 //! RomM's device-sync protocol covers saves only. States are plain files: one RomM
-//! entity per file, no slots, no per-device baseline and no content hash in the API.
-//! So this module keeps its own baseline per state file (what it looked like at the
-//! last successful sync) and decides from three facts: local changed? server changed?
-//! both?
+//! entity per file, no slots and no per-device baseline. So this module keeps its own
+//! baseline per state file (what it looked like at the last successful sync) and
+//! decides from three facts: local changed? server changed? both?
 //!
-//! * "server changed" = the server's `updated_at` or size differs from the baseline;
+//! * "server changed" = the server's `content_hash` differs from the baseline's, when RomM
+//!   gives one (5.5+, for a state it has hashed), else its `updated_at` or size does. The
+//!   hash comes first because `updated_at` moves without a change: a RomM up to 5.5.0-beta.1
+//!   bumps it on every state a snapshot prune keeps (rommapp/romm#5718);
 //! * "local changed"  = the local MD5 differs from the baseline (stat-cached so big
 //!   unchanged files aren't re-hashed);
 //! * a file seen on both sides with no baseline can't be compared without a hash, so
 //!   it is downloaded once to a temp file and checked ("verify").
 //!
-//! Nothing is ever overwritten without a local backup, and deletions never propagate.
+//! Where a state is taken from the server the bytes are compared first too, because for a state
+//! with no hash only they can say that "changed" was not. Nothing is ever overwritten without
+//! a local backup, and deletions never propagate.
 //!
 //! RomM 5.5 adds a second owner for a state: a snapshot, which is how Argosy 3.0 pushes states. A state a
 //! sync channel holds can be read but never rewritten directly (RomM answers 409), so such a state is left as
@@ -65,10 +69,29 @@ pub enum Plan {
     Forget,
 }
 
+/// Does the server's `content_hash` say its copy is the file with this hash? A match proves it. A mismatch, or
+/// no hash, proves nothing (see `StateInfo::content_hash`).
+fn server_holds(s: &StateInfo, hash: &str) -> bool {
+    s.content_hash.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(hash))
+}
+
+/// Did the server's copy change since the baseline `b`?
+///
+/// By hash when RomM gives one: against the hash it gave then, or else against the MD5 of what was last synced,
+/// which is the same bytes whichever side they came from. `updated_at` alone would call a state changed whenever
+/// a RomM up to 5.5.0-beta.1 pruned a snapshot: an untouched state would be downloaded again, an edited one
+/// would be a conflict, and one deleted on purpose would come back. With no hash it is `updated_at` and the
+/// size, as it was before RomM had one.
+fn server_changed(s: &StateInfo, b: &StateRecord) -> bool {
+    match s.content_hash.as_deref() {
+        Some(now) if !b.server_hash.is_empty() => !now.eq_ignore_ascii_case(&b.server_hash),
+        Some(now) if now.eq_ignore_ascii_case(&b.local_hash) => false,
+        _ => s.updated_at != b.server_updated_at || s.file_size_bytes != b.server_size,
+    }
+}
+
 /// The decision table. Pure so it can be tested exhaustively.
 pub fn plan(local_hash: Option<&str>, server: Option<&StateInfo>, base: Option<&StateRecord>) -> Plan {
-    let server_changed =
-        |s: &StateInfo, b: &StateRecord| s.updated_at != b.server_updated_at || s.file_size_bytes != b.server_size;
     match (local_hash, server, base) {
         (None, None, _) => Plan::Unchanged,
         (Some(_), None, None) => Plan::Upload,
@@ -273,7 +296,8 @@ async fn sync_one(
         }
         Plan::Download => {
             let s = server.expect("plan implies server");
-            adopt_server(ctx, db, name, s, local, None, report).await?;
+            let here = local.zip(hashed.as_ref()).map(|(p, h)| (p.as_path(), h));
+            adopt_server(ctx, db, name, s, here, None, report).await?;
         }
         Plan::Verify => {
             let (path, h, s) = (local.expect("local"), hashed.as_ref().expect("local"), server.expect("server"));
@@ -313,6 +337,7 @@ fn record(db: &mut State, key: &str, s: &StateInfo, h: &Hashed) {
             local_hash: h.hash.clone(),
             server_updated_at: s.updated_at.clone(),
             server_size: s.file_size_bytes,
+            server_hash: s.content_hash.clone().unwrap_or_default(),
             local_size: h.size,
             local_mtime_ns: h.mtime_ns,
         },
@@ -362,18 +387,19 @@ async fn upload(
     Ok(())
 }
 
-/// Replace/create the local file with the server's. The old local file is backed up first.
+/// Replace/create the local file with the server's. The old local file is backed up first, unless the server's
+/// copy turns out to be the same bytes: then nothing is replaced, only the baseline brought up to date.
 async fn adopt_server(
     ctx: &Ctx<'_>,
     db: &mut State,
     name: &str,
     s: &StateInfo,
-    local: Option<&PathBuf>,
+    local: Option<(&Path, &Hashed)>,
     already_downloaded: Option<PathBuf>,
     report: &mut StateReport,
 ) -> Result<()> {
     let target = match local {
-        Some(p) => p.clone(),
+        Some((p, _)) => p.to_path_buf(),
         None => ctx.env.state_destination(name)?,
     };
     if already_downloaded.is_none() && s.file_size_bytes > ctx.opts.max_bytes {
@@ -388,6 +414,16 @@ async fn adopt_server(
             t
         }
     };
+    // RomM can call a state changed that wasn't (`server_changed`), and for one it has no hash of only the bytes
+    // can say so. Replacing the file with itself would still cost a backup and move its mtime for nothing.
+    if let Some((_, here)) = local {
+        if md5_file(&tmp)? == here.hash {
+            let _ = std::fs::remove_file(&tmp);
+            record(db, &state_key(ctx.rom.rom_id, &ctx.emu, name), s, here);
+            report.unchanged += 1;
+            return Ok(());
+        }
+    }
     if target.is_file() {
         let dir = saves::backup_dir_for(ctx.backup_dir, &ctx.emu).join("states");
         backup_file(&target, &dir, name)?;
@@ -413,12 +449,18 @@ async fn resolve_conflict(
     downloaded: Option<PathBuf>,
     report: &mut StateReport,
 ) -> Result<()> {
-    let local = path.to_path_buf();
     let discard = |t: &Option<PathBuf>| {
         if let Some(t) = t {
             let _ = std::fs::remove_file(t);
         }
     };
+    if server_holds(s, &h.hash) {
+        // Both sides came to the same bytes (or RomM only says the server's changed): nothing to choose between.
+        discard(&downloaded);
+        record(db, &state_key(ctx.rom.rom_id, &ctx.emu, name), s, h);
+        report.unchanged += 1;
+        return Ok(());
+    }
     match ctx.policy {
         ConflictPolicy::Ask => {
             discard(&downloaded);
@@ -429,7 +471,7 @@ async fn resolve_conflict(
                 reason: None,
             });
         }
-        ConflictPolicy::ServerWins => adopt_server(ctx, db, name, s, Some(&local), downloaded, report).await?,
+        ConflictPolicy::ServerWins => adopt_server(ctx, db, name, s, Some((path, h)), downloaded, report).await?,
         ConflictPolicy::DeviceWins => {
             discard(&downloaded);
             if s.is_channel_managed() {
@@ -451,7 +493,7 @@ async fn resolve_conflict(
                 discard(&downloaded);
                 return Ok(());
             }
-            adopt_server(ctx, db, name, s, Some(&local), downloaded, report).await?;
+            adopt_server(ctx, db, name, s, Some((path, h)), downloaded, report).await?;
         }
     }
     Ok(())
@@ -550,7 +592,7 @@ mod tests {
     use super::*;
 
     fn srv(updated: &str, size: u64) -> StateInfo {
-        StateInfo { id: 1, rom_id: 7, file_name: "x".into(), file_size_bytes: size, emulator: Some("e".into()), updated_at: updated.into(), missing_from_fs: false, channel_id: None }
+        StateInfo { id: 1, rom_id: 7, file_name: "x".into(), file_size_bytes: size, emulator: Some("e".into()), updated_at: updated.into(), missing_from_fs: false, channel_id: None, content_hash: None }
     }
     fn base(hash: &str, updated: &str, size: u64) -> StateRecord {
         StateRecord { server_id: Some(1), local_hash: hash.into(), server_updated_at: updated.into(), server_size: size, ..Default::default() }
@@ -578,6 +620,52 @@ mod tests {
         assert_eq!(plan(Some("h1"), None, Some(&b)), Plan::Forget);
         assert_eq!(plan(Some("h2"), None, Some(&b)), Plan::Upload);
         assert_eq!(plan(None, None, Some(&b)), Plan::Unchanged);
+    }
+
+    fn hashed(mut s: StateInfo, hash: &str) -> StateInfo {
+        s.content_hash = Some(hash.into());
+        s
+    }
+    fn base_with_hash(local: &str, server_hash: &str) -> StateRecord {
+        StateRecord { server_hash: server_hash.into(), ..base(local, "t1", 10) }
+    }
+
+    #[test]
+    fn a_moved_updated_at_is_not_a_change_when_the_hash_says_so() {
+        // RomM up to 5.5.0-beta.1 moves updated_at on every state a snapshot prune keeps.
+        let b = base_with_hash("h1", "H1");
+        let pruned = hashed(srv("t-prune", 10), "H1");
+        assert_eq!(plan(Some("h1"), Some(&pruned), Some(&b)), Plan::Unchanged, "was a download of the same bytes");
+        assert_eq!(plan(Some("h2"), Some(&pruned), Some(&b)), Plan::Update, "was a conflict over a change only here");
+        assert_eq!(plan(None, Some(&pruned), Some(&b)), Plan::Unchanged, "was a state the user deleted, brought back");
+        // The hash is not case-sensitive.
+        assert_eq!(plan(Some("h1"), Some(&hashed(srv("t-prune", 10), "h1")), Some(&b)), Plan::Unchanged);
+    }
+
+    #[test]
+    fn a_different_hash_is_a_change_even_when_updated_at_and_size_are_not() {
+        let b = base_with_hash("h1", "H1");
+        let edited = hashed(srv("t1", 10), "H2");
+        assert_eq!(plan(Some("h1"), Some(&edited), Some(&b)), Plan::Download);
+        assert_eq!(plan(Some("h2"), Some(&edited), Some(&b)), Plan::Conflict);
+    }
+
+    #[test]
+    fn a_baseline_from_before_the_hash_is_judged_by_the_bytes_it_synced() {
+        // No server hash was kept then, but the hash RomM gives now can still be the MD5 of what was last synced.
+        let b = base("h1", "t1", 10);
+        assert_eq!(plan(None, Some(&hashed(srv("t-prune", 10), "h1")), Some(&b)), Plan::Unchanged);
+        // When it is not, only updated_at and the size are left, as for a state with no hash at all.
+        assert_eq!(plan(Some("h1"), Some(&hashed(srv("t1", 10), "other")), Some(&b)), Plan::Unchanged);
+        assert_eq!(plan(Some("h1"), Some(&hashed(srv("t2", 10), "other")), Some(&b)), Plan::Download);
+    }
+
+    #[test]
+    fn a_state_with_no_hash_is_judged_as_it_always_was() {
+        let b = base_with_hash("h1", "H1");
+        assert_eq!(plan(Some("h1"), Some(&srv("t1", 10)), Some(&b)), Plan::Unchanged);
+        assert_eq!(plan(Some("h1"), Some(&srv("t2", 10)), Some(&b)), Plan::Download);
+        assert_eq!(plan(Some("h1"), Some(&srv("t1", 11)), Some(&b)), Plan::Download);
     }
 
     #[test]

@@ -84,13 +84,17 @@ impl SaveRecord {
     }
 }
 
-/// What a state file looked like at its last successful sync (the server exposes no hash).
+/// What a state file looked like at its last successful sync.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StateRecord {
     pub server_id: Option<i64>,
     pub local_hash: String,
     pub server_updated_at: String,
     pub server_size: u64,
+    /// The server's `content_hash` of it then; empty when the server gave none (an older RomM, a state it had not
+    /// hashed yet) and for a baseline written before this was kept.
+    #[serde(default)]
+    pub server_hash: String,
     /// stat of the local file when `local_hash` was computed, so unchanged big files aren't re-hashed
     #[serde(default)]
     pub local_size: u64,

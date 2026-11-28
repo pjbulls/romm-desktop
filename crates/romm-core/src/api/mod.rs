@@ -147,6 +147,17 @@ pub struct RommClient {
 /// upgraded rarely, and a sync asks once per game.
 const CAPABILITIES_TTL: Duration = Duration::from_secs(300);
 
+/// Does a failed heartbeat say nothing about the server? See `RommClient::capabilities`.
+pub(crate) fn heartbeat_failure_is_transient(e: &Error) -> bool {
+    match e {
+        Error::Status { status, .. } => matches!(status, 408 | 429) || *status >= 500,
+        // A body that arrived but can't be read as JSON is an answer: some proxy's page, not a RomM.
+        Error::Http(e) => !e.is_decode(),
+        Error::Json(_) => false,
+        _ => true,
+    }
+}
+
 impl RommClient {
     pub fn new(base_url: &str, token: Option<String>, accept_invalid_certs: bool) -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -364,14 +375,19 @@ impl RommClient {
     /// What this server can do. Which save API to use depends on it: a RomM with snapshot sync
     /// (5.5+) keeps saves in channels, and an older one in slots.
     ///
-    /// The answer is remembered for a few minutes. A heartbeat that can't be read doesn't change it:
-    /// the last answer stands, and with none yet the server is taken to be an older one, whose save
-    /// API every RomM still has. So an unreachable or unfamiliar server never gets the newer calls.
-    pub async fn capabilities(&self) -> Capabilities {
+    /// The answer is remembered for a few minutes, and what was last read stands when the heartbeat
+    /// can't be read later. With nothing read yet, what a failed heartbeat means depends on how it failed:
+    ///
+    /// * The server answered, but not with a RomM heartbeat (a 404 or 403, a page that isn't JSON): it is
+    ///   taken for an older one, whose save API every RomM still has.
+    /// * It didn't answer, or said it is in trouble (no connection, a timeout, a 5xx, 408 or 429): that is
+    ///   an error, because it says nothing about the server. Guessing "older" would send a 5.5 server's
+    ///   saves the older way, around the channel that holds them.
+    pub async fn capabilities(&self) -> Result<Capabilities> {
         let known = self.caps.lock().ok().and_then(|g| g.clone());
         if let Some((at, c)) = &known {
             if at.elapsed() < CAPABILITIES_TTL {
-                return c.clone();
+                return Ok(c.clone());
             }
         }
         match self.heartbeat().await {
@@ -380,9 +396,13 @@ impl RommClient {
                 if let Ok(mut g) = self.caps.lock() {
                     *g = Some((Instant::now(), c.clone()));
                 }
-                c
+                Ok(c)
             }
-            Err(_) => known.map(|(_, c)| c).unwrap_or_default(),
+            Err(e) => match known {
+                Some((_, c)) => Ok(c),
+                None if heartbeat_failure_is_transient(&e) => Err(e),
+                None => Ok(Capabilities::default()),
+            },
         }
     }
 
@@ -478,6 +498,11 @@ impl RommClient {
     }
 
     pub async fn rom(&self, id: i64) -> Result<Rom> {
+        self.rom_as(id).await
+    }
+
+    /// `GET /api/roms/{id}`, read as whichever slice of it the caller needs (`rom`, `rom_ra`).
+    async fn rom_as<T: serde::de::DeserializeOwned>(&self, id: i64) -> Result<T> {
         self.get_json(&["roms", &id.to_string()], &[]).await
     }
 
@@ -798,9 +823,10 @@ impl RommClient {
         self.get_json(&["users", "me"], &[]).await
     }
 
-    /// Only the achievement fields of one ROM (the full ROM response is much bigger).
+    /// Only the achievement fields of one ROM. It is the same request as `rom`: RomM has no lighter one, so this
+    /// only spares reading the rest of the response into a `Rom`.
     pub async fn rom_ra(&self, id: i64) -> Result<RomRa> {
-        self.get_json(&["roms", &id.to_string()], &[]).await
+        self.rom_as(id).await
     }
 
     /// Ask RomM to re-pull the user's progress from retroachievements.org.

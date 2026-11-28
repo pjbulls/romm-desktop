@@ -783,3 +783,118 @@ fn a_listed_state_is_held_by_a_channel_only_when_it_names_one() {
     assert!(!parse(json!({"channel_id": ""})).is_channel_managed());
     assert!(parse(json!({"channel_id": CHANNEL})).is_channel_managed());
 }
+
+
+// -- a state RomM says changed when it didn't (5.5.0-beta.1 moves updated_at when a snapshot prune keeps a row) ----
+
+fn st_hashed(id: i64, name: &str, size: u64, updated: &str, content_hash: Option<&str>) -> Value {
+    let mut v = st(id, name, size, updated, "retroarch");
+    v["content_hash"] = json!(content_hash);
+    v
+}
+
+fn baseline_hashed(db: &mut State, name: &str, local: &[u8], updated: &str, size: u64, id: i64, server_hash: &str) {
+    db.states.insert(state_key(7, "retroarch", name), StateRecord {
+        server_id: Some(id), local_hash: md5_bytes(local), server_updated_at: updated.into(),
+        server_size: size, server_hash: server_hash.into(), ..Default::default()
+    });
+}
+
+#[tokio::test]
+async fn a_pruned_state_whose_hash_is_unchanged_is_neither_downloaded_nor_rewritten() {
+    let same = md5_bytes(b"v1");
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st_hashed(1, "Zelda.state1", 2, "T-PRUNE", Some(&same))]).await;
+    mock_content(&server, 1, b"v1").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    let local = t.path().join("ra/states/Zelda.state1");
+    write(&local, b"v1");
+    let mut db = State::default();
+    baseline_hashed(&mut db, "Zelda.state1", b"v1", "T1", 2, 1, &same);
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert!(rep.downloaded.is_empty() && rep.conflicts.is_empty() && rep.failed.is_empty(), "{rep:?}");
+    assert!(reqs(&server, "GET", "/api/states/1/content").await.is_empty(), "no transfer for the same bytes");
+    assert!(!t.path().join("bak").exists(), "and no backup of a file that was never replaced");
+}
+
+#[tokio::test]
+async fn a_pruned_state_deleted_on_purpose_stays_deleted() {
+    let same = md5_bytes(b"v1");
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st_hashed(1, "Zelda.state1", 2, "T-PRUNE", Some(&same))]).await;
+    mock_content(&server, 1, b"v1").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    let mut db = State::default();
+    baseline_hashed(&mut db, "Zelda.state1", b"v1", "T1", 2, 1, &same);
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert!(rep.downloaded.is_empty(), "{rep:?}");
+    assert!(!t.path().join("ra/states/Zelda.state1").exists(), "the state the user removed did not come back");
+}
+
+#[tokio::test]
+async fn a_pruned_state_with_no_hash_is_downloaded_but_not_written_over_the_same_bytes() {
+    // A state RomM has not hashed (or a server with no hash at all) leaves only the bytes to say nothing changed.
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st_hashed(1, "Zelda.state1", 2, "T-PRUNE", None)]).await;
+    mock_content(&server, 1, b"v1").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    let local = t.path().join("ra/states/Zelda.state1");
+    write(&local, b"v1");
+    let before = std::fs::metadata(&local).unwrap().modified().unwrap();
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 1);
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert!(rep.downloaded.is_empty() && rep.failed.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert_eq!(std::fs::metadata(&local).unwrap().modified().unwrap(), before, "the file was not replaced");
+    assert!(!t.path().join("bak").exists(), "nor backed up");
+    assert!(!t.path().join("ra/states/Zelda.state1.romm-dl").exists(), "the temp file is gone");
+    // The baseline now knows the moved updated_at, so the next sync does not fetch the file again.
+    assert_eq!(db.states[&state_key(7, "retroarch", "Zelda.state1")].server_updated_at, "T-PRUNE");
+    let again = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert_eq!(again.unchanged, 1);
+    assert_eq!(reqs(&server, "GET", "/api/states/1/content").await.len(), 1, "one download in all, not one per sync");
+}
+
+#[tokio::test]
+async fn a_state_that_did_change_is_still_downloaded_with_a_backup() {
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st_hashed(1, "Zelda.state1", 2, "T2", Some(&md5_bytes(b"v2")))]).await;
+    mock_content(&server, 1, b"v2").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    let local = t.path().join("ra/states/Zelda.state1");
+    write(&local, b"v1");
+    let mut db = State::default();
+    baseline_hashed(&mut db, "Zelda.state1", b"v1", "T1", 2, 1, &md5_bytes(b"v1"));
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert_eq!(rep.downloaded, ["Zelda.state1"], "{rep:?}");
+    assert_eq!(std::fs::read(&local).unwrap(), b"v2");
+    assert!(contains(&t.path().join("bak"), b"v1"), "the replaced file was backed up");
+    assert_eq!(db.states[&state_key(7, "retroarch", "Zelda.state1")].server_hash, md5_bytes(b"v2"), "and the hash is kept");
+}
+
+#[tokio::test]
+async fn two_sides_that_came_to_the_same_bytes_are_not_a_conflict() {
+    // The state was edited here, and RomM says it moved too (a prune): but the hash it gives is what is on disk.
+    let now = md5_bytes(b"v2");
+    let server = MockServer::start().await;
+    mock_list(&server, vec![st_hashed(1, "Zelda.state1", 2, "T-PRUNE", Some(&now))]).await;
+    mock_content(&server, 1, b"v2").await;
+    let t = tempfile::tempdir().unwrap();
+    let env = ra_env(&t.path().join("ra"));
+    write(&t.path().join("ra/states/Zelda.state1"), b"v2");
+    let mut db = State::default();
+    baseline(&mut db, "Zelda.state1", b"v1", "T1", 2, 1);
+
+    let rep = sync_states(&client(&server), &mut db, &t.path().join("bak"), &rom("Zelda"), &env, ConflictPolicy::KeepBoth, &opts()).await.unwrap();
+    assert!(rep.archived.is_empty() && rep.conflicts.is_empty() && rep.downloaded.is_empty() && rep.unchanged == 1, "{rep:?}");
+    assert!(reqs(&server, "POST", "/api/states").await.is_empty(), "no archive copy of a state the server already has");
+    assert_eq!(db.states[&state_key(7, "retroarch", "Zelda.state1")].server_hash, now);
+}

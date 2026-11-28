@@ -5,7 +5,6 @@
  * .fla and four-pak .mpk, or Project64's with a .mpk per controller. */
 #include "sync_internal.h"
 #include "n64_save.h"
-#include <ctype.h>
 
 /* A .srm with a 64DD disk appended (parallel_n64) */
 #define N64_MAX_FILE (N64_BLOB_SIZE + 0x4400000u)
@@ -28,19 +27,10 @@ typedef struct {
     char     base[SIGIL_SAVE_PATH_MAX];   /* a present file's path without its extension, or "" */
 } n64_files;
 
-static bool ends_with(const char *s, const char *tail) {
-    size_t n = strlen(s), m = strlen(tail);
-    if (n < m) return false;
-    for (size_t i = 0; i < m; i++) {
-        if (tolower((unsigned char)s[n - m + i]) != tolower((unsigned char)tail[i])) return false;
-    }
-    return true;
-}
-
 /* The pak a Project64 <name>_Cont_<n>.mpk holds, or -1. */
 static int controller_of(const char *path) {
     size_t n = strlen(path);
-    if (n < 11 || !ends_with(path, ".mpk") || strncmp(path + n - 11, "_Cont_", 6) != 0) return -1;
+    if (n < 11 || !sigil_ends_with_nocase(path, ".mpk") || strncmp(path + n - 11, "_Cont_", 6) != 0) return -1;
     char c = path[n - 5];
     return c >= '1' && c <= '4' ? N64_PAK1 + (c - '1') : -1;
 }
@@ -48,10 +38,10 @@ static int controller_of(const char *path) {
 static file_kind kind_of(const char *path, int *region) {
     *region = controller_of(path);
     if (*region >= 0) return FILE_REGION;
-    if (ends_with(path, ".srm")) return FILE_BLOB;
-    if (ends_with(path, ".mpk")) return FILE_PAKS;
-    *region = ends_with(path, ".eep") ? N64_EEPROM : ends_with(path, ".sra") ? N64_SRAM
-            : ends_with(path, ".fla") ? N64_FLASH : -1;
+    if (sigil_ends_with_nocase(path, ".srm")) return FILE_BLOB;
+    if (sigil_ends_with_nocase(path, ".mpk")) return FILE_PAKS;
+    *region = sigil_ends_with_nocase(path, ".eep") ? N64_EEPROM : sigil_ends_with_nocase(path, ".sra") ? N64_SRAM
+            : sigil_ends_with_nocase(path, ".fla") ? N64_FLASH : -1;
     return *region >= 0 ? FILE_REGION : FILE_OTHER;
 }
 
@@ -129,8 +119,10 @@ static int read_local(const sigil_sync_request *req, const n64_files *f, n64_sav
     return rc;
 }
 
-/* The neutral unit's members and RomM's hash over them; `members` borrow `s`. */
-static size_t neutral_members(n64_save *s, sigil_zip_member members[N64_REGION_COUNT], char identity[33]) {
+/* The neutral unit's members and RomM's identity and, when `content` is set,
+ * content hash over them; `members` borrow `s`. */
+static size_t neutral_members(n64_save *s, sigil_zip_member members[N64_REGION_COUNT], char identity[33],
+                              char *content) {
     sigil_named_md5 parts[N64_REGION_COUNT];
     size_t n = 0;
     for (int r = 0; r < N64_REGION_COUNT; r++) {
@@ -142,14 +134,9 @@ static size_t neutral_members(n64_save *s, sigil_zip_member members[N64_REGION_C
         n++;
     }
     identity[0] = '\0';
-    if (n) sigil_named_hash(parts, n, identity);
+    if (n) sigil_identity_hash(parts, n, identity);
+    if (n && content) sigil_named_hash(parts, n, content);
     return n;
-}
-
-static void artifact_of(const sigil_sync_request *req, sigil_sync_result *r) {
-    char stem[SIGIL_SAVE_ENTRY_MAX];
-    sigil_content_stem(req->save.content_path, stem, sizeof(stem));
-    snprintf(r->artifact, sizeof(r->artifact), "%s.zip", stem);
 }
 
 int sigil_sync_collect_n64(sigil_sync_ctx *x, sigil_sync_result *r) {
@@ -159,12 +146,11 @@ int sigil_sync_collect_n64(sigil_sync_ctx *x, sigil_sync_result *r) {
     if (rc == SIGIL_OK && !s) rc = SIGIL_ERR_OOM;
     if (rc == SIGIL_OK) rc = read_local(x->req, &f, s);
     sigil_zip_member members[N64_REGION_COUNT];
-    size_t n = rc == SIGIL_OK ? neutral_members(s, members, r->identity_hash) : 0;
+    size_t n = rc == SIGIL_OK ? neutral_members(s, members, r->identity_hash, r->content_hash) : 0;
     if (n) {
         rc = sigil_zip_store(members, n, &r->data, &r->len);
-        memcpy(r->content_hash, r->identity_hash, sizeof(r->content_hash));
         r->shape = SIGIL_SAVE_SHAPE_MULTI;
-        artifact_of(x->req, r);
+        sigil_sync_cart_artifact(x->req, ".zip", r);
     }
     free(s);
     return rc;
@@ -172,7 +158,8 @@ int sigil_sync_collect_n64(sigil_sync_ctx *x, sigil_sync_result *r) {
 
 /* ---- restore ------------------------------------------------------------------ */
 
-static int take_member(n64_save *s, const sigil_zip_member *m) {
+static int take_member(void *ctx, const sigil_zip_member *m) {
+    n64_save *s = (n64_save *)ctx;
     int region = n64_region_of(m->name);
     if (region >= 0) return n64_take_neutral(s, region, m->data, m->len) ? SIGIL_OK : SIGIL_ERR_UNSUPPORTED_FORMAT;
     switch (kind_of(m->name, &region)) {
@@ -200,21 +187,7 @@ static int read_unit(const uint8_t *unit, size_t len, size_t received_len, n64_s
     memset(s, 0, sizeof(*s));
     s->eeprom_len = N64_EEPROM_4K;
     if (len >= 4 && sigil_read_le32(unit) == 0x04034b50u) {
-        sigil_zip_member *members = NULL;
-        size_t count = 0;
-        int rc = sigil_zip_read_mem(unit, len, N64_MAX_FILE, &members, &count);
-        sigil_named_md5 *parts = rc == SIGIL_OK ? (sigil_named_md5 *)calloc(count ? count : 1, sizeof(*parts)) : NULL;
-        if (rc == SIGIL_OK && !parts) rc = SIGIL_ERR_OOM;
-        for (size_t i = 0; i < count && rc == SIGIL_OK; i++) {
-            snprintf(parts[i].name, sizeof(parts[i].name), "%s", members[i].name);
-            sigil_md5_of(members[i].data, members[i].len, parts[i].md5);
-            rc = take_member(s, &members[i]);
-            if (rc != SIGIL_OK) snprintf(r->problem, sizeof(r->problem), "%s", members[i].name);
-        }
-        if (rc == SIGIL_OK && count) sigil_named_hash(parts, count, r->content_hash);
-        free(parts);
-        if (members) sigil_zip_members_free(members, count);
-        return rc;
+        return sigil_sync_cart_read_zip(unit, len, N64_MAX_FILE, take_member, s, r);
     }
     sigil_md5_of(unit, received_len, r->content_hash);
     if (len >= N64_BLOB_SIZE) n64_take_blob(s, unit, len);
@@ -364,14 +337,14 @@ int sigil_sync_restore_n64(sigil_sync_ctx *x, const uint8_t *unit, size_t len, s
     n64_writes w = { 0 };
     int rc = in && local ? read_unit(unit, len, received_len, in, r) : SIGIL_ERR_OOM;
     sigil_zip_member members[N64_REGION_COUNT];
-    if (rc == SIGIL_OK && !neutral_members(in, members, r->identity_hash)) rc = SIGIL_ERR_NOT_FOUND;
+    if (rc == SIGIL_OK && !neutral_members(in, members, r->identity_hash, NULL)) rc = SIGIL_ERR_NOT_FOUND;
     if (rc == SIGIL_OK) {
         r->shape = len >= 4 && sigil_read_le32(unit) == 0x04034b50u ? SIGIL_SAVE_SHAPE_MULTI : SIGIL_SAVE_SHAPE_SINGLE;
-        artifact_of(x->req, r);
+        sigil_sync_cart_artifact(x->req, ".zip", r);
         rc = files_of(x->req, &f, r->problem);
     }
     if (rc == SIGIL_OK) rc = read_local(x->req, &f, local);
-    if (rc == SIGIL_OK) neutral_members(local, members, local_identity);
+    if (rc == SIGIL_OK) neutral_members(local, members, local_identity, NULL);
     bool already = false;
     if (rc == SIGIL_OK &&
         sigil_sync_blocks_restore(x, local_identity, r->identity_hash,

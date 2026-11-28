@@ -270,8 +270,12 @@ pub struct UploadParams {
     pub file_name: String,
 }
 
-/// A save state as listed by `GET /api/states`. RomM exposes no content hash for
-/// states, so change detection relies on `updated_at` + size plus our own baseline.
+/// A save state as listed by `GET /api/states`.
+///
+/// RomM 5.5 gives a state a `content_hash` (the MD5 of its file, or of a zip's entries) when it is uploaded;
+/// states from before it have none until RomM reads them. `updated_at` and the size are what is left to go by
+/// then, and `updated_at` is not proof of a change: a RomM up to 5.5.0-beta.1 moves it for every state a
+/// snapshot prune keeps (fixed after beta.1, rommapp/romm#5718).
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateInfo {
     pub id: i64,
@@ -290,6 +294,10 @@ pub struct StateInfo {
     /// snapshot changes it, so a client that writes snapshots (Argosy 3.0 does) owns the states it pushed.
     #[serde(default)]
     pub channel_id: Option<String>,
+    /// Null for a state RomM has not hashed yet, and on a server older than 5.5. Equal hashes prove equal bytes;
+    /// unequal ones prove nothing across formats (a zip is hashed by its entries, not as a file).
+    #[serde(default)]
+    pub content_hash: Option<String>,
 }
 
 impl StateInfo {

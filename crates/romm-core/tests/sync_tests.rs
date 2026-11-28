@@ -2019,8 +2019,9 @@ async fn a_server_without_snapshots_is_synced_the_old_way() {
 }
 
 #[tokio::test]
-async fn a_server_whose_heartbeat_cant_be_read_is_taken_for_an_older_one() {
-    for answer in [ResponseTemplate::new(500), ResponseTemplate::new(200).set_body_string("not json")] {
+async fn a_server_whose_heartbeat_is_not_a_romm_one_is_taken_for_an_older_one() {
+    // It answered, with something no RomM heartbeat is: the older flow, which every RomM still has.
+    for answer in [ResponseTemplate::new(404), ResponseTemplate::new(403), ResponseTemplate::new(200).set_body_string("not json")] {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(answer).mount(&server).await;
         mock_negotiate(&server, vec![]).await;
@@ -2032,6 +2033,59 @@ async fn a_server_whose_heartbeat_cant_be_read_is_taken_for_an_older_one() {
         assert_eq!(reqs(&server, "POST", "/api/sync/negotiate").await.len(), 1);
         assert!(reqs(&server, "GET", "/api/channels").await.is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_server_that_cant_be_asked_what_it_can_do_is_not_sent_saves_either_way() {
+    // No answer says nothing about the server, so neither engine may guess: a 5.5 server taken for an older
+    // one would get its saves the older way, around the channel that holds them.
+    for answer in [ResponseTemplate::new(500), ResponseTemplate::new(503), ResponseTemplate::new(429)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(answer).mount(&server).await;
+        mock_negotiate(&server, vec![op("upload", None, "Zelda.srm")]).await;
+        mock_complete(&server).await;
+        let t = tempfile::tempdir().unwrap();
+        let (env, path) = snes_game(t.path(), b"LOCAL");
+        let c = client(&server);
+        let mut st = State::default();
+        let err = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth)
+            .sync_rom(&rom("Zelda", "snes"), &env, None)
+            .await
+            .expect_err("the sync is refused, not guessed");
+        assert!(err.to_string().contains("left alone"), "{err}");
+        for (m, p) in [("POST", "/api/sync/negotiate"), ("POST", "/api/saves"), ("GET", "/api/channels"), ("POST", "/api/snapshots")] {
+            assert!(reqs(&server, m, p).await.is_empty(), "{m} {p}");
+        }
+        assert_eq!(std::fs::read(path).unwrap(), b"LOCAL", "the save on disk is as it was");
+    }
+}
+
+#[tokio::test]
+async fn a_hardcore_session_is_still_remembered_when_the_server_cant_be_asked() {
+    // The session ends with the server out of reach and nothing known of it. What decides how the save is
+    // sent later is remembered all the same, for whichever engine syncs next.
+    let down = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(503)).mount(&down).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    let env = retroarch_hardcore_env(&ra, true);
+    std::fs::write(ra.join("saves/Zelda.srm"), b"MINE").unwrap();
+    let mut st = State::default();
+    let c = client(&down);
+    let res = syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::Ask).sync_rom(&rom("Zelda", "snes"), &env, Some(play_session())).await;
+    assert!(res.is_err());
+    assert!(st.saves[&save_key(7, "snes9x")].pending_hardcore, "remembered although nothing could be sent");
+
+    // The server is back, and a 5.5: the save goes up as the hardcore one it is, by a sync outside any session.
+    retroarch_hardcore_env(&ra, false);
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![]).await;
+    mock_push_ok(&server, snap_json(5, &saves::md5_bytes(b"MINE"), true)).await;
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean(), "{rep:?}");
+    let pushes = reqs(&server, "POST", "/api/snapshots").await;
+    assert_eq!(manifest_of(&pushes[0])["is_hardcore"], true);
 }
 
 #[tokio::test]
@@ -2047,6 +2101,83 @@ async fn the_servers_ability_is_asked_once_not_per_game() {
         syncer(&c, &mut st, &t.path().join("bak"), ConflictPolicy::KeepBoth).sync_rom(&rom("Zelda", "snes"), &env, None).await.unwrap();
     }
     assert_eq!(reqs(&server, "GET", "/api/heartbeat").await.len(), 1);
+}
+
+// -- a save in a layout this app can't write -------------------------------------------------
+
+/// The channel's current is a neutral (Sigil-layout) save of a single file, as Argosy may push for a platform whose
+/// core this app still treats as a plain `.srm`. Its bytes are not the core's, though they look like it.
+fn neutral_snap(id: i64, hash: &str) -> Value {
+    let mut s = snap_json(id, hash, false);
+    s["save"]["format"] = json!("neutral");
+    s
+}
+
+#[tokio::test]
+async fn a_neutral_save_is_never_written_as_a_plain_save_file() {
+    let theirs = saves::md5_bytes(b"THEIRS");
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(neutral_snap(6, &theirs)), false)]).await;
+    mock_get_snapshot(&server, neutral_snap(6, &theirs)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let env = retroarch_env(&ra, "snes9x");
+    let mut st = State::default();
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.failed.iter().any(|f| f.contains("neutral layout")), "{rep:?}");
+    assert!(rep.downloaded.is_empty());
+    assert!(!ra.join("saves/Zelda.srm").exists(), "nothing was put where the core looks for its save");
+    // Reading it with `hold` would have told the server this device has the save.
+    assert!(reqs(&server, "GET", "/api/snapshots/6").await.is_empty(), "the snapshot was not even read");
+    assert!(reqs(&server, "GET", "/api/saves/56/content").await.is_empty(), "nor downloaded");
+    assert!(st.channels.is_empty(), "and this device does not claim to hold it");
+}
+
+#[tokio::test]
+async fn a_neutral_save_does_not_replace_the_good_save_a_conflict_policy_would_overwrite() {
+    let theirs = saves::md5_bytes(b"THEIRS");
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(neutral_snap(6, &theirs)), false)]).await;
+    mock_get_snapshot(&server, neutral_snap(6, &theirs)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    std::fs::write(ra.join("saves/Zelda.srm"), b"MINE").unwrap();
+    let env = retroarch_env(&ra, "snes9x");
+    let mut st = State::default();
+
+    // Both sides have a save the other lacks; ServerWins is the policy that overwrites the local one.
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::ServerWins, None, &t.path().join("bak")).await;
+    assert!(rep.failed.iter().any(|f| f.contains("neutral layout")), "{rep:?}");
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"MINE", "the save the core can read is untouched");
+    assert!(reqs(&server, "GET", "/api/snapshots/6").await.is_empty());
+    assert!(reqs(&server, "POST", "/api/snapshots").await.is_empty(), "and nothing is pushed over what could not be read");
+}
+
+#[tokio::test]
+async fn a_native_save_still_comes_down_as_before() {
+    // The control for the two above: the same game, the same single file, in the format this app writes.
+    let theirs = saves::md5_bytes(b"THEIRS");
+    let server = snapshot_server().await;
+    mock_rom_7(&server).await;
+    mock_channels(&server, vec![channel_json(Some(snap_json(6, &theirs, false)), false)]).await;
+    mock_get_snapshot(&server, snap_json(6, &theirs, false)).await;
+    mock_save_content(&server, 56, b"THEIRS".to_vec()).await;
+    let t = tempfile::tempdir().unwrap();
+    let ra = t.path().join("ra");
+    std::fs::create_dir_all(ra.join("saves")).unwrap();
+    let env = retroarch_env(&ra, "snes9x");
+    let mut st = State::default();
+
+    let rep = run_snapshot_sync(&server, &mut st, &env, ConflictPolicy::Ask, None, &t.path().join("bak")).await;
+    assert!(rep.is_clean() && rep.downloaded == ["Zelda.srm"], "{rep:?}");
+    assert_eq!(std::fs::read(ra.join("saves/Zelda.srm")).unwrap(), b"THEIRS");
 }
 
 // -- the first push ---------------------------------------------------------------------------
@@ -2567,7 +2698,7 @@ async fn a_hardcore_snapshot_goes_back_up_marked_when_the_older_engine_takes_ove
     assert!(st.channels[&channel_key(7)].held_hardcore);
     assert!(st.saves[&save_key(7, "snes9x")].hardcore, "the older engine's record agrees");
 
-    // The server then goes back to one without snapshots (or this machine can't read its heartbeat),
+    // The server then goes back to one without snapshots,
     // and the older engine is asked to send the same save up: it carries the marker.
     let old_server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"SYSTEM": {"VERSION": "5.4.1"}}))).mount(&old_server).await;

@@ -107,22 +107,27 @@ static const gpgx_cart GPGX_CARTS[] = {
 };
 
 /* The core options template variables read, with the value each takes when
- * the request gives none. Beetle PSX's card indexes take the build's prefix:
- * beetle_psx_ on the software core, beetle_psx_hw_ otherwise. */
+ * the request gives none: the emulator's own default. xemu has none for
+ * hdd_path, so {xemu_hdd} has no value until the request sends it. Beetle
+ * PSX's card indexes take the build's prefix: beetle_psx_ on the software
+ * core, beetle_psx_hw_ otherwise. */
 typedef struct {
     const char *var;
     const char *key;
     const char *fallback;
     bool        beetle_prefix;
+    bool        file_name;   /* the setting holds a path: the variable is the file's name alone */
 } variable_option;
 
 static const variable_option VARIABLE_OPTIONS[] = {
-    { "cart_size", "genesis_plus_gx_cart_size", "4meg", false },
-    { "nvram_version", "opera_nvram_version", "0", false },
-    { "pcsx2_slot1", "Slot1_Filename", "Mcd001.ps2", false },
-    { "pcsx2_slot2", "Slot2_Filename", "Mcd002.ps2", false },
-    { "left_index", "memcard_left_index", "0", true },
-    { "right_index", "memcard_right_index", "1", true },
+    { "cart_size", "genesis_plus_gx_cart_size", "4meg", false, false },
+    { "nvram_version", "opera_nvram_version", "0", false, false },
+    { "pcsx2_slot1", "Slot1_Filename", "Mcd001.ps2", false, false },
+    { "pcsx2_slot2", "Slot2_Filename", "Mcd002.ps2", false, false },
+    { "left_index", "memcard_left_index", "0", true, false },
+    { "right_index", "memcard_right_index", "1", true, false },
+    { "xemu_hdd", "hdd_path", NULL, false, true },
+    { "x1box_hdd", "hdd_path", "hdd.img", false, true },
 };
 
 const char *sigil_save_variable_option(const char *layout, const char *var, size_t len, char key[64],
@@ -139,13 +144,21 @@ const char *sigil_save_variable_option(const char *layout, const char *var, size
 }
 
 /* The request's value for the option variable `var` (`len` bytes) reads, or
- * its fallback; NULL for a variable no option sets. */
+ * its fallback; NULL for a variable no option sets, or one with no fallback
+ * whose option the request doesn't send. */
 static const char *variable_option_value(const sigil_save_request *req, const char *var, size_t len) {
     char key[64];
     const char *fallback = NULL;
     if (!sigil_save_variable_option(req->layout, var, len, key, &fallback)) return NULL;
     const char *v = sigil_save_option_value(req, key);
-    return v && *v ? v : fallback;
+    if (!v || !*v) return fallback;
+    for (size_t i = 0; i < sizeof(VARIABLE_OPTIONS) / sizeof(VARIABLE_OPTIONS[0]); i++) {
+        const variable_option *o = &VARIABLE_OPTIONS[i];
+        if (!o->file_name || strlen(o->var) != len || strncmp(o->var, var, len) != 0) continue;
+        const char *sep = last_separator(v);
+        return sep ? sep + 1 : v;
+    }
+    return v;
 }
 
 size_t sigil_gpgx_cart_values(const char **out, size_t cap) {
@@ -537,8 +550,6 @@ int sigil_save_hash(sigil_save_unit *unit, sigil_save_open_fn open, void *open_c
 
     entry_list all = { NULL, 0, 0 };
     entry_list state = { NULL, 0, 0 };
-    size_t state_count = 0;
-    const sigil_save_member *state_member = NULL;
     int rc = SIGIL_OK;
     for (size_t i = 0; i < unit->member_count && rc == SIGIL_OK; i++) {
         sigil_io *io = sigil_save_open(open, open_ctx, unit->members[i].path);
@@ -550,14 +561,11 @@ int sigil_save_hash(sigil_save_unit *unit, sigil_save_open_fn open, void *open_c
         rc = entry_list_add(&all, unit->members[i].entry, hex);
         if (rc == SIGIL_OK && unit->members[i].role != SIGIL_SAVE_ROLE_RTC) {
             rc = entry_list_add(&state, unit->members[i].entry, hex);
-            state_count++;
-            state_member = &unit->members[i];
         }
     }
     if (rc == SIGIL_OK) {
         combined_hash(&all, unit->content_hash);
-        if (state_count == 1) rc = hash_single(open, open_ctx, state_member, unit->identity_hash);
-        else combined_hash(&state, unit->identity_hash);
+        sigil_identity_hash(state.entries, state.count, unit->identity_hash);
     }
     free(all.entries);
     free(state.entries);
@@ -640,6 +648,12 @@ int sigil_save_resolve(const sigil_save_request *req, sigil_save_unit **out) {
 
     uint32_t features = req->features;
     if (req->result && req->result->struct_version >= SIGIL_RESULT_V3) features |= req->result->features;
+    /* No libretro GBA core keeps the cart's clock in a file of its own:
+     * mGBA's libretro core exposes RETRO_MEMORY_RTC for GB carts alone and
+     * keeps a GBA cart's clock inside its save RAM (libretro/mgba at
+     * e31759b2: src/gba/savedata.c GBASavedataRTCWrite). A GBA clock is no
+     * reason to expect a `.rtc`. */
+    if (req->platform && strcmp(sigil_layout_platform(req->platform), "gba") == 0) features &= ~SIGIL_FEATURE_RTC;
 
     const sigil_layout *layout = sigil_layout_find(req->layout, req->platform);
     if (layout->profiles) return resolve_profiles(req, layout->profiles, out);

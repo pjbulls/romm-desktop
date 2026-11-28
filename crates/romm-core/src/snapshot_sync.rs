@@ -13,12 +13,38 @@
 //!   channel is left out of it ("A hardcore channel... stays legacy"), and the server knows nothing of
 //!   the marker Argosy used to append (`hardcore`), so that mechanism has no meaning here.
 //!
-//! Which engine runs is the server's say, by its heartbeat (`RommClient::capabilities`); a server
-//! that doesn't answer or isn't new enough gets the older one, as before.
+//! Which engine runs is the server's say, by its heartbeat (`RommClient::capabilities`): one that isn't
+//! new enough gets the older one, as before, and one that can't be asked gets neither (`sync_rom`).
 
 use super::*;
 use crate::report::PendingConflict;
 use crate::state::{channel_key, ChannelRecord, DEFAULT_CHANNEL};
+
+/// A save RomM calls `native`: the bytes the emulator keeps, packed into a zip only when it keeps more than one file.
+const FORMAT_NATIVE: &str = "native";
+/// A save RomM calls `neutral`: the layout Sigil defines for a platform, which only Sigil can read and write.
+const FORMAT_NEUTRAL: &str = "neutral";
+
+/// Can this app put the save of a snapshot where `plan` keeps its game's save?
+///
+/// A neutral save is Sigil's own layout, so only a plan Sigil runs (`Kind::Unit`) can take one. Every other plan
+/// keeps its save the way the emulator does, and the bytes of a neutral save are not those: a core with a
+/// layout of its own would be handed a file it can't read, and could overwrite the good save it has with it.
+/// This is what stops an Argosy that has learned a platform this app's tables (`route`) haven't from
+/// writing into a save file that looks like the right one.
+///
+/// It has to be asked before the snapshot is read with `hold`, which tells the server this device has it.
+fn readable_save(plan: &Plan, save: Option<&SnapshotSave>) -> Result<()> {
+    let neutral = save.and_then(|s| s.format.as_deref()) == Some(FORMAT_NEUTRAL);
+    if neutral && !matches!(plan.kind, Kind::Unit(_)) {
+        return Err(Error::msg(format!(
+            "the server's save is in Sigil's neutral layout, which this app can't turn into {}'s own save yet \
+             (a newer version of this app may); it was left alone, and this device's save was not sent over it",
+            plan.label
+        )));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------------------------
 // The decision, ported from Argosy's `SnapshotDecision`
@@ -48,7 +74,7 @@ pub(crate) struct Point {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Action {
+pub(crate) enum Decision {
     Nothing,
     /// Write a snapshot on top of `expected` (what the push believes is the channel's current; `None`:
     /// an empty channel), built on `parent`.
@@ -60,33 +86,40 @@ pub(crate) enum Action {
     Conflict(i64),
 }
 
+/// Has the save on disk changed since the snapshot this device holds? A missing local save never reads as a change.
+/// A held snapshot whose hashes weren't kept counts any local save as one, and nothing held counts the same.
+/// `decide` and the hardcore bookkeeping in `sync_channel` both ask it, so that they can't disagree.
+pub(crate) fn changed_since(local: Option<&Hashes>, held: Option<&Point>) -> bool {
+    local.is_some_and(|l| held.and_then(|h| h.save.as_ref()).is_none_or(|h| !l.same_save_as(h)))
+}
+
 /// What to do for one channel, from the snapshot this device last pushed or applied (`held`), the
 /// channel's `current`, and the save on disk now (`local`). A missing local save never reads as a
 /// change, so a cleared save folder is refilled and not pushed as empty.
-pub(crate) fn decide(held: Option<&Point>, current: Option<&Point>, local: Option<&Hashes>) -> Action {
+pub(crate) fn decide(held: Option<&Point>, current: Option<&Point>, local: Option<&Hashes>) -> Decision {
     let Some(current) = current else {
-        return if local.is_some() { Action::Push { expected: None, parent: held.map(|h| h.id) } } else { Action::Nothing };
+        return if local.is_some() { Decision::Push { expected: None, parent: held.map(|h| h.id) } } else { Decision::Nothing };
     };
     let Some(held) = held else {
         return match local {
-            None => Action::Download(current.id),
-            Some(l) if current.save.as_ref().is_some_and(|c| l.same_save_as(c)) => Action::Adopt(current.id),
-            Some(_) => Action::Conflict(current.id),
+            None => Decision::Download(current.id),
+            Some(l) if current.save.as_ref().is_some_and(|c| l.same_save_as(c)) => Decision::Adopt(current.id),
+            Some(_) => Decision::Conflict(current.id),
         };
     };
-    let dirty = local.is_some_and(|l| held.save.as_ref().is_none_or(|h| !l.same_save_as(h)));
+    let dirty = changed_since(local, Some(held));
     if local.is_none() && held.id == current.id && current.save.is_some() {
-        Action::Download(current.id)
+        Decision::Download(current.id)
     } else if held.id == current.id {
         if dirty {
-            Action::Push { expected: Some(current.id), parent: Some(held.id) }
+            Decision::Push { expected: Some(current.id), parent: Some(held.id) }
         } else {
-            Action::Nothing
+            Decision::Nothing
         }
     } else if dirty {
-        Action::Conflict(current.id)
+        Decision::Conflict(current.id)
     } else {
-        Action::Download(current.id)
+        Decision::Download(current.id)
     }
 }
 
@@ -333,19 +366,19 @@ impl<'a> Syncer<'a> {
         let action = decide(held.as_ref(), current.as_ref(), local_h.as_ref());
         tracing::debug!("snapshot sync: rom {rom_id} channel {} held {:?} current {:?} -> {action:?}", view.channel_id, held.as_ref().map(|h| h.id), current.as_ref().map(|c| c.id));
 
-        let dirty = local_h.as_ref().is_some_and(|l| held.as_ref().and_then(|h| h.save.as_ref()).is_none_or(|h| !l.same_save_as(h)));
+        let dirty = changed_since(local_h.as_ref(), held.as_ref());
         let hardcore = self.push_is_hardcore(rom_id, &plan.label, cx.env, &view, dirty, in_session);
         // `NO_SNAPSHOT` is no snapshot the server knows; naming it would only draw a 404 for the parent.
         let held_id = held.as_ref().map(|h| h.id).filter(|id| *id != NO_SNAPSHOT);
 
         match action {
-            Action::Nothing => {
+            Decision::Nothing => {
                 if local.is_some() || current.is_some() || held.is_some() {
                     report.unchanged += 1;
                 }
                 self.commit_sigil(plan, local);
             }
-            Action::Adopt(snapshot_id) => {
+            Decision::Adopt(snapshot_id) => {
                 if let Some(cur) = &view.current {
                     self.record(cx, plan, &view, cur, current.as_ref().and_then(|c| c.save.clone()), local_marked);
                 }
@@ -357,8 +390,11 @@ impl<'a> Syncer<'a> {
                 self.commit_sigil(plan, local);
                 report.unchanged += 1;
             }
-            Action::Download(snapshot_id) => self.apply_snapshot(cx, plan, &view, snapshot_id, report).await?,
-            Action::Push { expected, parent } => {
+            Decision::Download(_) => {
+                let cur = view.current.as_ref().ok_or_else(|| Error::msg("the channel has no current save to take"))?;
+                self.apply_snapshot(cx, plan, &view, cur, report).await?
+            }
+            Decision::Push { expected, parent } => {
                 let local = local.ok_or_else(|| Error::msg("nothing to push"))?;
                 match self.push_local(cx, plan, &view, local, expected, parent, hardcore, false).await? {
                     Pushed::Done(snap) => self.pushed(cx, plan, &view, local, &snap, report),
@@ -368,7 +404,7 @@ impl<'a> Syncer<'a> {
                     Pushed::Downgrade => self.settle(cx, plan, &view, view.current.as_ref(), local, held_id, hardcore, Why::Hardcore, false, report).await?,
                 }
             }
-            Action::Conflict(_) => {
+            Decision::Conflict(_) => {
                 let local = local.ok_or_else(|| Error::msg("a conflict needs a local save"))?;
                 self.settle(cx, plan, &view, view.current.as_ref(), local, held_id, hardcore, Why::Moved, false, report).await?;
             }
@@ -395,7 +431,7 @@ impl<'a> Syncer<'a> {
         }
         let hardcore = hardcore::session_is_hardcore(env);
         // Remembered at once, so that a push that fails doesn't lose it. A casual session adds nothing.
-        if hardcore || self.state.channels.contains_key(&key) {
+        if hardcore {
             self.state.channels.entry(key).or_insert_with(|| ChannelRecord { channel_id: view.channel_id.clone(), rom_file_id: view.file_id, ..Default::default() });
         }
         self.state.note_pending(rom_id, emulator, hardcore);
@@ -423,9 +459,9 @@ impl<'a> Syncer<'a> {
                     unit::Shape::Multi => "MULTI",
                     unit::Shape::Folder => "FOLDER",
                 },
-                "neutral",
+                FORMAT_NEUTRAL,
             ),
-            _ => (native_shape(&bytes), "native"),
+            _ => (native_shape(&bytes), FORMAT_NATIVE),
         };
         let content = local_hashes(local).content;
         let (emulator, core) = if cx.env.profile.id == "retroarch" { ("retroarch".to_string(), cx.env.core.clone()) } else { (plan.label.clone(), None) };
@@ -470,10 +506,11 @@ impl<'a> Syncer<'a> {
     }
 
     /// Takes the server's snapshot as this device's save.
-    async fn apply_snapshot(&mut self, cx: &Cx<'_>, plan: &Plan, view: &View, snapshot_id: i64, report: &mut SyncReport) -> Result<()> {
+    async fn apply_snapshot(&mut self, cx: &Cx<'_>, plan: &Plan, view: &View, listed: &Snapshot, report: &mut SyncReport) -> Result<()> {
         precheck(plan)?;
+        readable_save(plan, listed.save.as_ref())?;
         // Reading it with `hold` is also what tells the server this device has it now.
-        let snap = self.client.snapshot(snapshot_id, self.device_id, true).await?;
+        let snap = self.client.snapshot(listed.id, self.device_id, true).await?;
         let Some(save) = &snap.save else {
             // States only: there is no save to place, but the device has caught up.
             self.record(cx, plan, view, &snap, None, false);
@@ -520,7 +557,7 @@ impl<'a> Syncer<'a> {
                 });
                 Ok(())
             }
-            ConflictPolicy::ServerWins => self.apply_snapshot(cx, plan, view, cur.id, report).await,
+            ConflictPolicy::ServerWins => self.apply_snapshot(cx, plan, view, cur, report).await,
             ConflictPolicy::KeepBoth => {
                 if !branched {
                     // A push that doesn't build on the channel's current is kept as a branch, and
@@ -539,7 +576,7 @@ impl<'a> Syncer<'a> {
                 }
                 let ext = Path::new(&local.file_name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
                 report.archived.push(upload_name(&saves::conflict_name(&name_base(cx.rom, cx.plan)), &ext));
-                self.apply_snapshot(cx, plan, view, cur.id, report).await
+                self.apply_snapshot(cx, plan, view, cur, report).await
             }
             ConflictPolicy::DeviceWins => {
                 // On top of the current, and approving the downgrade: this is the one choice that says so.
@@ -607,22 +644,55 @@ mod tests {
         Point { id, save: Some(h(c)) }
     }
 
+    // -- which saves a plan can take (`readable_save`) ---------------------------------------
+
+    fn plan_of(kind: Kind) -> Plan {
+        Plan { label: "mgba".into(), kind, content_name: "Game.gba".into() }
+    }
+    fn save_in(format: Option<&str>) -> SnapshotSave {
+        serde_json::from_value(serde_json::json!({"id": 1, "format": format})).unwrap()
+    }
+
+    #[test]
+    fn only_a_plan_sigil_runs_takes_a_neutral_save() {
+        let unit = plan_of(Kind::Unit(crate::unit::Route { layout: "gambatte".into(), platform: "gb".into(), root: PathBuf::new(), options: vec![] }));
+        let raw = plan_of(Kind::Raw { path: PathBuf::from("Game.srm"), exists: false });
+        let xbox = plan_of(Kind::Xbox { image: PathBuf::new(), save_id: String::new() });
+        let folder = plan_of(Kind::Folder { content: PathBuf::new(), title_id: String::new() });
+        let neutral = save_in(Some(FORMAT_NEUTRAL));
+
+        assert!(readable_save(&unit, Some(&neutral)).is_ok(), "Sigil reads its own layout");
+        for plan in [&raw, &xbox, &folder] {
+            let why = readable_save(plan, Some(&neutral)).unwrap_err().to_string();
+            assert!(why.contains("neutral layout") && why.contains("mgba"), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_native_save_or_none_is_never_turned_away() {
+        let raw = plan_of(Kind::Raw { path: PathBuf::from("Game.srm"), exists: false });
+        // A server older than the format field says nothing; a snapshot without a save has nothing to refuse.
+        for save in [Some(save_in(Some(FORMAT_NATIVE))), Some(save_in(None)), None] {
+            assert!(readable_save(&raw, save.as_ref()).is_ok());
+        }
+    }
+
     // -- the decision table (Argosy's SnapshotDecision) ----------------------------------------
 
     #[test]
     fn an_empty_channel_takes_the_local_save_and_nothing_else() {
-        assert_eq!(decide(None, None, Some(&h("a"))), Action::Push { expected: None, parent: None });
-        assert_eq!(decide(None, None, None), Action::Nothing);
+        assert_eq!(decide(None, None, Some(&h("a"))), Decision::Push { expected: None, parent: None });
+        assert_eq!(decide(None, None, None), Decision::Nothing);
         // A channel emptied on the server is refilled from a device that held a snapshot of it.
-        assert_eq!(decide(Some(&pt(3, "a")), None, Some(&h("a"))), Action::Push { expected: None, parent: Some(3) });
+        assert_eq!(decide(Some(&pt(3, "a")), None, Some(&h("a"))), Decision::Push { expected: None, parent: Some(3) });
     }
 
     #[test]
     fn a_device_that_holds_nothing_downloads_adopts_or_conflicts() {
         let cur = pt(5, "x");
-        assert_eq!(decide(None, Some(&cur), None), Action::Download(5));
-        assert_eq!(decide(None, Some(&cur), Some(&h("x"))), Action::Adopt(5), "same save: no transfer");
-        assert_eq!(decide(None, Some(&cur), Some(&h("y"))), Action::Conflict(5), "a different save on each side");
+        assert_eq!(decide(None, Some(&cur), None), Decision::Download(5));
+        assert_eq!(decide(None, Some(&cur), Some(&h("x"))), Decision::Adopt(5), "same save: no transfer");
+        assert_eq!(decide(None, Some(&cur), Some(&h("y"))), Decision::Conflict(5), "a different save on each side");
     }
 
     #[test]
@@ -630,7 +700,7 @@ mod tests {
         // Packed again, so the bytes differ; the saves are the same.
         let cur = Point { id: 5, save: Some(Hashes { content: "c1".into(), identity: "same".into() }) };
         let local = Hashes { content: "c2".into(), identity: "same".into() };
-        assert_eq!(decide(None, Some(&cur), Some(&local)), Action::Adopt(5));
+        assert_eq!(decide(None, Some(&cur), Some(&local)), Decision::Adopt(5));
     }
 
     #[test]
@@ -654,7 +724,7 @@ mod tests {
         // Even though the server has moved on from what was last synced: the two sides agree.
         let cur = pt(6, "new");
         assert_eq!(seed_held("old", Some(&cur), Some(&h("new"))), None);
-        assert_eq!(decide(None, Some(&cur), Some(&h("new"))), Action::Adopt(6));
+        assert_eq!(decide(None, Some(&cur), Some(&h("new"))), Decision::Adopt(6));
     }
 
     #[test]
@@ -692,19 +762,19 @@ mod tests {
         // the two sides are the same save, so it is adopted (no transfer, and the device now holds it).
         let cur = pt(5, "old");
         let mine = h("mine");
-        assert_eq!(decide(seeded("old", &cur, Some(&mine)).as_ref(), Some(&cur), Some(&mine)), Action::Push { expected: Some(5), parent: Some(5) });
-        assert_eq!(decide(seeded("old", &cur, Some(&h("old"))).as_ref(), Some(&cur), Some(&h("old"))), Action::Adopt(5));
+        assert_eq!(decide(seeded("old", &cur, Some(&mine)).as_ref(), Some(&cur), Some(&mine)), Decision::Push { expected: Some(5), parent: Some(5) });
+        assert_eq!(decide(seeded("old", &cur, Some(&h("old"))).as_ref(), Some(&cur), Some(&h("old"))), Decision::Adopt(5));
 
         // The channel has moved on. Not changed here: follow it. Changed here too: a real conflict.
         let cur = pt(6, "new");
-        assert_eq!(decide(seeded("old", &cur, Some(&h("old"))).as_ref(), Some(&cur), Some(&h("old"))), Action::Download(6));
-        assert_eq!(decide(seeded("old", &cur, Some(&mine)).as_ref(), Some(&cur), Some(&mine)), Action::Conflict(6));
+        assert_eq!(decide(seeded("old", &cur, Some(&h("old"))).as_ref(), Some(&cur), Some(&h("old"))), Decision::Download(6));
+        assert_eq!(decide(seeded("old", &cur, Some(&mine)).as_ref(), Some(&cur), Some(&mine)), Decision::Conflict(6));
         // No local save at all: take the channel's.
-        assert_eq!(decide(seeded("old", &cur, None).as_ref(), Some(&cur), None), Action::Download(6));
+        assert_eq!(decide(seeded("old", &cur, None).as_ref(), Some(&cur), None), Decision::Download(6));
 
         // Without the seed, every one of those differences was a conflict (or an adoption).
-        assert_eq!(decide(None, Some(&pt(5, "old")), Some(&mine)), Action::Conflict(5));
-        assert_eq!(decide(None, Some(&cur), Some(&h("old"))), Action::Conflict(6));
+        assert_eq!(decide(None, Some(&pt(5, "old")), Some(&mine)), Decision::Conflict(5));
+        assert_eq!(decide(None, Some(&cur), Some(&h("old"))), Decision::Conflict(6));
     }
 
     // -- a plain hardcore save an older engine uploaded with Argosy's marker -----------------------
@@ -769,28 +839,28 @@ mod tests {
     fn holding_the_current_pushes_only_what_changed() {
         let held = pt(5, "a");
         let cur = pt(5, "a");
-        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("a"))), Action::Nothing);
-        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("b"))), Action::Push { expected: Some(5), parent: Some(5) });
+        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("a"))), Decision::Nothing);
+        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("b"))), Decision::Push { expected: Some(5), parent: Some(5) });
     }
 
     #[test]
     fn a_cleared_save_folder_is_refilled_not_pushed_as_empty() {
-        assert_eq!(decide(Some(&pt(5, "a")), Some(&pt(5, "a")), None), Action::Download(5));
-        assert_eq!(decide(Some(&pt(4, "a")), Some(&pt(5, "b")), None), Action::Download(5));
+        assert_eq!(decide(Some(&pt(5, "a")), Some(&pt(5, "a")), None), Decision::Download(5));
+        assert_eq!(decide(Some(&pt(4, "a")), Some(&pt(5, "b")), None), Decision::Download(5));
     }
 
     #[test]
     fn a_channel_that_moved_on_is_downloaded_unless_this_device_changed_too() {
         let held = pt(4, "a");
         let cur = pt(5, "b");
-        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("a"))), Action::Download(5), "unchanged here: follow the server");
-        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("c"))), Action::Conflict(5), "changed here too");
+        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("a"))), Decision::Download(5), "unchanged here: follow the server");
+        assert_eq!(decide(Some(&held), Some(&cur), Some(&h("c"))), Decision::Conflict(5), "changed here too");
     }
 
     #[test]
     fn a_held_snapshot_with_no_hashes_on_record_counts_the_local_save_as_changed() {
         let held = Point { id: 5, save: None };
-        assert_eq!(decide(Some(&held), Some(&pt(5, "a")), Some(&h("a"))), Action::Push { expected: Some(5), parent: Some(5) });
+        assert_eq!(decide(Some(&held), Some(&pt(5, "a")), Some(&h("a"))), Decision::Push { expected: Some(5), parent: Some(5) });
     }
 
     // -- which ROM file the channel keys to ---------------------------------------------------

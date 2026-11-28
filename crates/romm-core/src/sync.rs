@@ -335,10 +335,6 @@ fn ensure_title_id<'a>(title_id: &'a str, game: &str) -> Result<&'a str> {
     Ok(title_id)
 }
 
-/// What a game is called in a save's file name and in messages. Normally the launch file's stem (what
-/// RetroArch names its saves after). For a ROM extracted into its own folder whose save is kept as a
-/// folder it is that folder's name instead: an Xbox 360 disc's launch file is always `default.xex`,
-/// which would name every game's save `default.zip`.
 /// The report line for play time that RomM refused or that couldn't be sent.
 ///
 /// RomM answers 403 to play time from a token without `roms.user.write`: `POST /api/play-sessions` does (5.4 and
@@ -354,6 +350,10 @@ pub(crate) fn play_time_failure(e: &Error) -> String {
     }
 }
 
+/// What a game is called in a save's file name and in messages. Normally the launch file's stem (what
+/// RetroArch names its saves after). For a ROM extracted into its own folder whose save is kept as a
+/// folder it is that folder's name instead: an Xbox 360 disc's launch file is always `default.xex`,
+/// which would name every game's save `default.zip`.
 fn name_base(rom: &LocalRom, plan: Option<&Plan>) -> String {
     if matches!(plan.map(|p| &p.kind), Some(Kind::Folder { .. })) && rom.path.is_dir() {
         if let Some(n) = rom.path.file_name() {
@@ -460,9 +460,15 @@ pub(crate) fn precheck(plan: &Plan) -> Result<()> {
 impl<'a> Syncer<'a> {
     pub async fn sync_rom(&mut self, rom: &LocalRom, env: &EmuEnv, play: Option<PlaySession>) -> Result<SyncReport> {
         // A server with snapshots (RomM 5.5+) keeps saves in channels, which the flow below can't use
-        // for a unit Sigil built or a hardcore save. It is asked first; one that doesn't answer, or
-        // isn't new enough, gets the flow below, which every RomM since 4.x still takes.
-        if self.client.capabilities().await.snapshots {
+        // for a unit Sigil built or a hardcore save. It is asked first; one that isn't new enough gets the
+        // flow below, which every RomM since 4.x still takes.
+        //
+        // One that can't be asked (no answer, and nothing known of it from before) is neither: it may be
+        // a 5.5 whose saves the flow below would send around their channel. The flow below still runs as
+        // far as it only looks at this machine, because that is where a hardcore session is remembered for
+        // whichever engine syncs next, and stops before its first call to the server.
+        let caps = self.client.capabilities().await;
+        if caps.as_ref().is_ok_and(|c| c.snapshots) {
             return self.sync_rom_snapshots(rom, env, play).await;
         }
         let id = identity_for(self.state, rom);
@@ -496,6 +502,10 @@ impl<'a> Syncer<'a> {
         }
         if let Some(e) = &unreadable {
             report.failed.push(format!("{}: {e}", name_base(rom, plan.as_ref())));
+        }
+
+        if let Err(e) = caps {
+            return Err(Error::msg(format!("couldn't tell which save API this RomM server has ({e}), so its saves were left alone")));
         }
 
         let mut saves_list = Vec::new();

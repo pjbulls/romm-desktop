@@ -36,7 +36,9 @@ extern "C" {
 #define SIGIL_SAVE_UNIT_V1    1u
 #define SIGIL_CARD_LISTING_V1 1u
 #define SIGIL_SYNC_REQUEST_V1 1u
+#define SIGIL_SYNC_REQUEST_V2 2u   /* adds write_at */
 #define SIGIL_SYNC_RESULT_V1  1u
+#define SIGIL_SYNC_RESULT_V2  2u
 #define SIGIL_SUPPORT_V1  1u
 #define SIGIL_OPTIONS_V1  1u
 
@@ -71,12 +73,16 @@ extern "C" {
                                                  folder sits under the save root; `problem` names them, one
                                                  per line */
 #define SIGIL_ERR_KEYS_INCOMPATIBLE   -17  /* the keys given don't open this content: the key file lacks the key
-                                                 for its key generation, or its header key is wrong. Switch
-                                                 NSP and XCI need prod.keys (SIGIL_ERR_NEEDS_KEY without) */
+                                                 for its key generation, or its header key is wrong. Without
+                                                 prod.keys a Switch NSP or XCI gives only the game its tickets
+                                                 name (SIGIL_ERR_NEEDS_KEY when they name none) */
 
 /* SIGIL_FLAG_FILENAME_FALLBACK: when the binary parser fails, scan the
- * filename for community naming patterns ([ULUS10064] etc.). On by default
- * when sigil_options is NULL.
+ * filename for community naming patterns ([ULUS10064] etc.). Only the named
+ * platform's pattern is read, whether the caller or the file's extension
+ * named it, and the result keeps that platform; a platform with no pattern
+ * gets no id. Every pattern is tried only when nothing names the platform.
+ * On by default when sigil_options is NULL.
  *
  * SIGIL_FLAG_3DS_ALLOW_HOMEBREW: disable the "0004" retail-only filter for
  * 3DS extractions, accepting CIA / homebrew title IDs. Off by default. */
@@ -107,19 +113,47 @@ typedef enum {
     /* title_id and raw_serial are the cart header's game code (NSME), empty
      * on a cart without one. N64 emulators name saves after the content
      * file, not the code. */
-    SIGIL_PLATFORM_N64
+    SIGIL_PLATFORM_N64,
+    /* Like GB: saves key on the content file's stem, and extraction reads
+     * the ROM only for SIGIL_FEATURE_* facts. */
+    SIGIL_PLATFORM_GBA
 } sigil_platform;
 
 /* Cart facts read from the ROM header that change what a save unit holds.
- * RTC: the cart carries a real-time clock, so a libretro core exposes
- * RETRO_MEMORY_RTC and the frontend persists it beside the SRAM (RetroArch
- * writes `<stem>.rtc`). GB: header byte 0x147 in {0x0F, 0x10, 0xFD, 0xFE}.
- * SNES: (ROMType << 8 | ROMSpeed) is 0x5535 (S-RTC) or 0xF93A (SPC7110 RTC). */
+ * RTC: the cart carries a real-time clock. On GB and SNES a libretro core
+ * exposes it as RETRO_MEMORY_RTC and the frontend persists it beside the
+ * SRAM (RetroArch writes `<stem>.rtc`). GB: header byte 0x147 in {0x0F,
+ * 0x10, 0xFD, 0xFE}. SNES: (ROMType << 8 | ROMSpeed) is 0x5535 (S-RTC) or
+ * 0xF93A (SPC7110 RTC). GBA: the ROM carries Nintendo's clock library id
+ * (SIIRTC_Vnnn). No libretro GBA core exposes a clock region; mGBA keeps
+ * the clock as 16 bytes at the chip's size, after the chip in standalone
+ * mGBA's `.sav` and inside the libretro core's 128 KiB save RAM, where a
+ * 128 KiB flash chip leaves no room. Collect reads that clock from a
+ * 128 KiB file only when this bit and a GBA save chip's bit are set and
+ * the chip isn't 128 KiB flash. */
 #define SIGIL_FEATURE_RTC  (1u << 0)
 /* MBC2: a GB cart whose RAM is 512 four-bit cells inside the mapper, which
  * emulators store as 256, 512 or 8192 bytes. GB: header byte 0x147 in
  * {0x05, 0x06}. */
 #define SIGIL_FEATURE_MBC2 (1u << 1)
+/* The GBA save chip the ROM's Nintendo save library id names: SRAM_Vnnn or
+ * SRAM_F_Vnnn (32 KiB SRAM), FLASH_Vnnn or FLASH512_Vnnn (64 KiB flash),
+ * FLASH1M_Vnnn (128 KiB flash), EEPROM_Vnnn (512 bytes or 8 KiB: the size is
+ * chosen in the game's code, not named in the ROM). At most one is set; a
+ * ROM naming two kinds of chip, or none, sets none. */
+#define SIGIL_FEATURE_GBA_SRAM    (1u << 2)
+#define SIGIL_FEATURE_GBA_FLASH   (1u << 3)
+#define SIGIL_FEATURE_GBA_FLASH1M (1u << 4)
+#define SIGIL_FEATURE_GBA_EEPROM  (1u << 5)
+/* A GB cart whose game keeps scratch buffers in its RAM, which the save's
+ * identity leaves out: header destination 0x14A is 0x01 and the title and
+ * manufacturer code at 0x134-0x142 are Pokemon Red, Blue or Yellow (GEN1),
+ * Gold or Silver (GOLD_SILVER), or Crystal (CRYSTAL), as the international
+ * releases have them. At most one is set. See docs/platforms/gb.md,
+ * "Scratch RAM". */
+#define SIGIL_FEATURE_GB_SCRATCH_GEN1        (1u << 6)
+#define SIGIL_FEATURE_GB_SCRATCH_GOLD_SILVER (1u << 7)
+#define SIGIL_FEATURE_GB_SCRATCH_CRYSTAL     (1u << 8)
 
 typedef enum {
     SIGIL_SOURCE_BINARY = 0,
@@ -196,8 +230,8 @@ struct sigil_io {
 };
 
 /* Per-platform external resources. All fields optional; missing context
- * degrades gracefully (encrypted Switch falls back to filename source,
- * etc.) rather than failing. */
+ * degrades gracefully (encrypted Switch reads only its tickets, then the
+ * filename source when the caller asks for it, etc.) rather than failing. */
 typedef struct {
     uint32_t       struct_version;
 
@@ -347,7 +381,10 @@ typedef struct {
                                                    that profile, and saves outside the root are out of reach */
     const char               *profile;          /* layouts with profiles: the profile whose saves to take, by
                                                    sigil_save_profile.id, or NULL to take the one the root path
-                                                   names, else the only one the emulator lists */
+                                                   names, else the only one the emulator lists. An id names a
+                                                   listed profile ignoring case. One that names none and that the
+                                                   emulator could never list (Xenia: anything but 16 uppercase
+                                                   hex digits, or the all-zero XUID) is SIGIL_ERR_INVALID_ARG */
 } sigil_save_request;
 
 typedef struct {
@@ -362,7 +399,7 @@ typedef struct {
     size_t             unkeyed_count;
     char               artifact[SIGIL_SAVE_ENTRY_MAX]; /* file name the unit travels under */
     char               content_hash[33];    /* RomM content_hash of the artifact; empty when not hashed */
-    char               identity_hash[33];   /* content_hash over the non-rtc members */
+    char               identity_hash[33];   /* content_hash over the non-rtc members; the md5 of the one left, when one is */
     sigil_save_alternate *alternates;       /* files other option values would take; see sigil_save_alternate */
     size_t             alternate_count;
 } sigil_save_unit;
@@ -545,11 +582,23 @@ SIGIL_API void sigil_card_repair_report_free(sigil_card_repair_report *report);
  * travels to RomM; restore puts a unit back. sigil keeps what it must remember
  * between calls in an opaque state blob the caller stores and passes back. */
 
-/* Writes one file of the save root; returns 0 on success. */
+/* Writes one file of the save root, whole; returns 0 on success. A write that
+ * fails must leave the file as it was, as writing a temporary file beside it
+ * and renaming it over does: one file can hold every game's saves (a shared
+ * card, a drive image). */
 typedef int (*sigil_save_write_fn)(void *ctx, const char *relative_path, const uint8_t *data, size_t len);
 
 /* Removes one file of the save root; returns 0 on success. */
 typedef int (*sigil_save_remove_fn)(void *ctx, const char *relative_path);
+
+/* Writes `len` bytes at byte `offset` of one file of the save root, which is
+ * there already, and returns 0 once they are stored, as after fsync: the rest
+ * of the file stays as it is, and it grows when the range ends past its end.
+ * A missing file is a failure, not created. Restore orders these writes so
+ * that a stop after any of them leaves the file whole, and the order holds
+ * through a power cut only when each write is stored before the next. */
+typedef int (*sigil_save_write_at_fn)(void *ctx, const char *relative_path, uint64_t offset, const uint8_t *data,
+                                      size_t len);
 
 typedef enum {
     SIGIL_SYNC_MANAGED = 0,   /* the caller launches the game and calls collect after it closes */
@@ -575,7 +624,7 @@ typedef struct {
 } sigil_sync_companion_result;
 
 typedef struct {
-    uint32_t              struct_version;   /* SIGIL_SYNC_REQUEST_V1 */
+    uint32_t              struct_version;   /* SIGIL_SYNC_REQUEST_V2, or _V1 for a request that ends before write_at */
     sigil_save_request    save;             /* the emulator, content, options and save root; save.open is required */
     const char *const    *game_ids;         /* every id the game's saves may carry, as disc identification reports
                                                them: all discs of a set, and PCSX2's memcardFilters for PS2 */
@@ -602,10 +651,21 @@ typedef struct {
     size_t                companion_count;
     int                   repair;           /* 1 to rebuild the damaged structures that SIGIL_ERR_DAMAGED
                                                named, instead of refusing */
+    sigil_save_write_at_fn write_at;        /* restore, optional, read when struct_version is SIGIL_SYNC_REQUEST_V2:
+                                               writes part of a file of the save root, called with write_ctx. Where
+                                               every game's saves sit inside one large file (an Xbox hard-disk image),
+                                               restore writes only the parts of it that change, in place, and reads
+                                               them back. NULL, or a V1 request, has restore hand the whole file to
+                                               `write` instead. A restore that stops between two of these writes (the
+                                               process ends, the power goes, or a write fails) leaves every reference
+                                               in the image counted and every chain on the drive whole, each of the
+                                               game's save folders on it either as it was or as the unit has it; space
+                                               nothing refers to is all it can leave behind (docs/platforms/xbox.md,
+                                               "Writing in parts") */
 } sigil_sync_request;
 
 typedef struct {
-    uint32_t  struct_version;                  /* SIGIL_SYNC_RESULT_V1 */
+    uint32_t  struct_version;                  /* SIGIL_SYNC_RESULT_V2 */
     char      artifact[SIGIL_SAVE_ENTRY_MAX];  /* the file name the unit travels under */
     int       shape;                           /* sigil_save_shape */
     uint8_t  *data;                            /* collect: the unit to upload; NULL when the game has no saves */
@@ -647,6 +707,11 @@ typedef struct {
                                                   marker out of the saves; content_hash still covers it */
     size_t    unowned_changed;                 /* collect: the first this many of `unowned` are new or rewritten since
                                                   the last collect saw their volume; 0 on a volume no collect has seen */
+    char      maker_profile[SIGIL_PROFILE_ID_MAX]; /* struct_version >= SIGIL_SYNC_RESULT_V2, layouts with profiles:
+                                                  the profile the account saves' own records name as the one they
+                                                  were made under, as Xenia keeps it in a save's header; collect
+                                                  reads the saves on disk, restore the unit. Empty when the
+                                                  records name none, or name different ones */
 } sigil_sync_result;
 
 /* Gathers the game's saves into one unit. Returns SIGIL_ERR_DAMAGED as restore does, and
@@ -689,6 +754,12 @@ SIGIL_API int  sigil_collect(const sigil_sync_request *req, sigil_sync_result **
 SIGIL_API int  sigil_restore(const sigil_sync_request *req, const uint8_t *unit, size_t unit_len,
                              sigil_sync_result **out);
 SIGIL_API void sigil_sync_result_free(sigil_sync_result *result);
+/* Writes to `out` the identity_hash that collect and restore give `unit`, a unit as RomM stores it,
+ * for a game on `platform` (a slug) whose ROM has the SIGIL_FEATURE_* bits `features`. Only gb and
+ * gbc: another platform returns SIGIL_ERR_UNSUPPORTED_FORMAT. A unit sigil can't read returns its
+ * error, as restore would. */
+SIGIL_API int  sigil_unit_identity(const char *platform, uint32_t features, const uint8_t *unit, size_t unit_len,
+                                   char out[33]);
 
 SIGIL_API const char *sigil_strerror(int code);
 SIGIL_API const char *sigil_version(void);

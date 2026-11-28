@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 /* Shared by the sync sources: sync.c (collect and restore), sync_state.c,
  * the card kinds in sync_kind_*.c, sync_units.c, and the placement paths in
- * sync_cards.c, sync_folder_cards.c, sync_volumes.c, sync_gci_folder.c and
- * sync_profiles.c. */
+ * sync_cards.c, sync_folder_cards.c, sync_volumes.c, sync_gci_folder.c,
+ * sync_profiles.c and sync_xbox.c. */
 #ifndef SIGIL_SYNC_INTERNAL_H
 #define SIGIL_SYNC_INTERNAL_H
 
@@ -173,6 +173,9 @@ int sigil_sync_put(const sigil_sync_request *req, const char *path, const uint8_
 /** Removes `path` through the request; SIGIL_ERR_IO when that fails or
  *  `path` would leave the save root. */
 int sigil_sync_drop(const sigil_sync_request *req, const char *path);
+/** The request's callback for writing part of a file, or NULL when it gives
+ *  none: a request older than SIGIL_SYNC_REQUEST_V2 has no such field. */
+sigil_save_write_at_fn sigil_sync_write_at(const sigil_sync_request *req);
 /**
  * The length of `unit` without the hardcore marker Argosy appended to
  * uploads before it used sigil ({"h":true,...}, the JSON's length as a
@@ -180,6 +183,36 @@ int sigil_sync_drop(const sigil_sync_request *req, const char *path);
  * true when it had one.
  */
 size_t sigil_sync_unmarked_len(const uint8_t *unit, size_t len, bool *marked);
+
+/* ---- a cartridge's save file (sync_cart.c) ------------------------------------ */
+
+/* The game's save file the layout row names, there or expected. */
+typedef struct {
+    char path[SIGIL_SAVE_PATH_MAX];   /* "" when the row names none */
+    bool present;
+} sigil_sync_cart_file;
+
+/** The row's primary file for the game: the first one there, else the first expected. */
+int sigil_sync_cart_file_of(const sigil_sync_request *req, sigil_sync_cart_file *f);
+/**
+ * All of `f`'s bytes, up to `cap`. `*data` is NULL when `f` isn't there or is
+ * empty, since an empty file holds no save; SIGIL_ERR_IO when it is there
+ * and won't open.
+ */
+int sigil_sync_cart_read(const sigil_sync_request *req, const sigil_sync_cart_file *f, size_t cap, uint8_t **data,
+                         size_t *len);
+/** Names the unit `{stem}{ext}` in r->artifact, the stem the content path's. */
+void sigil_sync_cart_artifact(const sigil_sync_request *req, const char *ext, sigil_sync_result *r);
+/** Takes one member of a zipped unit into the converter's save; SIGIL_OK, or the refusal. */
+typedef int (*sigil_sync_cart_take_fn)(void *ctx, const sigil_zip_member *m);
+/**
+ * The members of a zipped unit, each up to `max_member` bytes, handed to
+ * `take` in the zip's order. Stops at the first refusal and names that
+ * member in r->problem. On success sets r->content_hash to RomM's hash over
+ * every member's name and md5. r->shape is the caller's.
+ */
+int sigil_sync_cart_read_zip(const uint8_t *unit, size_t len, size_t max_member, sigil_sync_cart_take_fn take,
+                             void *ctx, sigil_sync_result *r);
 
 /* ---- N64 cartridges (sync_n64.c) ---------------------------------------------- */
 
@@ -204,6 +237,72 @@ int sigil_sync_collect_gb(sigil_sync_ctx *x, sigil_sync_result *r);
  */
 int sigil_sync_restore_gb(sigil_sync_ctx *x, const uint8_t *unit, size_t len, size_t received_len,
                           sigil_sync_result *r, char local_identity[33]);
+/** The identity collect and restore give a GB/GBC unit, for a cart with the SIGIL_FEATURE_* bits `features`. */
+int sigil_sync_identity_gb(uint32_t features, const uint8_t *unit, size_t len, char out[33]);
+
+/* ---- Xbox 360 content headers (sync_xbox360.c) -------------------------------- */
+
+/** The sigil_header_form `h` is in, read from its content; SIGIL_HEADER_NONE for one neither Xenia reads. */
+int  sigil_x360_header_form(const uint8_t *h, size_t len);
+/**
+ * `h` as a folder of `form` keeps it, malloc'd into `*out`: built the way that
+ * emulator builds it from the other form, else as it is. `package` is the save
+ * folder's name; `profile`, the XUID of the account folder it goes in, or NULL
+ * for a device folder. A header in neither form is copied as it is.
+ */
+int  sigil_x360_header_to(int form, const uint8_t *h, size_t len, const char *package, const char *profile,
+                          uint8_t **out, size_t *out_len);
+/** The MD5 over what both forms carry; false for a header in neither form. */
+bool sigil_x360_header_md5(const uint8_t *h, size_t len, const char *package, char md5[33]);
+/** The XUID the header names as the one it was made under, or "". */
+void sigil_x360_header_maker(const uint8_t *h, size_t len, char out[SIGIL_PROFILE_ID_MAX]);
+
+/* ---- Nintendo DS cartridges (sync_nds.c) -------------------------------------- */
+
+/** Collect on DS: the save chip's raw bytes, from a raw file or a DeSmuME .dsv. */
+int sigil_sync_collect_nds(sigil_sync_ctx *x, sigil_sync_result *r);
+/**
+ * Restore on DS: the raw save, or a .dsv with DeSmuME's footer as clients
+ * uploaded it before sigil, written as the request's emulator keeps it.
+ */
+int sigil_sync_restore_nds(sigil_sync_ctx *x, const uint8_t *unit, size_t len, size_t received_len,
+                           sigil_sync_result *r, char local_identity[33]);
+/* ---- Mega Drive, 32X, Master System and Game Gear cartridges (sync_genesis.c) -- */
+
+/** Collect on the Sega carts: the save RAM as the emulator's file holds it. */
+int sigil_sync_collect_genesis(sigil_sync_ctx *x, sigil_sync_result *r);
+/**
+ * Restore on the Sega carts: the save RAM from any core's file, or a zip of it
+ * as save.sram, written in the form of the request's core (Genesis Plus GX's
+ * without trailing 0xFF, PicoDrive's padded with 0xFF to its size where
+ * sigil knows it).
+ */
+int sigil_sync_restore_genesis(sigil_sync_ctx *x, const uint8_t *unit, size_t len, size_t received_len,
+                               sigil_sync_result *r, char local_identity[33]);
+
+/* ---- Game Boy Advance cartridges (sync_gba.c) --------------------------------- */
+
+/** Collect on GBA: the save chip's bytes at the chip's size, from any emulator's file. */
+int sigil_sync_collect_gba(sigil_sync_ctx *x, sigil_sync_result *r);
+/**
+ * Restore on GBA: sigil's unit, or any emulator's file as clients uploaded
+ * it before sigil, written in the form the request's emulator keeps.
+ */
+int sigil_sync_restore_gba(sigil_sync_ctx *x, const uint8_t *unit, size_t len, size_t received_len,
+                           sigil_sync_result *r, char local_identity[33]);
+
+/* ---- the original Xbox's hard drive (sync_xbox.c) ------------------------------ */
+
+/** Collect on Xbox: a zip of the game's UDATA and TDATA folders off the drive image's E:. */
+int sigil_sync_collect_xbox(sigil_sync_ctx *x, sigil_sync_result *r);
+/**
+ * Restore on Xbox: the unit's files replace the game's two folders on the
+ * drive image, which is written back and read back: only the parts that
+ * changed when the request can write part of a file, else the whole file.
+ * SIGIL_ERR_NO_TARGET, naming the drive, when the save root holds none.
+ */
+int sigil_sync_restore_xbox(sigil_sync_ctx *x, const uint8_t *unit, size_t len, sigil_sync_result *r,
+                            char local_identity[33]);
 
 enum { SYNC_OWN_GAME, SYNC_OWN_OTHER, SYNC_OWN_NONE, SYNC_OWN_COMPANION };
 
@@ -251,6 +350,10 @@ int sigil_sync_identity_where(const sigil_sync_saves *l, int owner, const char *
 int sigil_sync_identity_of(const sigil_sync_saves *l, char out[33]);
 /** As sigil_sync_identity_where for `owner` (and companion `key`), or "" when there are none. */
 int sigil_sync_identity_or_empty(const sigil_sync_saves *l, int owner, const char *key, char out[33]);
+/** RomM's hash of a zip unit: sigil_named_hash over each member's name and the MD5 of its bytes. */
+int sigil_sync_members_hash(const sigil_zip_member *members, size_t n, char out[33]);
+/** RomM's identity of a zip unit of `members`, none of them a clock: sigil_identity_hash over them. */
+int sigil_sync_members_identity(const sigil_zip_member *members, size_t n, char out[33]);
 
 /** The name each device's volume travels under in a unit; "" for none. */
 const char *sigil_sync_device_name(int device);

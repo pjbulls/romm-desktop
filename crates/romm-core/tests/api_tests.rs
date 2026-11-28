@@ -795,3 +795,49 @@ async fn a_snapshot_save_the_server_refuses_is_an_error_not_an_empty_file() {
     assert_eq!(e.status(), Some(404), "{e}");
     assert_eq!(count(&server, "GET", SAVE_PATH).await, 1, "a 404 is not a glitch, so it is not repeated");
 }
+
+// -- what a heartbeat that can't be read says about the server ---------------------------------------
+
+/// `capabilities()` against a heartbeat that answers `answer`, with nothing known of the server before.
+async fn capabilities_after(answer: ResponseTemplate) -> romm_core::Result<romm_core::api::types::Capabilities> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(answer).mount(&server).await;
+    authed(&server).capabilities().await
+}
+
+#[tokio::test]
+async fn a_heartbeat_that_is_not_a_romm_one_means_an_older_server() {
+    // The server answered, with something no RomM heartbeat is: nothing to retry, and older ones are real.
+    for answer in [
+        ResponseTemplate::new(404),
+        ResponseTemplate::new(403).set_body_string("blocked by the proxy"),
+        ResponseTemplate::new(200).set_body_string("<html>sign in</html>"),
+    ] {
+        let c = capabilities_after(answer).await.expect("an answer, even an unfamiliar one, is not an error");
+        assert!(!c.snapshots);
+    }
+}
+
+#[tokio::test]
+async fn a_heartbeat_that_gets_no_answer_is_an_error_not_an_older_server() {
+    for answer in [ResponseTemplate::new(500), ResponseTemplate::new(503), ResponseTemplate::new(408), ResponseTemplate::new(429)] {
+        let status = answer.clone();
+        let err = capabilities_after(answer).await.expect_err("a server in trouble says nothing about what it can do");
+        assert!(err.status().is_some(), "{status:?} -> {err:?}");
+    }
+    // No connection at all.
+    let nobody = RommClient::new("http://127.0.0.1:1", Some("rmm_t".into()), false).unwrap();
+    assert!(nobody.capabilities().await.is_err());
+}
+
+#[tokio::test]
+async fn a_heartbeat_read_once_is_not_forgotten_when_the_next_one_fails() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"SAVE_SYNC": {}}))).up_to_n_times(1).mount(&server).await;
+    let c = authed(&server);
+    assert!(c.capabilities().await.unwrap().snapshots);
+    // Within the cache's lifetime the server isn't asked again, so a failure after it changes nothing either.
+    Mock::given(method("GET")).and(path("/api/heartbeat")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    assert!(c.capabilities().await.unwrap().snapshots);
+    assert_eq!(count(&server, "GET", "/api/heartbeat").await, 1);
+}

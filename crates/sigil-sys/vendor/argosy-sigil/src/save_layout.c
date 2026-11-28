@@ -298,6 +298,13 @@ static const sigil_layout_member MELONDS_MEMBERS[] = {
     M("{stem}.sav", PRIMARY),
 };
 
+/* DeSmuME (libretro/desmume, mc.cpp BackupDevice) writes {stem}.dsv itself,
+ * in the save folder the frontend gives it: the raw save, then a 122-byte
+ * footer. */
+static const sigil_layout_member DESMUME_MEMBERS[] = {
+    M("{stem}.dsv", PRIMARY),
+};
+
 /* Standalone mGBA, VBA-M, SameBoy and Gearboy keep a GB or GBC cart's RAM in
  * {stem}.sav with the MBC3 clock appended (mGBA mbc.c, VBA-M gb.cpp, SameBoy
  * Core/gb.c, Gearboy MBC3MemoryRule.cpp). mGBA, VBA-M and SameBoy save
@@ -491,6 +498,63 @@ static const sigil_layout_profiles RPCS3_PROFILES = {
 };
 static const char *const RPCS3_SUBDIRS[] = { "dev_hdd0/home" };
 
+/* Xenia Canary, Xenia Edge and XenDroid. A save is
+ * content/<XUID>/<title>/00000001/<save>/ (src/xenia/kernel/xam/content_manager.cc
+ * ResolvePackageRoot, in Edge at 4ad875a, Canary at 27d11a2 and XenDroid at
+ * 779680a under emulator-core/src/main/cpp/xenia/), and its header
+ * content/<XUID>/<title>/Headers/00000001/<save>.header (Edge content_manager.cc
+ * PackageHeaderPath at 4ad875a, Canary xcontent/xcontent_package_directory.cc
+ * ComputeHeaderPath at 27d11a2, XenDroid content_manager.cc
+ * ResolvePackageHeaderPath at 779680a). A save the game marks shared, or makes
+ * with no one signed in, sits under the all-zero XUID. A profile is
+ * content/<XUID>/FFFE07D1/00010000/<XUID>/ (profile_manager.cc GetProfilePath,
+ * the same three commits); the game's achievements and the profile's settings
+ * stay there and don't travel. A unit from before sigil is the content folder
+ * zipped as it is, <XUID>/...: its save folders restore, its profile folders
+ * and gamer pictures (each <XUID>/FFFE07D1/) are left out. The device areas
+ * come first so the all-zero XUID of such a unit is never taken for a profile.
+ * Upstream Xenia keeps content/<title>/<type>/<save>/ with no XUID and no
+ * header (xenia-project/xenia content_manager.cc ResolvePackageRoot at
+ * 95a5c3e), so none of these rows is its.
+ *
+ * The headers' form differs by emulator (sync_xbox360.c). Canary writes the
+ * whole container header (content_manager.cc ExtractContentHeader at 27d11a2),
+ * and rewrites an aggregate in that form when the game closes the save
+ * (xcontent/xcontent_package_directory.cc FillHeader). XenDroid writes
+ * XCONTENT_AGGREGATE_DATA alone and reads only its first 0x148 bytes
+ * (content_manager.cc WriteContentHeaderFile and ReadContentHeaderFile at
+ * 779680a). Edge writes the aggregate, reads either form (ReadContentHeaderFile
+ * at 4ad875a), and writes a header only for a save it creates (xam_content.cc
+ * xeXamContentCreate), so it keeps a container as it is. */
+#define XENIA_AREAS(form)                                                                                          \
+    {                                                                                                              \
+        { "content/0000000000000000/{save_id}/00000001/", "device/{save_id}/00000001/", SIGIL_SAVE_AREA_DEVICE,    \
+          false, "0000000000000000/{save_id}/00000001/", false, SIGIL_HEADER_NONE },                             \
+        { "content/0000000000000000/{save_id}/Headers/00000001/", "device/{save_id}/Headers/00000001/",          \
+          SIGIL_SAVE_AREA_DEVICE, false, "0000000000000000/{save_id}/Headers/00000001/", false, (form) },        \
+        { "content/{profile}/{save_id}/00000001/", "{save_id}/00000001/", SIGIL_SAVE_AREA_ACCOUNT, false,         \
+          "{profile}/{save_id}/00000001/", false, SIGIL_HEADER_NONE },                                            \
+        { "content/{profile}/{save_id}/Headers/00000001/", "{save_id}/Headers/00000001/", SIGIL_SAVE_AREA_ACCOUNT, \
+          false, "{profile}/{save_id}/Headers/00000001/", false, (form) },                                        \
+    }
+static const sigil_layout_area XENIA_CONTAINER_AREAS[] = XENIA_AREAS(SIGIL_HEADER_XCONTENT_CONTAINER);
+static const sigil_layout_area XENIA_AGGREGATE_AREAS[] = XENIA_AREAS(SIGIL_HEADER_XCONTENT_AGGREGATE);
+static const sigil_layout_area XENIA_EITHER_AREAS[] = XENIA_AREAS(SIGIL_HEADER_XCONTENT_EITHER);
+static const char *const XENIA_DROPPED[] = { "{profile}/FFFE07D1/" };
+/* A profile is a folder holding its Account: FindProfiles takes each folder
+ * holding the profile package, LoadAccount reads the Account in it, and Login
+ * signs in only a profile whose Account loaded (profile_manager.cc, the same
+ * three commits), so no save is made under a folder without one. */
+#define XENIA_PROFILES(areas)                                                                                \
+    {                                                                                                        \
+        "content", SIGIL_PROFILES_XENIA, "content/{profile}/FFFE07D1/00010000/{profile}/Account", (areas),   \
+            COUNT(areas), NULL, 0, false, false, NULL, NULL, 0, NULL, XENIA_DROPPED, COUNT(XENIA_DROPPED),   \
+    }
+static const sigil_layout_profiles XENIA_CANARY_PROFILES = XENIA_PROFILES(XENIA_CONTAINER_AREAS);
+static const sigil_layout_profiles XENIA_EDGE_PROFILES = XENIA_PROFILES(XENIA_EITHER_AREAS);
+static const sigil_layout_profiles XENDROID_PROFILES = XENIA_PROFILES(XENIA_AGGREGATE_AREAS);
+static const char *const XENIA_SUBDIRS[] = { "content" };
+
 /* mupen64plus 2.6+, RMG and simple64 (mupen64plus-core src/main/main.c
  * get_save_filename): {goodname[:32]}-{MD5[:8]} from mupen64plus.ini, or the
  * header name for a ROM the database lacks, so the hash suffix is what sigil
@@ -544,6 +608,17 @@ static const sigil_layout_profiles PSP_FOLDERS = {
 };
 static const char *const PSP_SUBDIRS[] = { "PSP/SAVEDATA" };
 
+/* xemu (xemu-project/xemu at v0.8.136) runs the console's own kernel on one
+ * hard-disk image every game shares: the file its `hdd_path` setting names
+ * (config_spec.yml sys.files.hdd_path, a string with no default; system/vl.c
+ * attaches no drive when it is empty). X1 BOX (izzy2lost/xemu at 57bc6d6,
+ * SetupWizardActivity.kt), xemu on Android, copies the image the user picks,
+ * raw or qcow2, into its files folder as hdd.img. The save root is the
+ * folder holding the image. */
+static const sigil_layout_shared XEMU_SHARED[] = { S("{xemu_hdd}") };
+static const sigil_layout_shared X1BOX_SHARED[] = { S("{x1box_hdd}") };
+#define ROW_XBOX_DRIVE(l, s) { l, "xbox", NULL, 0, s, COUNT(s), NULL, 0, NULL, NULL, true }
+
 #define ROW_PROFILES(l, p, d, pr) { l, p, NULL, 0, NULL, 0, d, COUNT(d), NULL, &pr }
 
 #define ROW(l, p, m)            { l, p, m, COUNT(m), NULL, 0, NULL, 0 }
@@ -588,6 +663,7 @@ static const sigil_layout LAYOUTS[] = {
     ROW("pokemini", NULL, POKEMINI_MEMBERS),
     ROW("handy", NULL, HANDY_MEMBERS),
     ROW("melonds", NULL, MELONDS_MEMBERS),
+    ROW("desmume", NULL, DESMUME_MEMBERS),
     ROW_FULL("fbneo", NULL, FBNEO_MEMBERS, FBNEO_SHARED, FBNEO_SUBDIRS),
     ROW_DIRS("mame2003_plus", NULL, MAME2003_PLUS_MEMBERS, MAME2003_PLUS_SUBDIRS),
     ROW("dosbox_pure", NULL, DOSBOX_PURE_MEMBERS),
@@ -620,9 +696,14 @@ static const sigil_layout LAYOUTS[] = {
     /* aPS3e (aenu1/aps3e) and ARMSX3 keep RPCS3's tree under their config/ folder, user 00000001. */
     ROW_PROFILES("aps3e", "ps3", RPCS3_SUBDIRS, RPCS3_PROFILES),
     ROW_PROFILES("armsx3", "ps3", RPCS3_SUBDIRS, RPCS3_PROFILES),
+    ROW_PROFILES("xenia_canary", "xbox360", XENIA_SUBDIRS, XENIA_CANARY_PROFILES),
+    ROW_PROFILES("xenia_edge", "xbox360", XENIA_SUBDIRS, XENIA_EDGE_PROFILES),
+    ROW_PROFILES("xendroid", "xbox360", XENIA_SUBDIRS, XENDROID_PROFILES),
     ROW_PROFILES("ppsspp", "psp", PSP_SUBDIRS, PSP_FOLDERS),
     ROW_PROFILES("ppsspp_standalone", "psp", PSP_SUBDIRS, PSP_FOLDERS),
     ROW_PROFILES("psp_console", "psp", PSP_SUBDIRS, PSP_FOLDERS),
+    ROW_XBOX_DRIVE("xemu", XEMU_SHARED),
+    ROW_XBOX_DRIVE("x1box", X1BOX_SHARED),
 };
 
 const char *sigil_layout_platform(const char *slug) {
@@ -637,6 +718,9 @@ const char *sigil_layout_platform(const char *slug) {
     if (strcmp(slug, "dc") == 0) return "dreamcast";
     if (strcmp(slug, "ngc") == 0 || strcmp(slug, "gc") == 0) return "gamecube";
     if (strcmp(slug, "vita") == 0) return "psvita";
+    if (strcmp(slug, "sega32") == 0) return "32x";
+    if (strcmp(slug, "mastersystem") == 0) return "sms";
+    if (strcmp(slug, "gg") == 0) return "gamegear";
     return slug;
 }
 
@@ -704,7 +788,7 @@ static void note_variables(sigil_layout_info *info, const char *template_) {
         if (!sigil_save_variable_option(info->id, open + 1, len, key, &fallback)) continue;
         sigil_layout_option *o = option_for(info, key);
         if (!o) continue;
-        if (!o->default_value[0]) snprintf(o->default_value, sizeof(o->default_value), "%s", fallback);
+        if (!o->default_value[0] && fallback) snprintf(o->default_value, sizeof(o->default_value), "%s", fallback);
         if (len == 9 && strncmp(open + 1, "cart_size", 9) == 0) {
             const char *values[SIGIL_LAYOUT_OPTION_VALUES];
             size_t n = sigil_gpgx_cart_values(values, SIGIL_LAYOUT_OPTION_VALUES);

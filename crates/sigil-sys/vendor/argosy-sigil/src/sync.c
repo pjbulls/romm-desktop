@@ -5,7 +5,7 @@
 
 static sigil_sync_result *new_result(void) {
     sigil_sync_result *r = (sigil_sync_result *)calloc(1, sizeof(*r));
-    if (r) r->struct_version = SIGIL_SYNC_RESULT_V1;
+    if (r) r->struct_version = SIGIL_SYNC_RESULT_V2;
     return r;
 }
 
@@ -21,8 +21,12 @@ static int hand_back(sigil_sync_result *r, int rc, sigil_sync_result **out) {
 }
 
 static bool request_valid(const sigil_sync_request *req) {
-    return req && req->struct_version == SIGIL_SYNC_REQUEST_V1 && req->save.open && req->save.content_path &&
-           req->save.listing;
+    return req && (req->struct_version == SIGIL_SYNC_REQUEST_V1 || req->struct_version == SIGIL_SYNC_REQUEST_V2) &&
+           req->save.open && req->save.content_path && req->save.listing;
+}
+
+sigil_save_write_at_fn sigil_sync_write_at(const sigil_sync_request *req) {
+    return req->struct_version >= SIGIL_SYNC_REQUEST_V2 ? req->write_at : NULL;
 }
 
 /* ---- collect ------------------------------------------------------------------ */
@@ -161,9 +165,10 @@ static int finish(sigil_sync_ctx *x, sigil_sync_result *r, bool collecting) {
 }
 
 /* The cartridge platform sigil converts the request's saves for: "n64",
- * "gb" or "gbc"; NULL for any other platform. */
+ * "gb", "gbc", "nds", "genesis", "32x", "sms", "gamegear" or "gba"; NULL
+ * for any other platform. */
 static const char *cart_platform(const sigil_sync_request *req) {
-    static const char *const CARTS[] = { "n64", "gb", "gbc" };
+    static const char *const CARTS[] = { "n64", "gb", "gbc", "nds", "genesis", "32x", "sms", "gamegear", "gba" };
     const char *slug = req->save.platform ? sigil_layout_platform(req->save.platform) : NULL;
     for (size_t i = 0; slug && i < sizeof(CARTS) / sizeof(CARTS[0]); i++) {
         if (strcmp(slug, CARTS[i]) == 0) return CARTS[i];
@@ -171,14 +176,41 @@ static const char *cart_platform(const sigil_sync_request *req) {
     return NULL;
 }
 
+int sigil_unit_identity(const char *platform, uint32_t features, const uint8_t *unit, size_t unit_len,
+                        char out[33]) {
+    if (!out || (!unit && unit_len)) return SIGIL_ERR_INVALID_ARG;
+    out[0] = '\0';
+    const char *slug = platform ? sigil_layout_platform(platform) : NULL;
+    if (!slug || (strcmp(slug, "gb") != 0 && strcmp(slug, "gbc") != 0)) return SIGIL_ERR_UNSUPPORTED_FORMAT;
+    return sigil_sync_identity_gb(features, unit, unit_len, out);
+}
+
 static bool n64_cart(const sigil_sync_request *req) {
     const char *cart = cart_platform(req);
     return cart && strcmp(cart, "n64") == 0;
 }
 
-/* Saves kept as plain files: a layout with profiles, or a cartridge's. */
+static bool nds_cart(const sigil_sync_request *req) {
+    const char *cart = cart_platform(req);
+    return cart && strcmp(cart, "nds") == 0;
+}
+
+/* A Mega Drive, 32X, Master System or Game Gear cart. */
+static bool sega_cart(const sigil_sync_request *req) {
+    const char *cart = cart_platform(req);
+    return cart && (strcmp(cart, "genesis") == 0 || strcmp(cart, "32x") == 0 || strcmp(cart, "sms") == 0 ||
+                    strcmp(cart, "gamegear") == 0);
+}
+
+static bool gba_cart(const sigil_sync_request *req) {
+    const char *cart = cart_platform(req);
+    return cart && strcmp(cart, "gba") == 0;
+}
+
+/* Saves kept as plain files: a layout with profiles, a cartridge's, or the
+ * folders on an Xbox drive image. */
 static bool plain_files(const sigil_sync_request *req, const sigil_layout *layout) {
-    return layout->profiles || cart_platform(req);
+    return layout->profiles || layout->xbox_drive || cart_platform(req);
 }
 
 /* The kind for the request: saves kept as plain files need nothing from a
@@ -187,7 +219,7 @@ static const sigil_sync_kind *kind_for(const sigil_sync_request *req, const sigi
                                        sigil_sync_kind *files) {
     if (!plain_files(req, layout)) return sigil_sync_kind_for(req);
     memset(files, 0, sizeof(*files));
-    files->platform = layout->profiles ? layout->platform : cart_platform(req);
+    files->platform = layout->profiles || layout->xbox_drive ? layout->platform : cart_platform(req);
     files->has_ids = true;
     return req->companion_count ? NULL : files;
 }
@@ -207,7 +239,11 @@ int sigil_collect(const sigil_sync_request *req, sigil_sync_result **out) {
     if (rc == SIGIL_OK) rc = sigil_save_alternates(&req->save, &r->alternates, &r->alternate_count);
     if (rc == SIGIL_OK) {
         rc = layout->profiles ? sigil_sync_collect_profiles(&x, layout->profiles, r)
+           : layout->xbox_drive ? sigil_sync_collect_xbox(&x, r)
            : n64_cart(req)    ? sigil_sync_collect_n64(&x, r)
+           : nds_cart(req)    ? sigil_sync_collect_nds(&x, r)
+           : sega_cart(req)   ? sigil_sync_collect_genesis(&x, r)
+           : gba_cart(req)    ? sigil_sync_collect_gba(&x, r)
            : cart_platform(req) ? sigil_sync_collect_gb(&x, r)
                               : collect_any(&x, r);
     }
@@ -378,7 +414,11 @@ int sigil_restore(const sigil_sync_request *req, const uint8_t *unit, size_t uni
     if (r) r->hardcore_marker = marked;
     if (rc == SIGIL_OK) {
         rc = layout->profiles ? sigil_sync_restore_profiles(&x, layout->profiles, unit, saves_len, r, local_identity)
+           : layout->xbox_drive ? sigil_sync_restore_xbox(&x, unit, saves_len, r, local_identity)
            : n64_cart(req)    ? sigil_sync_restore_n64(&x, unit, saves_len, unit_len, r, local_identity)
+           : nds_cart(req)    ? sigil_sync_restore_nds(&x, unit, saves_len, unit_len, r, local_identity)
+           : sega_cart(req)   ? sigil_sync_restore_genesis(&x, unit, saves_len, unit_len, r, local_identity)
+           : gba_cart(req)    ? sigil_sync_restore_gba(&x, unit, saves_len, unit_len, r, local_identity)
            : cart_platform(req) ? sigil_sync_restore_gb(&x, unit, saves_len, unit_len, r, local_identity)
                               : restore_units(&x, unit, saves_len, unit_len, r, local_identity);
     }

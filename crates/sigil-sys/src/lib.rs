@@ -39,6 +39,8 @@ pub const SIGIL_ERR_KEYS_INCOMPATIBLE: c_int = -17;
 pub const SIGIL_RESULT_V4: u32 = 4;
 pub const SIGIL_SAVE_REQUEST_V1: u32 = 1;
 pub const SIGIL_SYNC_REQUEST_V1: u32 = 1;
+/// Adds `write_at`. This binding sends V1, so Sigil never reads it, and restore hands back whole files.
+pub const SIGIL_SYNC_REQUEST_V2: u32 = 2;
 
 // ---- sizes -------------------------------------------------------------------------------
 
@@ -223,6 +225,8 @@ pub struct sigil_sync_request {
     pub companions: *const sigil_sync_companion,
     pub companion_count: usize,
     pub repair: c_int,
+    /// Read only when `struct_version` is `SIGIL_SYNC_REQUEST_V2`; always `None` here.
+    pub write_at: Option<unsafe extern "C" fn(ctx: *mut c_void, relative_path: *const c_char, offset: u64, data: *const u8, len: usize) -> c_int>,
 }
 
 #[repr(C)]
@@ -254,6 +258,8 @@ pub struct sigil_sync_result {
     pub alternate_count: usize,
     pub hardcore_marker: c_int,
     pub unowned_changed: usize,
+    /// `struct_version` >= 2, layouts with profiles (Xenia): the profile the saves' own records name. Not read here.
+    pub maker_profile: [c_char; SIGIL_PROFILE_ID_MAX],
 }
 
 extern "C" {
@@ -339,7 +345,8 @@ mod layout_tests {
 
     #[test]
     fn sync_request_layout() {
-        assert_eq!(size_of::<sigil_sync_request>(), 232);
+        assert_eq!(size_of::<sigil_sync_request>(), 240);
+        assert_eq!(offset_of!(sigil_sync_request, write_at), 232);
         assert_eq!(offset_of!(sigil_sync_request, save), 8);
         assert_eq!(offset_of!(sigil_sync_request, game_ids), 120);
         assert_eq!(offset_of!(sigil_sync_request, mode), 136);
@@ -354,7 +361,8 @@ mod layout_tests {
 
     #[test]
     fn sync_result_layout() {
-        assert_eq!(size_of::<sigil_sync_result>(), 1064);
+        assert_eq!(size_of::<sigil_sync_result>(), 1128);
+        assert_eq!(offset_of!(sigil_sync_result, maker_profile), 1064);
         assert_eq!(offset_of!(sigil_sync_result, artifact), 4);
         assert_eq!(offset_of!(sigil_sync_result, shape), 260);
         assert_eq!(offset_of!(sigil_sync_result, data), 264);
